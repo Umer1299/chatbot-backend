@@ -1,12 +1,14 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import { redisClient } from '../services/redis.js';
 
 export const sessionRateLimiter = rateLimit({
-  store: new RedisStore({ sendCommand: (...args) => redisClient.call(...args) }),
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.call(...args),
+  }),
   keyGenerator: (req) => {
     const token = req.chatbotToken || req.headers['x-chatbot-token'] || 'anonymous';
-    const ip = req.ip;
+    const ip = ipKeyGenerator(req); // ✅ FIXED
     return `${token}:${ip}`;
   },
   windowMs: 60 * 1000,
