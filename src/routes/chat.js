@@ -12,7 +12,7 @@ import { ALLOWED_MODELS, getModelCreditCost } from '../services/modelPricing.js'
 
 const router = express.Router();
 
-async function getLastMessages(namespace, sessionId, limit = 10) {
+async function getLastMessages(namespace, sessionId, limit = 5) {
   const key = `chat_history:${namespace}:${sessionId}`;
   const history = await redisClient.lrange(key, -limit, -1);
   return history.map(msg => JSON.parse(msg));
