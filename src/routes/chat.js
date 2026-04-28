@@ -61,6 +61,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
     keepAlive = setInterval(() => {
@@ -98,12 +99,14 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
     let context = ragDocs.map(d => d.pageContent).join('\n');
 
-    let input = `System:${finalPrompt}\nContext:${context}\nUser:${message}`;
+    let systemWithContext = `${finalPrompt}\n\nRelevant context:\n${context}`;
+    let input = `System:${systemWithContext}\nUser:${message}`;
     let tokens = countTokens(input, modelName);
 
     while (tokens > 600 && context.length > 200) {
       context = context.slice(0, context.length * 0.8);
-      input = `System:${finalPrompt}\nContext:${context}\nUser:${message}`;
+      systemWithContext = `${finalPrompt}\n\nRelevant context:\n${context}`;
+      input = `System:${systemWithContext}\nUser:${message}`;
       tokens = countTokens(input, modelName);
     }
 
@@ -129,7 +132,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
     const t3 = Date.now();
     const response = await model.invoke([
-      { role: 'system', content: finalPrompt },
+      { role: 'system', content: systemWithContext },
       ...history,
       { role: 'user', content: message }
     ]);
