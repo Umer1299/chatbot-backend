@@ -18,7 +18,9 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => res.send('OK'));
+app.get('/healthz', (req, res) => res.send('OK'));
 app.get('/ready', (req, res) => res.send('Ready'));
+app.get('/readyz', (req, res) => res.send('Ready'));
 
 // ❌ REMOVE global auth
 // app.use('/api', tokenAuth);

@@ -1,0 +1,65 @@
+services:
+  - type: web
+    name: chatflow-backend
+    runtime: node
+    plan: free
+    region: virginia
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: chatflow-redis
+          property: connectionString
+      - key: DEFAULT_MODEL
+        value: gpt-4.1-mini
+      - key: FALLBACK_MODEL
+        value: gpt-4.1-mini
+      - key: MODERATION_ENABLED
+        value: "true"
+      - key: WORKER_CONCURRENCY
+        value: "2"
+
+  - type: worker
+    name: chatflow-file-worker
+    runtime: node
+    plan: starter
+    region: virginia
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm run worker
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: chatflow-redis
+          property: connectionString
+      - key: WORKER_CONCURRENCY
+        value: "2"
+
+  - type: redis
+    name: chatflow-redis
+    plan: starter
+    region: virginia
+    maxmemoryPolicy: allkeys-lru
