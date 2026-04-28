@@ -170,7 +170,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
             handleLLMNewToken(token) {
               fullResponse += token;
               if (!res.writableEnded) {
-                writeSse({ text: token });
+                writeSse({ text: token, token });
               }
             }
           }]

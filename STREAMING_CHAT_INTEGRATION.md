@@ -20,7 +20,7 @@ This backend already supports streaming with Server-Sent Events (SSE) when `stre
 The backend writes plain SSE lines of the form `data: <json>\n\n`:
 
 1. Token chunks:
-   - `{"text":"..."}`
+   - `{"text":"...","token":"..."}` (`text` is preferred; `token` is legacy-compatible)
 2. Final metadata:
    - `{"type":"meta","reply":"...","creditsUsed":...,"inputTokens":...,"outputTokens":...,"model":"..."}`
 3. Completion marker:
@@ -84,9 +84,10 @@ while (true) {
       continue;
     }
 
-    if (payload.text) {
-      assistantText += payload.text;
-      onToken?.(payload.text, assistantText);
+    const chunk = payload.text ?? payload.token;
+    if (chunk) {
+      assistantText += chunk;
+      onToken?.(chunk, assistantText);
       continue;
     }
 
@@ -100,7 +101,7 @@ while (true) {
 ### 3) Render behavior in widget
 
 - Create an empty assistant bubble immediately.
-- Append each `text` chunk to the same bubble (`assistantText`).
+- Append each chunk (`payload.text` preferred, fallback `payload.token`) to the same bubble (`assistantText`).
 - Stop typing indicator when `[DONE]` arrives.
 - Persist final `assistantText` and `meta` to widget-side state/history.
 - If `type=error`, show a retry CTA and keep original user message.
