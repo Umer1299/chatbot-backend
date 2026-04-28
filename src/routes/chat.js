@@ -30,6 +30,15 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const { sessionId, message, model: requestedModel, systemPrompt } = req.body;
   const namespace = req.namespace;
   const isStreaming = req.query.stream === 'true';
+  const writeSse = (payload) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`);
+    }
+  };
+  const cleanupStreamingResources = () => {
+    clearInterval(keepAlive);
+    clearTimeout(timeoutId);
+  };
 
   if (!sessionId || !message) {
     return res.status(400).json({ error: 'Missing sessionId or message' });
@@ -56,10 +65,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
 
   let keepAlive, timeoutId;
+  let clientDisconnected = false;
 
   if (isStreaming) {
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
@@ -70,14 +80,21 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
     timeoutId = setTimeout(() => {
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Timeout' })}\n\n`);
+        writeSse({ type: 'error', message: 'Timeout' });
         res.end();
       }
-      clearInterval(keepAlive);
+      cleanupStreamingResources();
     }, 30000);
   }
 
+  req.on('close', () => {
+    clientDisconnected = true;
+    cleanupStreamingResources();
+  });
+
   async function runModel(modelName) {
+    if (clientDisconnected) throw new Error('Client disconnected');
+
     const t1 = Date.now();
     const history = await getLastMessages(namespace, sessionId);
     console.log(`History fetch: ${Date.now() - t1} ms`);
@@ -123,7 +140,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
             handleLLMNewToken(token) {
               fullResponse += token;
               if (!res.writableEnded) {
-                res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                writeSse({ token });
               }
             }
           }]
@@ -139,7 +156,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     console.log(`OpenAI invoke: ${Date.now() - t3} ms`);
 
     if (!isStreaming || !fullResponse) {
-      fullResponse = response.content || '';
+      fullResponse = typeof response.content === 'string'
+        ? response.content
+        : Array.isArray(response.content)
+          ? response.content.map(part => part.text || '').join('')
+          : '';
     }
 
     await addMessage(namespace, sessionId, 'user', message);
@@ -172,24 +193,29 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   try {
     let result;
+    if (clientDisconnected) return;
+
     try {
       result = await runModel(activeModel);
-    } catch {
-      if (process.env.FALLBACK_MODEL && process.env.FALLBACK_MODEL !== activeModel) {
+    } catch (primaryError) {
+      if (
+        !isStreaming &&
+        process.env.FALLBACK_MODEL &&
+        process.env.FALLBACK_MODEL !== activeModel
+      ) {
         result = await runModel(process.env.FALLBACK_MODEL);
       } else {
-        throw new Error('Model failed');
+        throw primaryError;
       }
     }
 
     if (isStreaming) {
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'meta', ...result })}\n\n`);
-        res.write('data: [DONE]\n\n');
+        writeSse({ type: 'meta', ...result });
+        writeSse('[DONE]');
         res.end();
       }
-      clearInterval(keepAlive);
-      clearTimeout(timeoutId);
+      cleanupStreamingResources();
     } else {
       res.json(result);
     }
@@ -197,11 +223,10 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   } catch (err) {
     if (isStreaming) {
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+        writeSse({ type: 'error', message: err.message });
         res.end();
       }
-      clearInterval(keepAlive);
-      clearTimeout(timeoutId);
+      cleanupStreamingResources();
     } else {
       res.status(500).json({ error: err.message });
     }
