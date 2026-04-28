@@ -7,8 +7,10 @@ This backend already supports streaming with Server-Sent Events (SSE) when `stre
 - Endpoint: `POST /api/chat?stream=true`
 - Required headers:
   - `Content-Type: application/json`
-  - `Authorization: Bearer <chatbot token>`
+  - `x-chatbot-token: <chatbot token>`
 - Body:
+  - `botId` (string)
+  - `userId` (string, optional)
   - `sessionId` (string)
   - `message` (string)
   - optional: `model`, `systemPrompt`
@@ -18,7 +20,7 @@ This backend already supports streaming with Server-Sent Events (SSE) when `stre
 The backend writes plain SSE lines of the form `data: <json>\n\n`:
 
 1. Token chunks:
-   - `{"token":"..."}`
+   - `{"text":"...","token":"..."}` (`text` is preferred; `token` is legacy-compatible)
 2. Final metadata:
    - `{"type":"meta","reply":"...","creditsUsed":...,"inputTokens":...,"outputTokens":...,"model":"..."}`
 3. Completion marker:
@@ -37,9 +39,11 @@ const response = await fetch(`${apiBase}/api/chat?stream=true`, {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
+    'x-chatbot-token': token,
   },
   body: JSON.stringify({
+    botId,
+    userId,
     sessionId,
     message,
     model, // optional
@@ -80,9 +84,10 @@ while (true) {
       continue;
     }
 
-    if (payload.token) {
-      assistantText += payload.token;
-      onToken?.(payload.token, assistantText);
+    const chunk = payload.text ?? payload.token;
+    if (chunk) {
+      assistantText += chunk;
+      onToken?.(chunk, assistantText);
       continue;
     }
 
@@ -96,7 +101,7 @@ while (true) {
 ### 3) Render behavior in widget
 
 - Create an empty assistant bubble immediately.
-- Append each `token` to the same bubble (`assistantText`).
+- Append each chunk (`payload.text` preferred, fallback `payload.token`) to the same bubble (`assistantText`).
 - Stop typing indicator when `[DONE]` arrives.
 - Persist final `assistantText` and `meta` to widget-side state/history.
 - If `type=error`, show a retry CTA and keep original user message.

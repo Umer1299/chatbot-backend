@@ -13,7 +13,21 @@ dotenv.config();
 
 const app = express();
 
-app.use(cors());
+const allowedWidgetOrigins = (process.env.WIDGET_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedWidgetOrigins.length === 0) return callback(null, true);
+    if (allowedWidgetOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-chatbot-token'],
+}));
 app.use(express.json());
 
 app.get('/health', (req, res) => res.send('OK'));
