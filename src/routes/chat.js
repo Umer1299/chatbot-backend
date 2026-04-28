@@ -95,6 +95,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   let keepAlive, timeoutId;
   let clientDisconnected = false;
+  let streamedTokenCount = 0;
 
   if (isStreaming) {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -171,6 +172,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
               fullResponse += token;
               if (!res.writableEnded) {
                 writeSse({ text: token, token });
+                streamedTokenCount += 1;
               }
             }
           }]
@@ -241,6 +243,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
     if (isStreaming) {
       if (!res.writableEnded) {
+        console.log('[stream-chat] streamedTokenCount', streamedTokenCount);
+        if (streamedTokenCount === 0 && result.reply) {
+          console.log('[stream-chat] sending final reply fallback', { length: result.reply.length });
+          writeSse({ text: result.reply });
+        }
         writeSse({ type: 'meta', ...result });
         writeSse('[DONE]');
         res.end();
