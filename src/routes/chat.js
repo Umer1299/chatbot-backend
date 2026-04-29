@@ -171,6 +171,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
             handleLLMNewToken(token) {
               fullResponse += token;
               if (!res.writableEnded) {
+                // Send both keys for compatibility with old and new clients.
                 writeSse({ text: token, token });
                 streamedTokenCount += 1;
               }
