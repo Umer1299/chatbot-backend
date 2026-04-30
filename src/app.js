@@ -7,6 +7,10 @@ import upsertRoutes from './routes/upsert.js';
 import chatbotsRoutes from './routes/chatbots.js';
 import moderateRoutes from './routes/moderate.js';
 import leadRoutes from './routes/lead.js';
+import authRoutes from './api/auth.js';
+import scrapeRoutes from './api/scrape.js';
+import leadsRoutes from './api/leads.js';
+import businessRoutes from './api/business.js';
 import { sessionRateLimiter } from './middleware/rateLimiter.js';
 
 dotenv.config();
@@ -42,5 +46,9 @@ app.use('/api/upsert', upsertRoutes);
 app.use('/api/chatbots', chatbotsRoutes);
 app.use('/api/moderate', moderateRoutes);
 app.use('/api/lead', leadRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/scrape', scrapeRoutes);
+app.use('/api/leads', leadsRoutes);
+app.use('/api/business', businessRoutes);
 
 export default app;
