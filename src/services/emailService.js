@@ -1,6 +1,19 @@
 import { Resend } from 'resend';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resendClient = null;
+
+function getResendClient() {
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('RESEND_API_KEY is not configured. Email not sent.');
+    return null;
+  }
+
+  if (!resendClient) {
+    resendClient = new Resend(process.env.RESEND_API_KEY);
+  }
+
+  return resendClient;
+}
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -28,7 +41,9 @@ function canSendEmail(context) {
 }
 
 export async function sendLeadAlert(config, lead) {
-  if (!canSendEmail('sendLeadAlert')) return;
+  if (!canSendEmail('sendLeadAlert')) return { skipped: true, reason: 'RESEND_API_KEY missing' };
+  const resend = getResendClient();
+  if (!resend) return { skipped: true, reason: 'RESEND_API_KEY missing' };
 
   const scoreEmoji = { hot: '🔥', warm: '⚡', cold: '❄️' };
   const scoreLabel = { hot: 'HOT LEAD', warm: 'WARM LEAD', cold: 'COLD LEAD' };
@@ -89,7 +104,9 @@ export async function sendLeadAlert(config, lead) {
 }
 
 export async function sendUrgentEscalation(config, sessionId, message) {
-  if (!canSendEmail('sendUrgentEscalation')) return;
+  if (!canSendEmail('sendUrgentEscalation')) return { skipped: true, reason: 'RESEND_API_KEY missing' };
+  const resend = getResendClient();
+  if (!resend) return { skipped: true, reason: 'RESEND_API_KEY missing' };
 
   const nowText = new Date().toLocaleString('en-US');
   const dashboardBase = toSafeUrl(getDashboardBaseUrl());
@@ -118,7 +135,9 @@ export async function sendUrgentEscalation(config, sessionId, message) {
 }
 
 export async function sendFollowUpReminder(lead, recipientEmail) {
-  if (!canSendEmail('sendFollowUpReminder')) return;
+  if (!canSendEmail('sendFollowUpReminder')) return { skipped: true, reason: 'RESEND_API_KEY missing' };
+  const resend = getResendClient();
+  if (!resend) return { skipped: true, reason: 'RESEND_API_KEY missing' };
 
   const dashboardBase = toSafeUrl(getDashboardBaseUrl());
   const dashboardLink = `${dashboardBase}/lead-detail?id=${encodeURIComponent(String(lead?.id || ''))}`;
@@ -145,7 +164,9 @@ export async function sendFollowUpReminder(lead, recipientEmail) {
 }
 
 export async function sendMonthlyReport(business, stats) {
-  if (!canSendEmail('sendMonthlyReport')) return;
+  if (!canSendEmail('sendMonthlyReport')) return { skipped: true, reason: 'RESEND_API_KEY missing' };
+  const resend = getResendClient();
+  if (!resend) return { skipped: true, reason: 'RESEND_API_KEY missing' };
 
   const month = new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
