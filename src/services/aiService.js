@@ -1,18 +1,48 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+let anthropicClient = null;
+let openAIClient = null;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+function getAnthropicClient() {
+  if (anthropicClient) {
+    return anthropicClient;
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is not configured');
+  }
+
+  anthropicClient = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  });
+
+  return anthropicClient;
+}
+
+function getOpenAIClient() {
+  if (openAIClient) {
+    return openAIClient;
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not configured');
+  }
+
+  openAIClient = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+
+  return openAIClient;
+}
 
 export async function claudeChat(systemPrompt, messages, options = {}) {
   try {
+    const anthropic = getAnthropicClient();
+    const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
+      model,
       max_tokens: options.maxTokens || 1000,
       system: systemPrompt,
       messages,
@@ -26,8 +56,11 @@ export async function claudeChat(systemPrompt, messages, options = {}) {
 }
 
 export function claudeStream(systemPrompt, messages) {
+  const anthropic = getAnthropicClient();
+  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+
   return anthropic.messages.stream({
-    model: 'claude-sonnet-4-5',
+    model,
     max_tokens: 1000,
     system: systemPrompt,
     messages,
@@ -36,7 +69,9 @@ export function claudeStream(systemPrompt, messages) {
 
 export async function getEmbedding(text) {
   try {
+    const openai = getOpenAIClient();
     const input = typeof text === 'string' ? text.slice(0, 8000) : '';
+
     const result = await openai.embeddings.create({
       model: 'text-embedding-ada-002',
       input,
