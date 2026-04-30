@@ -27,12 +27,50 @@ async function addMessage(namespace, sessionId, role, content) {
 }
 
 router.post('/', tokenAuth, domainRestriction, async (req, res) => {
-  const { sessionId, message, model: requestedModel, systemPrompt } = req.body;
-  const namespace = req.namespace;
+  const {
+    botId,
+    userId,
+    sessionId,
+    message,
+    model: requestedModel,
+    systemPrompt
+  } = req.body;
+  const namespace = botId || req.namespace;
   const isStreaming = req.query.stream === 'true';
+  const writeSse = (payload) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${typeof payload === 'string' ? payload : JSON.stringify(payload)}\n\n`);
+    }
+  };
+  const writeSseError = (message) => {
+    const safeMessage = sanitizeErrorMessage(message);
+    if (!res.writableEnded) {
+      res.write('event: error\n');
+      res.write(`data: ${JSON.stringify({ type: 'error', message: safeMessage })}\n\n`);
+    }
+  };
+  const cleanupStreamingResources = () => {
+    clearInterval(keepAlive);
+    clearTimeout(timeoutId);
+  };
+  const sanitizeErrorMessage = (message) => {
+    const text = String(message || 'Unexpected error');
+    if (/api[_ -]?key|token|pinecone|redis|openai|password|secret/i.test(text)) {
+      return 'Internal server error';
+    }
+    return text;
+  };
 
-  if (!sessionId || !message) {
-    return res.status(400).json({ error: 'Missing sessionId or message' });
+  if (!botId || !sessionId || !message) {
+    return res.status(400).json({ error: 'Missing botId, sessionId, or message' });
+  }
+
+  if (botId !== req.namespace) {
+    return res.status(403).json({ error: 'botId does not match token scope' });
+  }
+
+  if (typeof message !== 'string' || message.trim().length === 0) {
+    return res.status(400).json({ error: 'Message cannot be empty' });
   }
 
   const settingsRaw = await redisClient.get(`chatbot:${namespace}`);
@@ -56,13 +94,16 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
 
   let keepAlive, timeoutId;
+  let clientDisconnected = false;
+  let streamedTokenCount = 0;
 
   if (isStreaming) {
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
+    writeSse({ type: 'ready', sessionId, userId: userId || null });
 
     keepAlive = setInterval(() => {
       if (!res.writableEnded) res.write(':\n\n');
@@ -70,14 +111,21 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
     timeoutId = setTimeout(() => {
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Timeout' })}\n\n`);
+        writeSseError('Timeout');
         res.end();
       }
-      clearInterval(keepAlive);
+      cleanupStreamingResources();
     }, 30000);
   }
 
+  req.on('close', () => {
+    clientDisconnected = true;
+    cleanupStreamingResources();
+  });
+
   async function runModel(modelName) {
+    if (clientDisconnected) throw new Error('Client disconnected');
+
     const t1 = Date.now();
     const history = await getLastMessages(namespace, sessionId);
     console.log(`History fetch: ${Date.now() - t1} ms`);
@@ -123,7 +171,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
             handleLLMNewToken(token) {
               fullResponse += token;
               if (!res.writableEnded) {
-                res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                // Send both keys for compatibility with old and new clients.
+                writeSse({ text: token, token });
+                streamedTokenCount += 1;
               }
             }
           }]
@@ -139,7 +189,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     console.log(`OpenAI invoke: ${Date.now() - t3} ms`);
 
     if (!isStreaming || !fullResponse) {
-      fullResponse = response.content || '';
+      fullResponse = typeof response.content === 'string'
+        ? response.content
+        : Array.isArray(response.content)
+          ? response.content.map(part => part.text || '').join('')
+          : '';
     }
 
     await addMessage(namespace, sessionId, 'user', message);
@@ -172,24 +226,34 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   try {
     let result;
+    if (clientDisconnected) return;
+
     try {
       result = await runModel(activeModel);
-    } catch {
-      if (process.env.FALLBACK_MODEL && process.env.FALLBACK_MODEL !== activeModel) {
+    } catch (primaryError) {
+      if (
+        !isStreaming &&
+        process.env.FALLBACK_MODEL &&
+        process.env.FALLBACK_MODEL !== activeModel
+      ) {
         result = await runModel(process.env.FALLBACK_MODEL);
       } else {
-        throw new Error('Model failed');
+        throw primaryError;
       }
     }
 
     if (isStreaming) {
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'meta', ...result })}\n\n`);
-        res.write('data: [DONE]\n\n');
+        console.log('[stream-chat] streamedTokenCount', streamedTokenCount);
+        if (streamedTokenCount === 0 && result.reply) {
+          console.log('[stream-chat] sending final reply fallback', { length: result.reply.length });
+          writeSse({ text: result.reply });
+        }
+        writeSse({ type: 'meta', ...result });
+        writeSse('[DONE]');
         res.end();
       }
-      clearInterval(keepAlive);
-      clearTimeout(timeoutId);
+      cleanupStreamingResources();
     } else {
       res.json(result);
     }
@@ -197,13 +261,12 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   } catch (err) {
     if (isStreaming) {
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+        writeSseError(err.message || 'Unexpected error');
         res.end();
       }
-      clearInterval(keepAlive);
-      clearTimeout(timeoutId);
+      cleanupStreamingResources();
     } else {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: sanitizeErrorMessage(err.message) });
     }
   }
 });
