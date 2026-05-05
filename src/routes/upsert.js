@@ -55,7 +55,8 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
     res.json({ success: true, queued: true, jobIds });
   } catch (err) {
     console.error('Upsert error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('[upsert]', req.method, req.path, err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 

@@ -111,7 +111,8 @@ export async function scrapeWebsite(url, options = {}) {
       error: null,
     };
   } catch (error) {
-    return { pages: [], totalPages: 0, error: error.message };
+    console.error('[firecrawlService]', error.message);
+    return { pages: [], totalPages: 0, error: 'Unable to scrape the provided URL. Please try again.' };
   }
 }
 

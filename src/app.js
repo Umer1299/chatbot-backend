@@ -12,6 +12,7 @@ import scrapeRoutes from './api/scrape.js';
 import leadsRoutes from './api/leads.js';
 import businessRoutes from './api/business.js';
 import { sessionRateLimiter } from './middleware/rateLimiter.js';
+import { globalErrorHandler } from './middleware/errorHandler.js';
 
 dotenv.config();
 
@@ -50,5 +51,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/scrape', scrapeRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/business', businessRoutes);
+
+app.use(globalErrorHandler);
 
 export default app;
