@@ -2,8 +2,9 @@ import { Worker } from 'bullmq';
 import { connection } from '../queues/connection.js';
 import { loadFile } from '../services/fileLoader.js';
 import { isDuplicateContent } from '../services/recordManager.js';
-import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
-import { getVectorStore } from '../services/pinecone.js';
+import { upsertSupplementalChunks } from '../db/vectorStore.js';
+import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
+import pool from '../db/pool.js';
 import { redisClient } from '../services/redis.js';
 import fs from 'fs/promises';
 
@@ -34,19 +35,36 @@ const worker = new Worker('file-processing', async (job) => {
     }
 
     await job.updateProgress(70);
-    const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
-    const chunks = await splitter.splitDocuments(newDocs);
+    const extractedText = newDocs.map((doc) => doc.pageContent).join('\n\n');
 
     await job.updateProgress(90);
-    const vectorStore = await getVectorStore(namespace);
-    await vectorStore.addDocuments(chunks);
+    const bizResult = await pool.query(
+      'SELECT id FROM businesses WHERE bot_id = $1',
+      [namespace]
+    );
+    if (!bizResult.rows.length) {
+      throw new Error('Business not found: ' + namespace);
+    }
+    const businessId = bizResult.rows[0].id;
+
+    const fakePages = [{
+      content: extractedText,
+      url: 'file-upload:' + (job.data.filename || 'unknown'),
+      title: job.data.filename || 'Uploaded file'
+    }];
+    const chunks = cleanAndChunkContent(fakePages).filter(shouldEmbedChunk);
+    const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload');
 
     await job.updateProgress(100);
-    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'completed', chunksUpserted: chunks.length }));
+    await redisClient.hset('job:' + jobId, {
+      status: 'completed',
+      chunksAdded: result.inserted,
+      namespace
+    });
     await fs.unlink(filePath).catch(() => {});
-    console.log(`Job ${jobId} completed, chunks: ${chunks.length}`);
+    console.log(`Job ${jobId} completed, chunks: ${result.inserted}`);
 
-    return { success: true, chunksUpserted: chunks.length };
+    return { success: true, chunksUpserted: result.inserted };
   } catch (err) {
     console.error(`File worker error: ${err.message}`);
     await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: 'File processing failed. Please try again.' }));
