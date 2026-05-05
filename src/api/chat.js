@@ -41,7 +41,53 @@ async function saveLead(config, sessionId, leadData, namespace) {
     try { if (await redisClient.get(dedupeKey)) return console.log('Duplicate lead skipped'); } catch (e) { console.error(e.message); }
     const aiSummary = await generateLeadSummary(leadData, config.industry);
     const projectDetails = generateProjectDetails(config.industry, leadData);
-    const result = await pool.query(`INSERT INTO leads (business_id, session_id, full_name, phone, email, company_name, lead_score, score_reasons, ai_summary, project_details, industry, industry_data, budget_range, is_decision_maker, calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason, agents_used, source, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'new',NOW(),NOW()) RETURNING *`, [config.business_id, sessionId, leadData.name, leadData.phone, leadData.email, leadData.company_name || null, leadData.lead_score, leadData.score_reasons || [], aiSummary, projectDetails, config.industry, JSON.stringify(leadData.industry_data || leadData), leadData.budget_range, leadData.is_decision_maker, Boolean(config.calendly_link || config.calendlyLink), false, leadData.urgency_flag || false, leadData.urgency_reason || null, leadData.agents_used || [], 'website_chatbot']);
+    const result = await pool.query(`
+  INSERT INTO leads (
+    business_id, session_id, full_name, phone, email, company_name,
+    lead_score, score_reasons, ai_summary, project_details,
+    industry, industry_data, budget_range, is_decision_maker,
+    calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason,
+    agents_used, source, status, created_at, updated_at
+  ) VALUES (
+    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+    $11,$12,$13,$14,$15,$16,$17,$18,
+    $19,'website_chatbot','new',NOW(),NOW()
+  )
+  ON CONFLICT (business_id, session_id)
+  WHERE session_id IS NOT NULL
+  DO UPDATE SET
+    full_name = COALESCE(EXCLUDED.full_name, leads.full_name),
+    phone = COALESCE(EXCLUDED.phone, leads.phone),
+    email = COALESCE(EXCLUDED.email, leads.email),
+    company_name = COALESCE(EXCLUDED.company_name, leads.company_name),
+    lead_score = EXCLUDED.lead_score,
+    score_reasons = EXCLUDED.score_reasons,
+    ai_summary = EXCLUDED.ai_summary,
+    project_details = EXCLUDED.project_details,
+    industry = EXCLUDED.industry,
+    industry_data = EXCLUDED.industry_data,
+    budget_range = EXCLUDED.budget_range,
+    is_decision_maker = EXCLUDED.is_decision_maker,
+    calendly_link_shown = EXCLUDED.calendly_link_shown,
+    urgency_flag = EXCLUDED.urgency_flag,
+    urgency_reason = EXCLUDED.urgency_reason,
+    agents_used = EXCLUDED.agents_used,
+    updated_at = NOW()
+  RETURNING *
+`, [
+  config.business_id, sessionId,
+  leadData.name, leadData.phone, leadData.email, leadData.company_name || null,
+  leadData.lead_score, leadData.score_reasons || [],
+  aiSummary, projectDetails,
+  config.industry,
+  JSON.stringify(leadData.industry_data || leadData),
+  leadData.budget_range, leadData.is_decision_maker,
+  Boolean(config.calendly_link || config.calendlyLink),
+  false,   // appointment_scheduled – placeholder; will be set later if needed
+  leadData.urgency_flag || false,
+  leadData.urgency_reason || null,
+  leadData.agents_used || []
+]);
     const savedLead = result?.rows?.[0];
     if (savedLead?.id) {
       await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW() WHERE id=$2", [savedLead.id, sessionId]);

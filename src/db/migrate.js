@@ -6,35 +6,42 @@ import pool from './pool.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function runMigration() {
+async function runMigrations() {
   if (!process.env.DATABASE_URL) {
-    console.log('DATABASE_URL is not configured. Migration file was created but not executed.');
+    console.log('DATABASE_URL is not configured. Migrations not executed.');
     return;
   }
 
-  const migrationPath = path.join(
-    __dirname,
-    'migrations',
-    '001_initial_schema.sql'
-  );
+  const migrationsDir = path.join(__dirname, 'migrations');
 
-  console.log('Running ChatflowAI initial schema migration...');
-  console.log(`Reading migration file: ${migrationPath}`);
+  // Get all .sql files sorted by name (001, 002, …)
+  const files = await fs.readdir(migrationsDir);
+  const sqlFiles = files
+    .filter(f => f.endsWith('.sql'))
+    .sort();
 
-  const sql = await fs.readFile(migrationPath, 'utf8');
-
-  if (!sql.trim()) {
-    throw new Error('Migration SQL file is empty');
+  if (sqlFiles.length === 0) {
+    console.log('No migration files found.');
+    return;
   }
 
-  console.log('Executing schema...');
+  for (const file of sqlFiles) {
+    const filePath = path.join(migrationsDir, file);
+    console.log(`Running migration: ${file}`);
 
-  await pool.query(sql);
+    const sql = await fs.readFile(filePath, 'utf8');
+    if (!sql.trim()) {
+      throw new Error(`Migration file is empty: ${file}`);
+    }
 
-  console.log('Migration completed successfully');
+    await pool.query(sql);
+    console.log(`✅ Migration complete: ${file}`);
+  }
+
+  console.log('All migrations completed successfully');
 }
 
-runMigration()
+runMigrations()
   .catch((error) => {
     console.error('Migration failed:', error.message);
     process.exitCode = 1;
