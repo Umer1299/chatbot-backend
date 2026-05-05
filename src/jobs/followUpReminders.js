@@ -1,11 +1,37 @@
 import cron from 'node-cron';
 import pool from '../db/pool.js';
 import { sendFollowUpReminder, sendMonthlyReport } from '../services/emailService.js';
+import { redisClient } from '../services/redis.js';
+
+async function withDistributedLock(lockKey, ttlSeconds, fn) {
+  const lockValue = 'lock:' + Date.now() + ':' + Math.random().toString(36).slice(2);
+
+  const acquired = await redisClient.set(
+    'cron_lock:' + lockKey,
+    lockValue,
+    'NX', 'EX', ttlSeconds,
+  );
+
+  if (!acquired) {
+    console.log('[cron] Skipping ' + lockKey + ' — already running on another instance');
+    return;
+  }
+
+  try {
+    await fn();
+  } finally {
+    const current = await redisClient.get('cron_lock:' + lockKey);
+    if (current === lockValue) {
+      await redisClient.del('cron_lock:' + lockKey);
+    }
+  }
+}
 
 export function startReminderJobs() {
   console.log('Reminder cron jobs started');
 
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('0 * * * *', () =>
+    withDistributedLock('hot-lead-reminder', 3500, async () => {
     try {
       const { rows: leads } = await pool.query(
         `SELECT l.*, b.escalation_email, b.owner_email, b.business_name
@@ -35,9 +61,11 @@ export function startReminderJobs() {
     } catch (error) {
       console.error('HOT_LEAD_REMINDER_ERROR:', error);
     }
-  });
+    })
+  );
 
-  cron.schedule('0 9 * * *', async () => {
+  cron.schedule('0 9 * * *', () =>
+    withDistributedLock('followup-reminder', 86000, async () => {
     try {
       const { rows: leads } = await pool.query(
         `SELECT l.*, b.escalation_email, b.owner_email, b.business_name
@@ -63,9 +91,11 @@ export function startReminderJobs() {
     } catch (error) {
       console.error('FOLLOWUP_REMINDER_ERROR:', error);
     }
-  });
+    })
+  );
 
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('*/30 * * * *', () =>
+    withDistributedLock('inactive-session-check', 1700, async () => {
     try {
       const { rows: sessions } = await pool.query(
         `SELECT s.*, b.id as business_id, b.escalation_email, b.owner_email, b.business_name, b.industry
@@ -118,7 +148,8 @@ export function startReminderJobs() {
     } catch (error) {
       console.error('ABANDONMENT_RECOVERY_ERROR:', error);
     }
-  });
+    })
+  );
 
   cron.schedule('0 8 1 * *', async () => {
     try {
