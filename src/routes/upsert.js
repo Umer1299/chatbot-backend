@@ -49,7 +49,7 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
         jobId,
       });
       jobIds.push(jobId);
-      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued' }));
+      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace }));
       console.log(`File queued: ${file.originalname} for namespace ${namespace}, job ${jobId}`);
     }
     res.json({ success: true, queued: true, jobIds });
@@ -59,11 +59,27 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
   }
 });
 
-router.get('/job/:jobId', async (req, res) => {
+router.get('/job/:jobId', tokenAuth, async (req, res) => {
   const { jobId } = req.params;
-  const data = await redisClient.get(`job:${jobId}`);
-  if (!data) return res.status(404).json({ error: 'Job not found' });
-  res.json(JSON.parse(data));
+  const raw = await redisClient.get(`job:${jobId}`);
+  if (!raw) return res.status(404).json({ error: 'Job not found' });
+
+  const job = JSON.parse(raw);
+
+  if (!job.namespace) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  if (job.namespace !== req.namespace) {
+    console.warn('[upsert] Cross-namespace job access', {
+      caller: req.namespace,
+      jobNamespace: job.namespace,
+      ip: req.ip
+    });
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  res.json(job);
 });
 
 router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {

@@ -93,7 +93,9 @@ router.post('/bot-config/approve', requireAuth, async (req, res) => {
 
 router.get('/bot-config/:botId/preview', async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.welcome_message, b.industry
+    `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
+            bc.welcome_message, bc.starter_prompts,
+            bc.is_disabled, bc.disabled_reason
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
      WHERE b.bot_id = $1 AND bc.active = true
@@ -103,7 +105,17 @@ router.get('/bot-config/:botId/preview', async (req, res) => {
 
   if (!rows[0]) return res.status(404).json({ error: 'Bot config not found' });
 
-  return res.json({ config: rows[0], isPreview: true });
+  return res.json({
+    botId: rows[0].bot_id,
+    businessName: rows[0].business_name,
+    industry: rows[0].industry,
+    primaryColor: rows[0].primary_color,
+    welcomeMessage: rows[0].welcome_message,
+    starterPrompts: rows[0].starter_prompts || [],
+    isPreview: true,
+    isDisabled: rows[0].is_disabled || false,
+    disabledMessage: rows[0].disabled_reason || null
+  });
 });
 
 export default router;
