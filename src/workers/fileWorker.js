@@ -49,7 +49,7 @@ const worker = new Worker('file-processing', async (job) => {
     return { success: true, chunksUpserted: chunks.length };
   } catch (err) {
     console.error(`File worker error: ${err.message}`);
-    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: err.message }));
+    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: 'File processing failed. Please try again.' }));
     await fs.unlink(filePath).catch(() => {});
     throw err;
   }
