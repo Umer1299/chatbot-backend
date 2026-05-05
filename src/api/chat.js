@@ -102,6 +102,8 @@ async function saveLead(config, sessionId, leadData, namespace) {
 
 router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const isStreaming = req.query.stream === 'true';
+
+  // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
   if (!botId) return res.status(400).json({ error: 'botId required' });
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
@@ -110,17 +112,22 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   message = sanitizeMessage(message);
   if (message.length < 1) return res.status(400).json({ error: 'Message empty after sanitize' });
 
+  // SECTION 2: Load config (Redis → DB)
   let config;
   const redisBotKey = `chatbot_config:${req.namespace}`;
   try { const cached = await redisClient.get(redisBotKey); if (cached) config = JSON.parse(cached); } catch (e) { console.error('Redis cache miss error', e.message); }
   if (!config) {
-    const cfg = await pool.query(`SELECT bc.system_prompt, bc.selected_agents, bc.welcome_message, bc.starter_prompts, bc.is_draft, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.primary_color, b.calendly_link, b.availability_slots, b.bot_id, b.id as business_id, b.timezone FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1`, [botId]);
+    const cfg = await pool.query(`SELECT bc.system_prompt, bc.selected_agents, bc.selected_model, bc.welcome_message, bc.starter_prompts, bc.is_draft, bc.detected_location, bc.detected_services, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.primary_color, b.calendly_link, b.availability_slots, b.bot_id, b.id as business_id, b.timezone, b.plan, b.is_disabled, b.disabled_reason FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1`, [botId]);
     if (!cfg.rows[0]) return res.status(404).json({ error: 'Bot not configured', message: 'Please complete onboarding first' });
     config = { ...cfg.rows[0], calendlyLink: cfg.rows[0].calendly_link, ownerPhone: cfg.rows[0].owner_phone };
     try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
   }
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
 
+  // SECTION 3: is_disabled check (added in Prompt 12)
+  if (config.is_disabled) return res.status(403).json({ error: config.disabled_reason || 'Bot is disabled' });
+
+  // SECTION 4: Healthcare triage
   const triageKeywords = ['chest pain', 'cant breathe', 'cannot breathe', 'difficulty breathing', 'unconscious', 'overdose', 'suicidal', 'suicide', 'stroke', 'severe bleeding', 'collapsed', 'heart attack', 'seizure', 'not responsive', 'dying', 'life threatening', 'emergency help', 'ambulance'];
   if (config.industry === 'healthcare' && triageKeywords.some((kw) => message.toLowerCase().includes(kw))) {
     const triageText = `This sounds urgent. Please call 911 immediately or go to your nearest emergency room. Do not wait for a callback from us. If you need our direct line right now: ${config.owner_phone || config.ownerPhone || 'contact reception directly'}`;
@@ -135,6 +142,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
+      res.write('data: {"type":"ready"}\n\n');
       res.write(`data: ${JSON.stringify({ text: triageText, token: triageText })}\n\n`);
       res.write(`data: ${JSON.stringify({ type: 'meta', reply: triageText })}\n\n`);
       res.write('data: [DONE]\n\n');
@@ -145,17 +153,44 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     return;
   }
 
+  // SECTION 5: Escalation keyword check
   const escalationDetected = ['speak to someone', 'speak to a person', 'call me', 'real person', 'human agent', 'talk to someone', 'complaint', 'legal action', 'urgent help', 'want to speak'].some((kw) => message.toLowerCase().includes(kw));
+  // SECTION 6: Load session + history
   let session = (await pool.query('SELECT * FROM sessions WHERE id=$1', [sessionId])).rows[0] || null;
   if (!session) { await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]); session = { current_phase: 1 }; }
   const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at ASC LIMIT 20', [sessionId]);
   const conversationHistory = historyRows.rows.map((row) => ({ role: row.role, content: row.content }));
+  // SECTION 7: RAG context retrieval
   const chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5);
   const contextText = chunks.length > 0 ? chunks.map((c) => c.content).join('\n\n') : '';
-  const ragBlock = contextText ? `KNOWLEDGE BASE ABOUT THIS BUSINESS:\n${contextText}\n\nUse this to answer questions accurately. If not found here do not guess.\n\n` : '';
-  const fullSystemPrompt = buildMasterPrompt(config.system_prompt || '', { ragBlock, phase: session?.current_phase || 1 });
+
+  // SECTION 8: Build system prompt
+  const businessInfo = {
+    industry: config.industry,
+    businessName: config.business_name,
+    primaryServices: Array.isArray(config.detected_services) ? config.detected_services : [],
+    location: config.detected_location || '',
+    ownerPhone: config.owner_phone || '',
+    calendlyLink: config.calendly_link || null
+  };
+
+  const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
+  const availability = config.availability_slots || {};
+
+  const agentSystemPrompt = selectedAgents.length > 0
+    ? buildMasterPrompt(businessInfo, selectedAgents, availability)
+    : (config.system_prompt || '');
+
+  const ragBlock = contextText && contextText.length > 0
+    ? 'KNOWLEDGE BASE:\n' + contextText + '\nUse this to answer accurately.\n\n'
+    : '';
+
+  const phaseBlock = '\nCURRENT PHASE: ' + (session?.current_phase || 1) + '\n';
+
+  const fullSystemPrompt = ragBlock + agentSystemPrompt + phaseBlock;
   const messagesArray = [...conversationHistory, { role: 'user', content: message }];
 
+  // SECTION 9: callWithFallback
   const callWithFallback = async (stream) => {
     try {
       const anthropic = getAnthropicClient(); if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
@@ -171,6 +206,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     }
   };
 
+  // SECTION 11: Save async
   const processResponse = async (fullResponse, usedModel) => {
     const tasks = [];
     tasks.push(pool.query('INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()),($1,$2,$7,$8,$5,$9,NOW())', [sessionId, config.business_id, 'user', message, session?.current_phase || 1, null, 'assistant', fullResponse, usedModel]));
@@ -180,6 +216,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     await Promise.allSettled(tasks);
   };
 
+  // SECTION 10: Stream/send response
   if (isStreaming) {
     res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no');
     res.write('data: {"type":"ready"}\n\n');
