@@ -1,36 +1,19 @@
 import pool from '../db/pool.js';
 
 // Plan hierarchy for access control
-export const PLAN_HIERARCHY = {
-  trial:        0,
-  professional: 1,
-  growth:       2,
-  agency:       3
-};
-
-// Which model_ids each plan can access
-// model_id values must match model_configs table
-export const PLAN_MODEL_ACCESS = {
-  trial:        ['gpt-4o-mini'],
-  professional: ['gpt-4o-mini', 'claude-sonnet'],
-  growth:       ['gpt-4o-mini', 'gpt-4o', 'claude-sonnet'],
-  agency:       ['gpt-4o-mini', 'gpt-4o', 'claude-sonnet', 'claude-opus']
-};
 
 // ──────────────────────────────────────────────
 // getAvailableModels(plan)
 // Returns models this plan can access
 // ──────────────────────────────────────────────
-export async function getAvailableModels(plan) {
-  const allowed = PLAN_MODEL_ACCESS[plan] ?? PLAN_MODEL_ACCESS.trial;
-
+export async function getAvailableModels() {
   const result = await pool.query(`
     SELECT model_id, display_name, branded_name,
            provider, min_plan, sort_order
     FROM model_configs
-    WHERE model_id = ANY($1) AND is_active = true
+    WHERE is_active = true
     ORDER BY sort_order ASC
-  `, [allowed]);
+  `);
 
   return result.rows;
 }
@@ -39,53 +22,31 @@ export async function getAvailableModels(plan) {
 // getLockedModels(plan)
 // Returns models this plan cannot access (for UI)
 // ──────────────────────────────────────────────
-export async function getLockedModels(plan) {
-  const allowed = PLAN_MODEL_ACCESS[plan] ?? PLAN_MODEL_ACCESS.trial;
-
-  const result = await pool.query(`
-    SELECT model_id, display_name, branded_name,
-           provider, min_plan, sort_order
-    FROM model_configs
-    WHERE model_id != ALL($1) AND is_active = true
-    ORDER BY sort_order ASC
-  `, [allowed]);
-
-  return result.rows.map(m => ({ ...m, isLocked: true }));
+export async function getLockedModels() {
+  return [];
 }
 
 // ──────────────────────────────────────────────
 // validateModelAccess(modelId, plan)
 // Returns { allowed, reason, fallback, requiredPlan }
 // ──────────────────────────────────────────────
-export async function validateModelAccess(modelId, plan) {
-  const allowed = PLAN_MODEL_ACCESS[plan] ?? PLAN_MODEL_ACCESS.trial;
-
-  if (allowed.includes(modelId)) {
-    return { allowed: true, reason: null, fallback: null, requiredPlan: null };
-  }
-
+export async function validateModelAccess(modelId) {
   const modelResult = await pool.query(
-    `SELECT min_plan, branded_name
+    `SELECT min_plan, branded_name, is_active
      FROM model_configs WHERE model_id = $1`,
     [modelId]
   );
 
   if (!modelResult.rows.length) {
-    return {
-      allowed: false,
-      reason: 'Model not found: ' + modelId,
-      fallback: allowed.at(-1) ?? 'gpt-4o-mini',
-      requiredPlan: null
-    };
+    return { allowed: false, reason: 'Model not found: ' + modelId, fallback: null, requiredPlan: null };
   }
 
   const model = modelResult.rows[0];
-  return {
-    allowed: false,
-    reason: model.branded_name + ' requires ' + model.min_plan + ' plan or higher',
-    fallback: allowed.at(-1) ?? 'gpt-4o-mini',
-    requiredPlan: model.min_plan
-  };
+  if (!model.is_active) {
+    return { allowed: false, reason: model.branded_name + ' is not currently available.', fallback: null, requiredPlan: model.min_plan };
+  }
+
+  return { allowed: true, reason: null, fallback: null, requiredPlan: null };
 }
 
 // ──────────────────────────────────────────────
@@ -97,17 +58,16 @@ export async function validateModelAccess(modelId, plan) {
 // - never hardcoded
 // - always returned, never stored in outer scope
 // ──────────────────────────────────────────────
-export async function getSafeModel(requestedModelId, plan) {
-  const validation = await validateModelAccess(requestedModelId, plan);
+export async function getSafeModel(requestedModelId) {
+  const validation = await validateModelAccess(requestedModelId);
 
   const modelIdToUse = validation.allowed
     ? requestedModelId
     : (validation.fallback ?? 'gpt-4o-mini');
 
   if (!validation.allowed) {
-    console.warn('[modelService] Plan downgrade', {
+    console.warn('[modelService] Model fallback', {
       requested: requestedModelId,
-      plan,
       using: modelIdToUse,
       reason: validation.reason
     });
