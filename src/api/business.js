@@ -142,6 +142,110 @@ router.patch('/model', requireAuth, async (req, res) => {
   }
 });
 
+
+router.post('/disable', requireAuth, async (req, res) => {
+  try {
+    const businessId = req.business.businessId;
+    const { reason, disabledBy } = req.body;
+
+    const source = ['bubble', 'admin'].includes(disabledBy) ? disabledBy : 'bubble';
+
+    await pool.query(`
+      UPDATE businesses SET
+        is_disabled     = true,
+        disabled_reason = $1,
+        disabled_at     = NOW(),
+        disabled_by     = $2,
+        updated_at      = NOW()
+      WHERE id = $3
+    `, [reason || 'Disabled by administrator', source, businessId]);
+
+    // Clear Redis cache immediately
+    const bizRow = await pool.query(
+      'SELECT bot_id FROM businesses WHERE id = $1',
+      [businessId]
+    );
+    if (bizRow.rows[0]?.bot_id) {
+      await redisClient.del('chatbot_config:' + bizRow.rows[0].bot_id);
+    }
+
+    console.log('[business/disable]', { businessId, reason, source, ip: req.ip });
+
+    res.json({
+      success: true,
+      message: 'Chatbot disabled',
+      disabledAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('[business/disable]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.post('/enable', requireAuth, async (req, res) => {
+  try {
+    const businessId = req.business.businessId;
+
+    await pool.query(`
+      UPDATE businesses SET
+        is_disabled     = false,
+        disabled_reason = NULL,
+        disabled_at     = NULL,
+        disabled_by     = NULL,
+        updated_at      = NOW()
+      WHERE id = $1
+    `, [businessId]);
+
+    const bizRow = await pool.query(
+      'SELECT bot_id FROM businesses WHERE id = $1',
+      [businessId]
+    );
+    if (bizRow.rows[0]?.bot_id) {
+      await redisClient.del('chatbot_config:' + bizRow.rows[0].bot_id);
+    }
+
+    console.log('[business/enable]', { businessId, ip: req.ip });
+
+    res.json({
+      success: true,
+      message: 'Chatbot re-enabled'
+    });
+  } catch (err) {
+    console.error('[business/enable]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.get('/status', requireAuth, async (req, res) => {
+  try {
+    const businessId = req.business.businessId;
+
+    const result = await pool.query(`
+      SELECT is_disabled, disabled_reason,
+             disabled_at, disabled_by,
+             plan, selected_model
+      FROM businesses WHERE id = $1
+    `, [businessId]);
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    const biz = result.rows[0];
+    res.json({
+      isDisabled:     biz.is_disabled || false,
+      disabledReason: biz.disabled_reason || null,
+      disabledAt:     biz.disabled_at || null,
+      disabledBy:     biz.disabled_by || null,
+      plan:           biz.plan,
+      selectedModel:  biz.selected_model || 'gpt-4o-mini'
+    });
+  } catch (err) {
+    console.error('[business/status]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
 router.get('/bot-config', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.welcome_message, b.industry
