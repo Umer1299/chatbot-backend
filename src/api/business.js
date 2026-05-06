@@ -5,6 +5,7 @@ import { redisClient } from '../services/redis.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 import { AGENT_TEMPLATES } from '../agents/templates.js';
 import { getAvailableModels, getLockedModels } from '../services/modelService.js';
+import { buildMasterPrompt, buildAgentPromptInstructions } from '../agents/promptBuilder.js';
 
 const router = Router();
 
@@ -260,17 +261,67 @@ router.get('/bot-config', requireAuth, async (req, res) => {
   const row = rows[0] || null;
   const industry = row?.industry || req.business.industry;
   const availableAgents = AGENT_TEMPLATES[industry]?.agents || {};
+  const scrapeResult = row?.result || {};
+  const fallbackSuggestion = suggestAgents(industry, scrapeResult, '');
+  const suggestedAgentIds = row?.selected_agents || fallbackSuggestion?.suggestedAgentIds || [];
 
   return res.json({
-    config: row,
+    business_name: scrapeResult.businessName || req.business.businessName || row?.business_name || 'Your Business',
+    industry,
+    business_summary: scrapeResult.businessSummary || null,
+    services_products: scrapeResult.services || row?.detected_services || [],
+    target_customers: scrapeResult.targetCustomers || [],
+    business_tone: scrapeResult.businessTone || 'professional and helpful',
+    suggested_chatbot_purpose: scrapeResult.suggestedChatbotPurpose || null,
+    website_gaps: scrapeResult.websiteGaps || row?.missing_fields || [],
+    contact_info: scrapeResult.contactInfo || {},
+    system_prompt_draft: row?.system_prompt || scrapeResult.systemPromptDraft || '',
+    welcome_message: row?.welcome_message || scrapeResult.welcomeMessage || '',
+    starter_prompts: row?.starter_prompts || scrapeResult.starterPrompts || [],
+    brand: {
+      logo_url: scrapeResult?.brand?.logo_url || null,
+      primary_color: scrapeResult?.brand?.primary_color || row?.primary_color || '#1F6FEB',
+    },
+    suggested_agents: suggestedAgentIds,
     availableAgents,
-    suggestedAgentIds: row?.selected_agents || suggestAgents(industry, {}, '').suggestedAgentIds || [],
+    config: row,
   });
 });
 
 router.post('/bot-config/approve', requireAuth, async (req, res) => {
-  const { systemPrompt, welcomeMessage, starterPrompts, selectedAgents } = req.body;
+  const { welcomeMessage, starterPrompts, selectedAgents } = req.body;
   const businessId = req.business.businessId;
+  const selectedAgentIds = Array.isArray(selectedAgents) ? selectedAgents : [];
+  const businessResult = await pool.query(
+    `SELECT business_name, industry, owner_phone, calendly_link, availability_slots
+     FROM businesses WHERE id = $1 LIMIT 1`,
+    [businessId],
+  );
+  const b = businessResult.rows[0] || {};
+  const { rows: configRows } = await pool.query(
+    `SELECT detected_services, detected_location FROM bot_configs WHERE business_id = $1 LIMIT 1`,
+    [businessId],
+  );
+  const c = configRows[0] || {};
+  const { prompt: agentRoles } = buildAgentPromptInstructions(b.industry, selectedAgentIds);
+  const { prompt: basePrompt } = buildMasterPrompt({
+    industry: b.industry,
+    businessName: b.business_name,
+    primaryServices: c.detected_services || [],
+    location: c.detected_location || '',
+    ownerPhone: b.owner_phone,
+    calendlyLink: b.calendly_link,
+  }, selectedAgentIds, b.availability_slots || {});
+  const masterSystemPrompt = `${basePrompt}
+
+LEAD FIELDS TO COLLECT: name, phone, email, service needed, timeline, budget range, decision-maker status.
+OBJECTION HANDLING: acknowledge concern, provide concise reassurance, offer practical next step.
+BOOKING/QUOTE: gather required fields before quote/booking; then offer two time options or share Calendly when available.
+FALLBACK RULES: if info missing, ask one clarifying question; if still unknown, be transparent and offer human follow-up.
+TONE/STYLE: match business tone, stay concise, conversion-focused, and helpful.
+RAG INSTRUCTIONS: prioritize retrieved website knowledge; do not fabricate pricing or policies not in context.
+AGENT ROLE DEFINITIONS:
+${agentRoles}`.trim();
 
   await pool.query(
     `UPDATE bot_configs
@@ -282,7 +333,7 @@ router.post('/bot-config/approve', requireAuth, async (req, res) => {
          active = true,
          updated_at = NOW()
      WHERE business_id = $5`,
-    [systemPrompt, welcomeMessage, starterPrompts, selectedAgents, businessId],
+        [masterSystemPrompt, welcomeMessage, starterPrompts, selectedAgentIds, businessId],
   );
 
   await pool.query(
@@ -297,7 +348,7 @@ router.post('/bot-config/approve', requireAuth, async (req, res) => {
   const botId = botResult.rows[0]?.bot_id;
   if (botId && redisClient) await redisClient.del(`chatbot_config:${botId}`);
 
-  return res.json({ success: true, message: 'Chatbot is now live' });
+  return res.json({ success: true, message: 'Chatbot is now live', selected_agents: selectedAgentIds, system_prompt: masterSystemPrompt });
 });
 
 router.get('/bot-config/:botId/preview', async (req, res) => {

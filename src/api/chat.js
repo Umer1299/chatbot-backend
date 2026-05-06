@@ -224,9 +224,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   const { prompt: builtPrompt, usedAgents } = selectedAgents.length > 0
     ? buildMasterPrompt(businessInfo, selectedAgents, availability)
-    : { prompt: config.system_prompt || '', usedAgents: [] };
-
-  const agentSystemPrompt = builtPrompt;
+    : { prompt: '', usedAgents: [] };
+  const agentSystemPrompt = config.system_prompt || builtPrompt;
 
   const ragBlock = contextText && contextText.length > 0
     ? 'KNOWLEDGE BASE:\n' + contextText + '\nUse this to answer accurately.\n\n'
