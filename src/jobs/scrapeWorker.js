@@ -10,6 +10,23 @@ import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 
+function safePrimaryColorFromContent(text = '') {
+  const match = text.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/);
+  return match ? match[0] : '#1F6FEB';
+}
+
+function extractBusinessNameFromPages(pages = [], fallback = '') {
+  const title = pages.find((p) => p?.title)?.title || '';
+  const candidate = title.split('|')[0].split('-')[0].trim();
+  return candidate || fallback || 'Your Business';
+}
+
+function extractContactInfo(text = '') {
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
+  const phone = text.match(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?){2}\d{4}/)?.[0] || null;
+  return { email, phone };
+}
+
 export async function addScrapeJob(businessId, url) {
   const { rows } = await pool.query(
     `INSERT INTO scrape_jobs (business_id, url, status, queued_at)
@@ -99,8 +116,9 @@ async function processScrapeJob(job) {
       status: 'analyzing',
     });
 
-    const combinedText = filtered.join(' ').substring(0, 6000);
-    const analysisResult = await detectIndustry(combinedText);
+    const combinedText = filtered.join(' ');
+    const modelInputText = combinedText.substring(0, 7000);
+    const analysisResult = await detectIndustry(modelInputText);
 
     await pool.query(
       `UPDATE businesses
@@ -116,14 +134,14 @@ async function processScrapeJob(job) {
 
     const validation = await validateWebsiteContent(
       analysisResult.industry,
-      combinedText,
+      modelInputText,
       analysisResult,
     );
 
     const suggestedAgents = suggestAgents(
       analysisResult.industry,
       analysisResult,
-      combinedText,
+      modelInputText,
     );
     const defaultAgentIds = suggestedAgents?.suggestedAgentIds || [];
 
@@ -155,6 +173,29 @@ async function processScrapeJob(job) {
       businessRow.availability_slots,
       validation,
     );
+    const contactInfo = extractContactInfo(combinedText);
+    const extractedBusinessName = extractBusinessNameFromPages(result.pages, businessInfo.businessName);
+    const logoUrl =
+      result.pages.find((p) => /logo/i.test(p.url || ''))?.url ||
+      `${job.url.replace(/\/+$/, '')}/favicon.ico`;
+    const primaryColor = safePrimaryColorFromContent(combinedText);
+    const missingInfo = [...(validation?.missing?.critical || []), ...(validation?.missing?.important || [])];
+    const enrichedResult = {
+      ...analysisResult,
+      businessName: extractedBusinessName,
+      services: analysisResult.primaryServices || [],
+      targetCustomers: analysisResult.targetCustomers || [],
+      businessTone: analysisResult.tone || 'professional and helpful',
+      businessSummary: analysisResult.summary || `${extractedBusinessName} provides ${(analysisResult.primaryServices || []).join(', ') || 'services'}.`,
+      suggestedChatbotPurpose: `Convert visitors into qualified ${analysisResult.industry || 'business'} leads.`,
+      websiteGaps: missingInfo,
+      suggestedAgents: defaultAgentIds,
+      systemPromptDraft: generatedContent.systemPrompt,
+      welcomeMessage: generatedContent.welcomeMessage,
+      starterPrompts: generatedContent.starterPrompts,
+      brand: { logo_url: logoUrl, primary_color: primaryColor },
+      contactInfo,
+    };
 
     await pool.query(
       `UPDATE scrape_jobs
@@ -182,11 +223,7 @@ async function processScrapeJob(job) {
         generatedContent.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
         generatedContent.systemPrompt,
-        JSON.stringify({
-          ...analysisResult,
-          suggestedAgentIds: defaultAgentIds,
-          contentQuality: validation,
-        }),
+        JSON.stringify(enrichedResult),
       ],
     );
 
