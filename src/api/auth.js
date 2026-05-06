@@ -33,6 +33,14 @@ router.post('/token', async (req, res) => {
         [bubbleUserId, businessName || 'New Business', industry || 'other', email, botId],
       );
       business = inserted.rows[0];
+
+      // Also create a default bot_configs row (needed for model selection, preview, etc.)
+      await pool.query(
+        `INSERT INTO bot_configs
+          (business_id, system_prompt, welcome_message, starter_prompts, selected_model, is_draft, active)
+         VALUES ($1, 'You are a helpful assistant.', 'Hello! How can I help you?', '[]', 'gpt-4o-mini', false, true)`,
+        [business.id]
+      );
     }
 
     const token = jwt.sign(
