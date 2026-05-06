@@ -80,24 +80,29 @@ router.patch('/model', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'modelId required' });
     }
 
-    // First check if model exists at all (even if inactive)
-    const modelExists = await pool.query(
-      `SELECT model_id, branded_name, is_active
+    // Check if model exists in database
+    const modelResult = await pool.query(
+      `SELECT model_id, branded_name, is_active, min_plan
        FROM model_configs
        WHERE model_id = $1`,
       [modelId]
     );
-    if (!modelExists.rows.length) {
+
+    if (!modelResult.rows.length) {
       return res.status(400).json({ error: 'Invalid model ID: ' + modelId });
     }
-    const modelRow = modelExists.rows[0];
 
-    if (!modelRow.is_active) {
-      console.warn('[business/model] Inactive model requested', { businessId, modelId, ip: req.ip });
+    const model = modelResult.rows[0];
+
+    // If model is inactive, deny with 403
+    if (!model.is_active) {
+      console.warn('[business/model] Inactive model requested', {
+        businessId, modelId, ip: req.ip
+      });
       return res.status(403).json({
-        error: 'This model is not currently available.',
+        error: model.branded_name + ' is not currently available.',
         currentPlan: plan,
-        requiredPlan: 'agency'
+        requiredPlan: model.min_plan
       });
     }
 
@@ -143,12 +148,12 @@ router.patch('/model', requireAuth, async (req, res) => {
     res.json({
       success: true,
       selectedModel: modelId,
-      brandedName: modelRow.rows[0].branded_name,
-      message: 'Chatbot now uses ' + modelRow.rows[0].branded_name
+      brandedName: model.branded_name,
+      message: 'Chatbot now uses ' + model.branded_name
     });
   } catch (err) {
-    console.error('[business/model DEBUG]', err.message, err.stack);
-    res.status(500).json({ error: 'DEBUG: ' + err.message });
+    console.error('[business/model]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 
