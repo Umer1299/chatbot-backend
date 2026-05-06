@@ -27,12 +27,44 @@ function extractContactInfo(text = '') {
   return { email, phone };
 }
 
-export async function addScrapeJob(businessId, url) {
+
+function extractBrandData(pages = [], baseUrl = '') {
+  const allText = pages.map((p) => `${p.title || ''}
+${p.content || ''}`).join('\n');
+  const firstPage = pages[0] || {};
+  const titleCandidate = (firstPage.title || '').split('|')[0].split('-')[0].trim();
+  const orgMatch = allText.match(/organization\"?\s*:\s*\"?([^\"\n]+)/i);
+  const ogSiteName = allText.match(/og:site_name[^\n:]*[:\s]+([^\n]+)/i);
+  const headerMatch = allText.match(/^#\s+(.{2,80})/m);
+  const businessName = titleCandidate || orgMatch?.[1]?.trim() || ogSiteName?.[1]?.trim() || headerMatch?.[1]?.trim() || 'Your Business';
+
+  const imageMatches = [...allText.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((m) => m[1]);
+  const logoUrl = imageMatches.find((u) => /logo|brand|header/i.test(u)) || imageMatches[0] || null;
+  const normalizedBase = baseUrl.replace(/\/+$/, '');
+  const faviconUrl = `${normalizedBase}/favicon.ico`;
+
+  const colorMatches = [...new Set((allText.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/g) || []).map((c) => c.toUpperCase()))];
+  const primaryColor = colorMatches[0] || '#1F6FEB';
+  const secondaryColor = colorMatches[1] || '#111827';
+
+  const fontMatches = [...new Set((allText.match(/font-family\s*:\s*([^;\n]+)/gi) || []).map((f) => f.split(':')[1].trim().replace(/["']/g, '')))].slice(0, 5);
+
+  return {
+    businessName,
+    logoUrl,
+    faviconUrl,
+    primaryColor,
+    secondaryColor,
+    fonts: fontMatches,
+  };
+}
+
+export async function addScrapeJob(businessId, url, options = {}) {
   const { rows } = await pool.query(
-    `INSERT INTO scrape_jobs (business_id, url, status, queued_at)
-     VALUES ($1, $2, 'queued', NOW())
+    `INSERT INTO scrape_jobs (business_id, url, status, queued_at, is_refresh)
+     VALUES ($1, $2, 'queued', NOW(), $3)
      RETURNING id`,
-    [businessId, url],
+    [businessId, url, Boolean(options.isRefresh)],
   );
 
   return String(rows[0].id);
@@ -57,7 +89,7 @@ export async function getJobStatus(jobId) {
 
 export async function refreshScrapeJob(businessId, url) {
   await deleteBusinessChunks(businessId);
-  return addScrapeJob(businessId, url);
+  return addScrapeJob(businessId, url, { isRefresh: true });
 }
 
 async function updateJobProgress(jobId, step, percent, extras = {}) {
@@ -175,6 +207,7 @@ async function processScrapeJob(job) {
     );
     const contactInfo = extractContactInfo(combinedText);
     const extractedBusinessName = extractBusinessNameFromPages(result.pages, businessInfo.businessName);
+    const brandExtracted = extractBrandData(result.pages, job.url);
     const logoUrl =
       result.pages.find((p) => /logo/i.test(p.url || ''))?.url ||
       `${job.url.replace(/\/+$/, '')}/favicon.ico`;
@@ -193,7 +226,13 @@ async function processScrapeJob(job) {
       systemPromptDraft: generatedContent.systemPrompt,
       welcomeMessage: generatedContent.welcomeMessage,
       starterPrompts: generatedContent.starterPrompts,
-      brand: { logo_url: logoUrl, primary_color: primaryColor },
+      brand: {
+        logo_url: brandExtracted.logoUrl || logoUrl,
+        favicon_url: brandExtracted.faviconUrl,
+        primary_color: brandExtracted.primaryColor || primaryColor,
+        secondary_color: brandExtracted.secondaryColor,
+        fonts: brandExtracted.fonts,
+      },
       contactInfo,
     };
 
@@ -234,8 +273,11 @@ async function processScrapeJob(job) {
          detection_confidence, content_quality_score,
          missing_fields, auto_generated_fields,
          selected_agents, system_prompt,
-         welcome_message, starter_prompts, is_draft)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
+         welcome_message, starter_prompts, is_draft,
+         brand_logo_url, brand_favicon_url, brand_primary_color, brand_secondary_color,
+         brand_fonts, brand_welcome_message, brand_starter_prompts)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true,
+         $13, $14, $15, $16, $17, $18, $19)
        ON CONFLICT (business_id)
        DO UPDATE SET
          detected_industry = EXCLUDED.detected_industry,
@@ -244,6 +286,14 @@ async function processScrapeJob(job) {
          starter_prompts = EXCLUDED.starter_prompts,
          selected_agents = EXCLUDED.selected_agents,
          is_draft = true,
+         brand_logo_url = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_logo_url ELSE EXCLUDED.brand_logo_url END,
+         brand_favicon_url = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_favicon_url ELSE EXCLUDED.brand_favicon_url END,
+         brand_primary_color = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_primary_color ELSE EXCLUDED.brand_primary_color END,
+         brand_secondary_color = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_secondary_color ELSE EXCLUDED.brand_secondary_color END,
+         brand_fonts = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_fonts ELSE EXCLUDED.brand_fonts END,
+         brand_welcome_message = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_welcome_message ELSE EXCLUDED.brand_welcome_message END,
+         brand_starter_prompts = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_starter_prompts ELSE EXCLUDED.brand_starter_prompts END,
+         brand_status = CASE WHEN $20 = true THEN 'pending' ELSE bot_configs.brand_status END,
          updated_at = NOW()`,
       [
         job.business_id,
@@ -258,6 +308,14 @@ async function processScrapeJob(job) {
         generatedContent.systemPrompt,
         generatedContent.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
+        brandExtracted.logoUrl || logoUrl,
+        brandExtracted.faviconUrl,
+        brandExtracted.primaryColor || primaryColor,
+        brandExtracted.secondaryColor,
+        JSON.stringify(brandExtracted.fonts || []),
+        generatedContent.welcomeMessage,
+        JSON.stringify(generatedContent.starterPrompts),
+        Boolean(job.is_refresh),
       ],
     );
 
