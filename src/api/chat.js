@@ -191,25 +191,124 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const messagesArray = [...conversationHistory, { role: 'user', content: message }];
 
   // SECTION 9: callWithFallback
-  const callWithFallback = async (stream) => {
-    try {
-      const anthropic = getAnthropicClient(); if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
-      if (stream) return anthropic.messages.stream({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5', max_tokens: 1000, system: fullSystemPrompt, messages: messagesArray });
-      const response = await anthropic.messages.create({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5', max_tokens: 1000, system: fullSystemPrompt, messages: messagesArray });
-      return { text: response.content?.[0]?.text || '', model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5' };
-    } catch (error) {
-      console.error('Claude failed, falling back to OpenAI:', error.message);
-      if (stream) throw error;
-      const openai = getOpenAIClient(); if (!openai) throw error;
-      const response = await openai.chat.completions.create({ model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini', max_tokens: 1000, messages: [{ role: 'system', content: fullSystemPrompt }, ...messagesArray] });
-      return { text: response.choices?.[0]?.message?.content || '', model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini' };
+  const callWithFallback = async (stream, config, systemPrompt, messages) => {
+    // Resolve model — enforces plan, reads from DB
+    // resolvedModel is LOCAL to this function call
+    const resolvedModel = await getSafeModel(
+      config.selected_model || 'gpt-4o-mini',
+      config.plan || 'trial'
+    );
+
+    console.log('[chat] Model resolved', {
+      businessId: config.business_id,
+      plan: config.plan,
+      requested: config.selected_model,
+      using: resolvedModel.modelId,
+      provider: resolvedModel.provider,
+      wasDowngraded: resolvedModel.wasDowngraded
+    });
+
+    // ── Anthropic provider ──────────────────────
+    if (resolvedModel.provider === 'anthropic') {
+      if (stream) {
+        const anthropic = getAnthropicClient();
+        if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
+        const anthropicStream = await anthropic.messages.stream({
+          model: resolvedModel.apiModelId,
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages
+        });
+        return { stream: anthropicStream, resolvedModel };
+      }
+
+      // Non-streaming with OpenAI fallback
+      try {
+        const anthropic = getAnthropicClient();
+        if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
+        const response = await anthropic.messages.create({
+          model: resolvedModel.apiModelId,
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages
+        });
+        return {
+          reply: response.content[0].text,
+          resolvedModel
+        };
+      } catch (anthropicErr) {
+        console.warn('[chat] Anthropic failed, falling back to OpenAI:', anthropicErr.message);
+        const openai = getOpenAIClient();
+        if (!openai) throw anthropicErr;
+        const fb = await openai.chat.completions.create({
+          model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini',
+          max_tokens: 1000,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...messages
+          ]
+        });
+        return {
+          reply: fb.choices[0].message.content,
+          resolvedModel: { ...resolvedModel, wasDowngraded: true }
+        };
+      }
     }
+
+    // ── OpenAI provider ─────────────────────────
+    if (resolvedModel.provider === 'openai') {
+      const openaiMessages = [
+        { role: 'system', content: systemPrompt },
+        ...messages
+      ];
+
+      if (stream) {
+        const openai = getOpenAIClient();
+        if (!openai) throw new Error('Missing OPENAI_API_KEY');
+        const openaiStream = await openai.chat.completions.create({
+          model: resolvedModel.apiModelId,
+          max_tokens: 1000,
+          stream: true,
+          messages: openaiMessages
+        });
+
+        // Wrap to match Anthropic stream interface
+        const wrappedStream = {
+          [Symbol.asyncIterator]: async function* () {
+            for await (const chunk of openaiStream) {
+              const text = chunk.choices[0]?.delta?.content;
+              if (text) {
+                yield {
+                  type: 'content_block_delta',
+                  delta: { type: 'text_delta', text }
+                };
+              }
+            }
+          }
+        };
+        return { stream: wrappedStream, resolvedModel };
+      }
+
+      const openai = getOpenAIClient();
+      if (!openai) throw new Error('Missing OPENAI_API_KEY');
+      const response = await openai.chat.completions.create({
+        model: resolvedModel.apiModelId,
+        max_tokens: 1000,
+        messages: openaiMessages
+      });
+      return {
+        reply: response.choices[0].message.content,
+        resolvedModel
+      };
+    }
+
+    throw new Error('[chat] Unknown provider: ' + resolvedModel.provider);
   };
 
   // SECTION 11: Save async
-  const processResponse = async (fullResponse, usedModel) => {
+  const processResponse = async (fullResponse, result) => {
     const tasks = [];
-    tasks.push(pool.query('INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()),($1,$2,$7,$8,$5,$9,NOW())', [sessionId, config.business_id, 'user', message, session?.current_phase || 1, null, 'assistant', fullResponse, usedModel]));
+    tasks.push(pool.query('INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()),($1,$2,$7,$8,$5,$9,NOW())', [sessionId, config.business_id, 'user', message, session?.current_phase || 1, null, 'assistant', fullResponse, result.resolvedModel.apiModelId]));
     tasks.push((async () => { const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/); if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]); })());
     tasks.push((async () => { if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); } })());
     tasks.push((async () => { const leadMatch = fullResponse.match(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/); if (leadMatch) { try { const leadData = JSON.parse(leadMatch[1]); await saveLead(config, sessionId, leadData, req.namespace); } catch (e) { console.error('LEAD_DATA parse failed:', e.message); } } })());
@@ -224,7 +323,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const timeout = setTimeout(() => { clearInterval(keepAlive); res.write('data: [DONE]\n\n'); res.end(); }, 30000);
     let fullResponse = ''; let calendlyUrl = null;
     try {
-      const stream = await callWithFallback(true);
+      const result = await callWithFallback(true, config, fullSystemPrompt, messagesArray);
+      const stream = result.stream;
+      // result.resolvedModel will be used later in the meta frame
       for await (const chunk of stream) {
         if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
           const token = chunk.delta.text; fullResponse += token;
@@ -235,9 +336,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/); if (calendlyMatch) calendlyUrl = calendlyMatch[1];
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
       const cleanResponse = fullResponse.replace(/CALENDLY_BUTTON:\S+/g, '').replace(/PHASE_\d+_COMPLETE/g, '').replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '').replace(/ESCALATION_REQUIRED/g, '').replace(/URGENT_ESCALATION/g, '').trim();
-      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded })}\n\n`);
       res.write('data: [DONE]\n\n'); res.end();
-      processResponse(fullResponse, process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5').catch((e) => console.error('processResponse error:', e.message));
+      processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
     } catch (streamError) {
       clearInterval(keepAlive); clearTimeout(timeout);
       res.write(`data: ${JSON.stringify({ type: 'error', message: 'Something went wrong. Please try again.' })}\n\n`); res.write('data: [DONE]\n\n'); res.end();
@@ -246,12 +347,17 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
 
   try {
-    const { text: fullResponse, model } = await callWithFallback(false);
+    const result = await callWithFallback(false, config, fullSystemPrompt, messagesArray);
+    const fullResponse = result.reply;
+    // result.resolvedModel will be used later
     const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/);
     const calendlyUrl = calendlyMatch ? calendlyMatch[1] : null;
     const cleanResponse = fullResponse.replace(/CALENDLY_BUTTON:\S+/g, '').replace(/PHASE_\d+_COMPLETE/g, '').replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '').replace(/ESCALATION_REQUIRED/g, '').replace(/URGENT_ESCALATION/g, '').trim();
-    res.json({ reply: cleanResponse, calendlyButton: calendlyUrl ? { type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' } : null });
-    processResponse(fullResponse, model).catch((e) => console.error('processResponse error:', e.message));
+    res.json({
+      reply: result.reply,
+      resolvedModel: result.resolvedModel
+    });
+    processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
   } catch {
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
