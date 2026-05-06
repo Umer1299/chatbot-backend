@@ -100,6 +100,31 @@ async function saveLead(config, sessionId, leadData, namespace) {
   } catch (error) { console.error('saveLead error:', error.message); }
 }
 
+
+// ── Analytics helpers ──
+function detectIntentCategory(text) {
+  const lower = text.toLowerCase();
+  if (lower.match(/\b(price|cost|how much|budget|quote|fee|discount)\b/)) return 'pricing';
+  if (lower.match(/\b(book|schedule|appointment|calendar|reserve|availability)\b/)) return 'booking';
+  if (lower.match(/\b(service|offer|provide|we do|can you|cabinet|floor|paint|install|repair|renovate)\b/)) return 'services';
+  if (lower.match(/\b(where|location|address|area|city|near|serve)\b/)) return 'location';
+  if (lower.match(/\b(help|support|problem|issue|not working|how to)\b/)) return 'support';
+  if (lower.match(/\b(angry|bad|terrible|refund|complain|unhappy|want to speak)\b/)) return 'complaint';
+  return 'unknown';
+}
+
+function checkIfUnanswered(aiReply, contextUsed) {
+  const lower = aiReply.toLowerCase();
+  const short = aiReply.length < 20;
+  const noContext = !contextUsed || contextUsed.length === 0;
+  if (lower.includes("i don't know") || lower.includes("i'm not sure") ||
+      lower.includes("i don't have that information") || lower.includes('please contact')) {
+    return true;
+  }
+  if (short && noContext) return true;
+  return false;
+}
+
 router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const isStreaming = req.query.stream === 'true';
 
@@ -327,7 +352,25 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   // SECTION 11: Save async
   const processResponse = async (fullResponse, result) => {
     const tasks = [];
-    tasks.push(pool.query('INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()),($1,$2,$7,$8,$5,$9,NOW())', [sessionId, config.business_id, 'user', message, session?.current_phase || 1, null, 'assistant', fullResponse, result.resolvedModel.apiModelId]));
+    // Analytics fields (lightweight, fire-and-forget)
+    const intentCategory = detectIntentCategory(message);
+    const isUnanswered = checkIfUnanswered(fullResponse, contextText);
+    const fallbackUsed = result.resolvedModel.wasDowngraded || (selectedAgents.length === 0 && config.system_prompt);
+    const userMsgLen = message.length;
+    const aiRespLen = fullResponse.length;
+
+    tasks.push(
+      pool.query(
+        `INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,intent_category,is_unanswered,fallback_used,user_message_length,ai_response_length,created_at)
+         VALUES ($1,$2,'user',$3,$4,null,$5,false,$6,$7,null,NOW())`,
+        [sessionId, config.business_id, message, session?.current_phase || 1, intentCategory, fallbackUsed, userMsgLen]
+      ),
+      pool.query(
+        `INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,intent_category,is_unanswered,fallback_used,user_message_length,ai_response_length,created_at)
+         VALUES ($1,$2,'assistant',$3,$4,$5,null,$6,$7,null,$8,NOW())`,
+        [sessionId, config.business_id, fullResponse, session?.current_phase || 1, result.resolvedModel.apiModelId, isUnanswered, fallbackUsed, aiRespLen]
+      )
+    );
     tasks.push((async () => { const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/); if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]); })());
     tasks.push((async () => { if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); } })());
     tasks.push((async () => { const leadMatch = fullResponse.match(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/); if (leadMatch) { try { const leadData = JSON.parse(leadMatch[1]); await saveLead(config, sessionId, leadData, req.namespace); } catch (e) { console.error('LEAD_DATA parse failed:', e.message); } } })());

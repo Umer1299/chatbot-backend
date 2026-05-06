@@ -2,6 +2,7 @@ import { Router } from 'express';
 import pool from '../db/pool.js';
 import { getKnowledgeAge } from '../db/vectorStore.js';
 import requireAuth from '../middleware/jwtAuth.js';
+import { generateWeeklyReport } from '../services/reportService.js';
 
 const router = Router();
 
@@ -93,6 +94,17 @@ router.get('/analytics/summary', requireAuth, async (req, res) => {
     agentUsage: agentUsageResult.rows,
     knowledgeAge,
   });
+});
+
+
+router.get('/weekly-report', requireAuth, async (req, res) => {
+  try {
+    const report = await generateWeeklyReport(req.business.businessId);
+    return res.json(report);
+  } catch (error) {
+    console.error('weekly report error:', error.message);
+    return res.status(500).json({ error: 'Failed to generate weekly report' });
+  }
 });
 
 router.get('/:leadId', requireAuth, async (req, res) => {
