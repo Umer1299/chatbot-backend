@@ -124,8 +124,27 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
 
-  // SECTION 3: is_disabled check (added in Prompt 12)
-  if (config.is_disabled) return res.status(403).json({ error: config.disabled_reason || 'Bot is disabled' });
+  // SECTION 3: is_disabled check
+  if (config.is_disabled) {
+    const disabledMsg = config.disabled_reason ||
+      'This chatbot is temporarily unavailable. Please contact the business directly.';
+
+    if (isStreaming) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+
+      res.write('data: {"type":"ready"}\n\n');
+      res.write('data: ' + JSON.stringify({ text: disabledMsg, token: disabledMsg }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ type: 'meta', reply: disabledMsg, isDisabled: true }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } else {
+      res.json({ reply: disabledMsg, isDisabled: true });
+    }
+    return;
+  }
 
   // SECTION 4: Healthcare triage
   const triageKeywords = ['chest pain', 'cant breathe', 'cannot breathe', 'difficulty breathing', 'unconscious', 'overdose', 'suicidal', 'suicide', 'stroke', 'severe bleeding', 'collapsed', 'heart attack', 'seizure', 'not responsive', 'dying', 'life threatening', 'emergency help', 'ambulance'];
