@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 
 import chatRoutes from './routes/chat.js';
@@ -49,7 +49,7 @@ const widgetLimiter = rateLimit({
   }),
   keyGenerator: (req) => {
     const token = req.headers['x-chatbot-token'] || 'anon';
-    const ip = req.ip;
+    const ip = ipKeyGenerator(req);
     return token + ':' + ip;
   },
   windowMs: 60 * 1000,
@@ -64,7 +64,7 @@ const dashboardLimiter = rateLimit({
   }),
   keyGenerator: (req) => {
     const auth = req.headers.authorization || 'anon';
-    const ip = req.ip;
+    const ip = ipKeyGenerator(req);
     return auth + ':' + ip;
   },
   windowMs: 60 * 1000,
