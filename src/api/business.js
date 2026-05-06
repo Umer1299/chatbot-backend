@@ -147,8 +147,8 @@ router.patch('/model', requireAuth, async (req, res) => {
       message: 'Chatbot now uses ' + modelRow.rows[0].branded_name
     });
   } catch (err) {
-    console.error('[business/model]', err.message);
-    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+    console.error('[business/model DEBUG]', err.message, err.stack);
+    res.status(500).json({ error: 'DEBUG: ' + err.message });
   }
 });
 
