@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import pool from '../db/pool.js';
 import { getRelevantChunks } from '../db/vectorStore.js';
 import { buildMasterPrompt, generateProjectDetails } from '../agents/promptBuilder.js';
+import { getSafeModel } from '../services/modelService.js';
 import { sendLeadAlert, sendUrgentEscalation } from '../services/emailService.js';
 import { sanitizeMessage } from '../middleware/sanitize.js';
 import { tokenAuth } from '../middleware/tokenAuth.js';
@@ -221,9 +222,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
   const availability = config.availability_slots || {};
 
-  const agentSystemPrompt = selectedAgents.length > 0
+  const { prompt: builtPrompt, usedAgents } = selectedAgents.length > 0
     ? buildMasterPrompt(businessInfo, selectedAgents, availability)
-    : (config.system_prompt || '');
+    : { prompt: config.system_prompt || '', usedAgents: [] };
+
+  const agentSystemPrompt = builtPrompt;
 
   const ragBlock = contextText && contextText.length > 0
     ? 'KNOWLEDGE BASE:\n' + contextText + '\nUse this to answer accurately.\n\n'
@@ -239,8 +242,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     // Resolve model — enforces plan, reads from DB
     // resolvedModel is LOCAL to this function call
     const resolvedModel = await getSafeModel(
-      config.selected_model || 'gpt-4o-mini',
-      config.plan || 'trial'
+      config.selected_model || 'gpt-4o-mini'
     );
 
     console.log('[chat] Model resolved', {
@@ -349,6 +351,37 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     throw new Error('[chat] Unknown provider: ' + resolvedModel.provider);
   };
 
+
+function parseLeadDataFromResponse(fullResponse) {
+  const leadMatch = fullResponse.match(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/);
+  if (!leadMatch) return null;
+  try {
+    return JSON.parse(leadMatch[1]);
+  } catch (error) {
+    console.warn('LEAD_DATA parse failed, attempting recovery:', error.message);
+    const emailMatch = fullResponse.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    const phoneMatch = fullResponse.match(/(?:\+?\d[\d\s().-]{7,}\d)/);
+    if (!emailMatch && !phoneMatch) return null;
+    return {
+      email: emailMatch?.[0] || null,
+      phone: phoneMatch?.[0] || null,
+      lead_score: 'warm',
+      score_reasons: ['partial_contact_detected']
+    };
+  }
+}
+
+function normalizeLeadData(leadData, messageText = '') {
+  if (!leadData || typeof leadData !== 'object') return null;
+  const normalized = { ...leadData };
+  if (!normalized.lead_score) {
+    const text = `${messageText} ${JSON.stringify(leadData)}`.toLowerCase();
+    normalized.lead_score = /(urgent|asap|today|immediately)/.test(text) ? 'hot' : /(budget|quote|book|schedule)/.test(text) ? 'warm' : 'cold';
+    normalized.score_reasons = [...(Array.isArray(normalized.score_reasons) ? normalized.score_reasons : []), 'backend_default_score'];
+  }
+  return normalized;
+}
+
   // SECTION 11: Save async
   const processResponse = async (fullResponse, result) => {
     const tasks = [];
@@ -373,7 +406,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     );
     tasks.push((async () => { const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/); if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]); })());
     tasks.push((async () => { if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); } })());
-    tasks.push((async () => { const leadMatch = fullResponse.match(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/); if (leadMatch) { try { const leadData = JSON.parse(leadMatch[1]); await saveLead(config, sessionId, leadData, req.namespace); } catch (e) { console.error('LEAD_DATA parse failed:', e.message); } } })());
+    tasks.push((async () => { const parsedLead = parseLeadDataFromResponse(fullResponse); const leadData = normalizeLeadData(parsedLead, message); if (leadData && (leadData.email || leadData.phone || leadData.name)) { await saveLead(config, sessionId, leadData, req.namespace); } })());
     await Promise.allSettled(tasks);
   };
 
@@ -398,7 +431,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/); if (calendlyMatch) calendlyUrl = calendlyMatch[1];
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
       const cleanResponse = fullResponse.replace(/CALENDLY_BUTTON:\S+/g, '').replace(/PHASE_\d+_COMPLETE/g, '').replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '').replace(/ESCALATION_REQUIRED/g, '').replace(/URGENT_ESCALATION/g, '').trim();
-      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, agentsUsed: usedAgents })}\n\n`);
       res.write('data: [DONE]\n\n'); res.end();
       processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
     } catch (streamError) {
@@ -417,7 +450,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const cleanResponse = fullResponse.replace(/CALENDLY_BUTTON:\S+/g, '').replace(/PHASE_\d+_COMPLETE/g, '').replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '').replace(/ESCALATION_REQUIRED/g, '').replace(/URGENT_ESCALATION/g, '').trim();
     res.json({
       reply: result.reply,
-      resolvedModel: result.resolvedModel
+      resolvedModel: result.resolvedModel,
+      agentsUsed: usedAgents
     });
     processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
   } catch {

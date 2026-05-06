@@ -4,7 +4,7 @@ import requireAuth from '../middleware/jwtAuth.js';
 import { redisClient } from '../services/redis.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 import { AGENT_TEMPLATES } from '../agents/templates.js';
-import { getAvailableModels, getLockedModels, validateModelAccess } from '../services/modelService.js';
+import { getAvailableModels, getLockedModels } from '../services/modelService.js';
 
 const router = Router();
 
@@ -103,20 +103,6 @@ router.patch('/model', requireAuth, async (req, res) => {
         error: model.branded_name + ' is not currently available.',
         currentPlan: plan,
         requiredPlan: model.min_plan
-      });
-    }
-
-    // Check plan allows this model
-    const validation = await validateModelAccess(modelId, plan);
-    if (!validation.allowed) {
-      console.warn('[business/model] Access denied', {
-        businessId, modelId, plan, ip: req.ip
-      });
-      return res.status(403).json({
-        error: validation.reason,
-        currentPlan: plan,
-        requiredPlan: validation.requiredPlan,
-        availableFallback: validation.fallback
       });
     }
 

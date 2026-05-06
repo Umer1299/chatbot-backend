@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import { fileQueue } from '../queues/fileQueue.js';
 import { isDuplicateContent } from '../services/recordManager.js';
-import { upsertSupplementalChunks } from '../db/vectorStore.js';
+import { upsertSupplementalChunks, deleteBusinessChunks } from '../db/vectorStore.js';
 import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
 import pool from '../db/pool.js';
 import { tokenAuth } from '../middleware/tokenAuth.js';
@@ -107,10 +107,10 @@ router.get('/job/:jobId', tokenAuth, async (req, res) => {
 
 router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {
   const { namespace } = req.params;
-  const { client } = await initPinecone();
-  const index = client.Index(process.env.PINECONE_INDEX);
-  await index.namespace(namespace).deleteAll();
-  res.json({ success: true });
+  const bizResult = await pool.query('SELECT id FROM businesses WHERE bot_id = $1', [namespace]);
+  if (!bizResult.rows.length) return res.status(404).json({ error: 'Business not found' });
+  const deleted = await deleteBusinessChunks(bizResult.rows[0].id);
+  res.json({ success: true, deletedChunks: deleted });
 });
 
 export default router;
