@@ -303,7 +303,7 @@ router.get('/bot-config/:botId/preview', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
             bc.welcome_message, bc.starter_prompts,
-            bc.is_disabled, bc.disabled_reason
+            b.is_disabled, b.disabled_reason
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
      WHERE b.bot_id = $1 AND bc.active = true
