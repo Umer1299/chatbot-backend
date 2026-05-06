@@ -80,15 +80,25 @@ router.patch('/model', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'modelId required' });
     }
 
-    // Verify model exists in database
-    const modelRow = await pool.query(
-      `SELECT model_id, branded_name
+    // First check if model exists at all (even if inactive)
+    const modelExists = await pool.query(
+      `SELECT model_id, branded_name, is_active
        FROM model_configs
-       WHERE model_id = $1 AND is_active = true`,
+       WHERE model_id = $1`,
       [modelId]
     );
-    if (!modelRow.rows.length) {
+    if (!modelExists.rows.length) {
       return res.status(400).json({ error: 'Invalid model ID: ' + modelId });
+    }
+    const modelRow = modelExists.rows[0];
+
+    if (!modelRow.is_active) {
+      console.warn('[business/model] Inactive model requested', { businessId, modelId, ip: req.ip });
+      return res.status(403).json({
+        error: 'This model is not currently available.',
+        currentPlan: plan,
+        requiredPlan: 'agency'
+      });
     }
 
     // Check plan allows this model
@@ -306,7 +316,7 @@ router.get('/bot-config/:botId/preview', async (req, res) => {
             b.is_disabled, b.disabled_reason
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
-     WHERE b.bot_id = $1 AND bc.active = true
+     WHERE b.bot_id = $1
      LIMIT 1`,
     [req.params.botId],
   );
