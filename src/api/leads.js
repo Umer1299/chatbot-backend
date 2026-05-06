@@ -175,4 +175,15 @@ router.patch('/:leadId', requireAuth, async (req, res) => {
   return res.json({ lead: result.rows[0] });
 });
 
+
+router.get('/analytics/weekly', requireAuth, async (req, res) => {
+  try {
+    const report = await generateWeeklyReport(req.business.businessId);
+    res.json({ success: true, report });
+  } catch (err) {
+    console.error('[leads/analytics]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
 export default router;

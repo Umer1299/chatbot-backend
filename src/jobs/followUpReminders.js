@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import pool from '../db/pool.js';
 import { sendFollowUpReminder, sendMonthlyReport } from '../services/emailService.js';
+import { generateWeeklyReport } from '../services/reportService.js';
 import { redisClient } from '../services/redis.js';
 
 async function withDistributedLock(lockKey, ttlSeconds, fn) {
@@ -148,6 +149,29 @@ export function startReminderJobs() {
     } catch (error) {
       console.error('ABANDONMENT_RECOVERY_ERROR:', error);
     }
+    })
+  );
+
+
+  // Weekly report every Monday at 8 AM
+  cron.schedule('0 8 * * 1', () =>
+    withDistributedLock('weekly-report', 86000, async () => {
+      try {
+        const { rows: businesses } = await pool.query(
+          'SELECT id, owner_email, business_name FROM businesses WHERE active = true'
+        );
+        for (const biz of businesses) {
+          try {
+            const report = await generateWeeklyReport(biz.id);
+            console.log(`Weekly report generated for ${biz.business_name} (id: ${biz.id})`);
+            // TODO: send email if email service supports generic send
+          } catch (err) {
+            console.error(`Report generation failed for ${biz.business_name}:`, err.message);
+          }
+        }
+      } catch (error) {
+        console.error('WEEKLY_REPORT_CRON_ERROR:', error);
+      }
     })
   );
 
