@@ -279,8 +279,15 @@ router.get('/bot-config', requireAuth, async (req, res) => {
     welcome_message: row?.welcome_message || scrapeResult.welcomeMessage || '',
     starter_prompts: row?.starter_prompts || scrapeResult.starterPrompts || [],
     brand: {
-      logo_url: scrapeResult?.brand?.logo_url || null,
-      primary_color: scrapeResult?.brand?.primary_color || row?.primary_color || '#1F6FEB',
+      business_name: scrapeResult.businessName || row?.business_name || req.business.businessName || 'Your Business',
+      logo_url: row?.brand_logo_url || scrapeResult?.brand?.logo_url || null,
+      favicon_url: row?.brand_favicon_url || scrapeResult?.brand?.favicon_url || null,
+      primary_color: row?.brand_primary_color || scrapeResult?.brand?.primary_color || row?.primary_color || '#1F6FEB',
+      secondary_color: row?.brand_secondary_color || scrapeResult?.brand?.secondary_color || '#111827',
+      fonts: row?.brand_fonts || scrapeResult?.brand?.fonts || [],
+      welcome_message: row?.brand_welcome_message || row?.welcome_message || scrapeResult?.welcomeMessage || '',
+      starter_prompts: row?.brand_starter_prompts || row?.starter_prompts || scrapeResult?.starterPrompts || [],
+      status: row?.brand_status || 'pending',
     },
     suggested_agents: suggestedAgentIds,
     availableAgents,
@@ -329,6 +336,9 @@ ${agentRoles}`.trim();
          welcome_message = $2,
          starter_prompts = $3,
          selected_agents = $4,
+         brand_welcome_message = $2,
+         brand_starter_prompts = $3,
+         brand_status = 'approved',
          is_draft = false,
          active = true,
          updated_at = NOW()
@@ -351,10 +361,34 @@ ${agentRoles}`.trim();
   return res.json({ success: true, message: 'Chatbot is now live', selected_agents: selectedAgentIds, system_prompt: masterSystemPrompt });
 });
 
+
+router.patch('/bot-config/draft', requireAuth, async (req, res) => {
+  const { businessName, logoUrl, faviconUrl, primaryColor, secondaryColor, fonts, welcomeMessage, starterPrompts, approve } = req.body;
+  await pool.query(
+    `UPDATE bot_configs
+     SET brand_logo_url = COALESCE($1, brand_logo_url),
+         brand_favicon_url = COALESCE($2, brand_favicon_url),
+         brand_primary_color = COALESCE($3, brand_primary_color),
+         brand_secondary_color = COALESCE($4, brand_secondary_color),
+         brand_fonts = COALESCE($5, brand_fonts),
+         brand_welcome_message = COALESCE($6, brand_welcome_message),
+         brand_starter_prompts = COALESCE($7, brand_starter_prompts),
+         brand_status = CASE WHEN $8 = true THEN 'approved' ELSE brand_status END,
+         updated_at = NOW()
+     WHERE business_id = $9`,
+    [logoUrl || null, faviconUrl || null, primaryColor || null, secondaryColor || null, JSON.stringify(fonts || []), welcomeMessage || null, JSON.stringify(starterPrompts || []), Boolean(approve), req.business.businessId],
+  );
+  if (businessName) {
+    await pool.query('UPDATE businesses SET business_name = $1, updated_at = NOW() WHERE id = $2', [businessName, req.business.businessId]);
+  }
+  return res.json({ success: true });
+});
+
 router.get('/bot-config/:botId/preview', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
-            bc.welcome_message, bc.starter_prompts,
+            bc.welcome_message, bc.starter_prompts, bc.brand_logo_url, bc.brand_favicon_url,
+            bc.brand_primary_color, bc.brand_secondary_color, bc.brand_fonts, bc.brand_status,
             b.is_disabled, b.disabled_reason
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
@@ -369,9 +403,14 @@ router.get('/bot-config/:botId/preview', async (req, res) => {
     botId: rows[0].bot_id,
     businessName: rows[0].business_name,
     industry: rows[0].industry,
-    primaryColor: rows[0].primary_color,
+    primaryColor: rows[0].brand_primary_color || rows[0].primary_color,
+    secondaryColor: rows[0].brand_secondary_color || null,
+    logoUrl: rows[0].brand_logo_url || null,
+    faviconUrl: rows[0].brand_favicon_url || null,
+    fonts: rows[0].brand_fonts || [],
     welcomeMessage: rows[0].welcome_message,
     starterPrompts: rows[0].starter_prompts || [],
+    brandStatus: rows[0].brand_status || "pending",
     isPreview: true,
     isDisabled: rows[0].is_disabled || false,
     disabledMessage: rows[0].disabled_reason || null
