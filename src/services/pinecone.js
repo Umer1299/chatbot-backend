@@ -1,3 +1,8 @@
+/**
+ * DEPRECATED — DO NOT USE
+ * Replaced by pgvector: src/db/vectorStore.js
+ * Kept for rollback reference only.
+ */
 import { Pinecone } from '@pinecone-database/pinecone';
 import { PineconeStore } from '@langchain/pinecone';
 import { OpenAIEmbeddings } from '@langchain/openai';

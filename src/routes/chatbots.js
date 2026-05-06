@@ -1,10 +1,14 @@
 import express from 'express';
 import { redisClient } from '../services/redis.js';
-import { initPinecone } from '../services/pinecone.js';
-import { tokenAuth } from '../middleware/tokenAuth.js';
+import { requireAdminKey } from '../middleware/adminAuth.js';
 import { v4 as uuidv4 } from 'uuid';
+import { deleteBusinessChunks } from '../db/vectorStore.js';
+import pool from '../db/pool.js';
 
 const router = express.Router();
+
+// All routes require admin key
+router.use(requireAdminKey);
 
 router.get('/:namespace', async (req, res) => {
   const data = await redisClient.get(`chatbot:${req.params.namespace}`);
@@ -38,15 +42,22 @@ router.get('/', async (req, res) => {
   res.json(chatbots);
 });
 
-router.delete('/:namespace', tokenAuth, async (req, res) => {
+router.delete('/:namespace', async (req, res) => {
   const { namespace } = req.params;
   const token = await redisClient.get(`chatbot_namespace_token:${namespace}`);
   if (token) await redisClient.del(`chatbot_token:${token}`);
   await redisClient.del(`chatbot_namespace_token:${namespace}`);
   await redisClient.del(`chatbot:${namespace}`);
-  const { client } = await initPinecone();
-  const index = client.Index(process.env.PINECONE_INDEX);
-  await index.namespace(namespace).deleteAll();
+
+  // Remove knowledge base chunks from pgvector
+  const bizResult = await pool.query(
+    'SELECT id FROM businesses WHERE bot_id = $1',
+    [namespace]
+  );
+  if (bizResult.rows.length) {
+    await deleteBusinessChunks(bizResult.rows[0].id);
+  }
+
   res.json({ success: true });
 });
 

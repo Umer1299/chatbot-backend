@@ -1,9 +1,10 @@
 import express from 'express';
 import multer from 'multer';
 import { fileQueue } from '../queues/fileQueue.js';
-import { getVectorStore, initPinecone } from '../services/pinecone.js';
 import { isDuplicateContent } from '../services/recordManager.js';
-import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
+import { upsertSupplementalChunks } from '../db/vectorStore.js';
+import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
+import pool from '../db/pool.js';
 import { tokenAuth } from '../middleware/tokenAuth.js';
 import { domainRestriction } from '../middleware/domainRestriction.js';
 import { redisClient } from '../services/redis.js';
@@ -24,11 +25,32 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
     if (text && text.trim()) {
       const isDup = await isDuplicateContent(text, namespace);
       if (isDup) return res.json({ success: true, skipped: true, reason: 'Duplicate text' });
-      const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
-      const chunks = await splitter.splitDocuments([{ pageContent: text, metadata: { source: 'text' } }]);
-      const vectorStore = await getVectorStore(namespace);
-      await vectorStore.addDocuments(chunks);
-      return res.json({ success: true, chunksUpserted: chunks.length });
+
+      const bizResult = await pool.query(
+        'SELECT id FROM businesses WHERE bot_id = $1',
+        [namespace]
+      );
+      if (!bizResult.rows.length) {
+        return res.status(404).json({ error: 'Business not found' });
+      }
+      const businessId = bizResult.rows[0].id;
+
+      const fakePages = [{
+        content: text,
+        url: 'manual-upload',
+        title: 'Manual text upload'
+      }];
+      const chunks = cleanAndChunkContent(fakePages).filter(shouldEmbedChunk);
+      if (chunks.length === 0) {
+        return res.status(400).json({ error: 'Text too short or low quality' });
+      }
+
+      const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload');
+      return res.json({
+        success: true,
+        chunksUpserted: result.inserted,
+        message: `${result.inserted} knowledge chunks added`
+      });
     }
 
     if (!files.length) return res.status(400).json({ error: 'No files or text provided' });
@@ -49,21 +71,38 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
         jobId,
       });
       jobIds.push(jobId);
-      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued' }));
+      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace }));
       console.log(`File queued: ${file.originalname} for namespace ${namespace}, job ${jobId}`);
     }
     res.json({ success: true, queued: true, jobIds });
   } catch (err) {
     console.error('Upsert error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('[upsert]', req.method, req.path, err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 
-router.get('/job/:jobId', async (req, res) => {
+router.get('/job/:jobId', tokenAuth, async (req, res) => {
   const { jobId } = req.params;
-  const data = await redisClient.get(`job:${jobId}`);
-  if (!data) return res.status(404).json({ error: 'Job not found' });
-  res.json(JSON.parse(data));
+  const raw = await redisClient.get(`job:${jobId}`);
+  if (!raw) return res.status(404).json({ error: 'Job not found' });
+
+  const job = JSON.parse(raw);
+
+  if (!job.namespace) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  if (job.namespace !== req.namespace) {
+    console.warn('[upsert] Cross-namespace job access', {
+      caller: req.namespace,
+      jobNamespace: job.namespace,
+      ip: req.ip
+    });
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  res.json(job);
 });
 
 router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {
