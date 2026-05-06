@@ -4,6 +4,7 @@ import requireAuth from '../middleware/jwtAuth.js';
 import { redisClient } from '../services/redis.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 import { AGENT_TEMPLATES } from '../agents/templates.js';
+import { getAvailableModels, getLockedModels, validateModelAccess } from '../services/modelService.js';
 
 const router = Router();
 
@@ -36,6 +37,109 @@ router.patch('/settings', requireAuth, async (req, res) => {
   }
 
   return res.json({ business });
+});
+
+
+router.get('/models', requireAuth, async (req, res) => {
+  try {
+    const plan = req.business.plan || 'trial';
+    const businessId = req.business.businessId;
+
+    const [available, locked, configResult] = await Promise.all([
+      getAvailableModels(plan),
+      getLockedModels(plan),
+      pool.query(
+        `SELECT selected_model
+         FROM bot_configs
+         WHERE business_id = $1 AND active = true
+         LIMIT 1`,
+        [businessId]
+      )
+    ]);
+
+    res.json({
+      currentPlan: plan,
+      currentModel: configResult.rows[0]?.selected_model || 'gpt-4o-mini',
+      availableModels: available,
+      lockedModels: locked
+    });
+  } catch (err) {
+    console.error('[business/models]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+
+router.patch('/model', requireAuth, async (req, res) => {
+  try {
+    const { modelId } = req.body;
+    const plan = req.business.plan || 'trial';
+    const businessId = req.business.businessId;
+
+    if (!modelId) {
+      return res.status(400).json({ error: 'modelId required' });
+    }
+
+    // Verify model exists in database
+    const modelRow = await pool.query(
+      `SELECT model_id, branded_name
+       FROM model_configs
+       WHERE model_id = $1 AND is_active = true`,
+      [modelId]
+    );
+    if (!modelRow.rows.length) {
+      return res.status(400).json({ error: 'Invalid model ID: ' + modelId });
+    }
+
+    // Check plan allows this model
+    const validation = await validateModelAccess(modelId, plan);
+    if (!validation.allowed) {
+      console.warn('[business/model] Access denied', {
+        businessId, modelId, plan, ip: req.ip
+      });
+      return res.status(403).json({
+        error: validation.reason,
+        currentPlan: plan,
+        requiredPlan: validation.requiredPlan,
+        availableFallback: validation.fallback
+      });
+    }
+
+    // Update both tables
+    await Promise.all([
+      pool.query(
+        `UPDATE bot_configs
+         SET selected_model = $1, updated_at = NOW()
+         WHERE business_id = $2 AND active = true`,
+        [modelId, businessId]
+      ),
+      pool.query(
+        `UPDATE businesses
+         SET selected_model = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [modelId, businessId]
+      )
+    ]);
+
+    // Clear Redis bot config cache
+    const bizRow = await pool.query(
+      'SELECT bot_id FROM businesses WHERE id = $1',
+      [businessId]
+    );
+    if (bizRow.rows[0]?.bot_id) {
+      await redisClient.del('chatbot_config:' + bizRow.rows[0].bot_id);
+    }
+
+    res.json({
+      success: true,
+      selectedModel: modelId,
+      brandedName: modelRow.rows[0].branded_name,
+      message: 'Chatbot now uses ' + modelRow.rows[0].branded_name
+    });
+  } catch (err) {
+    console.error('[business/model]', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
 });
 
 router.get('/bot-config', requireAuth, async (req, res) => {
