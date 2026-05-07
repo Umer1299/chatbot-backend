@@ -381,6 +381,16 @@ function normalizeLeadData(leadData, messageText = '') {
   return normalized;
 }
 
+function cleanAssistantResponse(text = '') {
+  return String(text)
+    .replace(/CALENDLY_BUTTON:\S+/g, '')
+    .replace(/PHASE_\d+_COMPLETE/g, '')
+    .replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '')
+    .replace(/ESCALATION_REQUIRED/g, '')
+    .replace(/URGENT_ESCALATION/g, '')
+    .trim();
+}
+
   // SECTION 11: Save async
   const processResponse = async (fullResponse, result) => {
     const tasks = [];
@@ -429,7 +439,7 @@ function normalizeLeadData(leadData, messageText = '') {
       clearInterval(keepAlive); clearTimeout(timeout);
       const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/); if (calendlyMatch) calendlyUrl = calendlyMatch[1];
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
-      const cleanResponse = fullResponse.replace(/CALENDLY_BUTTON:\S+/g, '').replace(/PHASE_\d+_COMPLETE/g, '').replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '').replace(/ESCALATION_REQUIRED/g, '').replace(/URGENT_ESCALATION/g, '').trim();
+      const cleanResponse = cleanAssistantResponse(fullResponse);
       res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, agentsUsed: usedAgents })}\n\n`);
       res.write('data: [DONE]\n\n'); res.end();
       processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
@@ -444,11 +454,9 @@ function normalizeLeadData(leadData, messageText = '') {
     const result = await callWithFallback(false, config, fullSystemPrompt, messagesArray);
     const fullResponse = result.reply;
     // result.resolvedModel will be used later
-    const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/);
-    const calendlyUrl = calendlyMatch ? calendlyMatch[1] : null;
-    const cleanResponse = fullResponse.replace(/CALENDLY_BUTTON:\S+/g, '').replace(/PHASE_\d+_COMPLETE/g, '').replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '').replace(/ESCALATION_REQUIRED/g, '').replace(/URGENT_ESCALATION/g, '').trim();
+    const cleanResponse = cleanAssistantResponse(fullResponse);
     res.json({
-      reply: result.reply,
+      reply: cleanResponse,
       resolvedModel: result.resolvedModel,
       agentsUsed: usedAgents
     });
