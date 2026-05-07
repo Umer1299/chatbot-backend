@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import pool from '../db/pool.js';
 import requireAuth from '../middleware/jwtAuth.js';
-import { addScrapeJob, getJobStatus, refreshScrapeJob } from '../jobs/scrapeWorker.js';
+import { addScrapeJob, refreshScrapeJob } from '../jobs/scrapeWorker.js';
 import { processSupplementalInfo } from '../agents/contentValidator.js';
 
 const router = Router();
@@ -19,7 +19,20 @@ router.post('/start', requireAuth, async (req, res) => {
 });
 
 router.get('/status/:jobId', requireAuth, async (req, res) => {
-  const job = await getJobStatus(req.params.jobId);
+  const { rows } = await pool.query(
+    `SELECT id, status, progress_step, progress_percent,
+            pages_scraped, chunks_created, detected_industry,
+            content_quality_score, missing_fields,
+            auto_generated_fields, has_critical_gaps,
+            welcome_message, starter_prompts,
+            system_prompt_draft, result,
+            error_message, queued_at, started_at, completed_at
+     FROM scrape_jobs
+     WHERE id = $1 AND business_id = $2
+     LIMIT 1`,
+    [req.params.jobId, req.business.businessId],
+  );
+  const job = rows[0] || null;
   if (!job) return res.status(404).json({ error: 'Job not found' });
   return res.json(job);
 });
