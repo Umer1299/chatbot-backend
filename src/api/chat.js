@@ -203,8 +203,30 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   // SECTION 6: Load session + history
   let session = (await pool.query('SELECT * FROM sessions WHERE id=$1', [sessionId])).rows[0] || null;
   if (!session) { await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]); session = { current_phase: 1 }; }
-  const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at ASC LIMIT 20', [sessionId]);
-  const conversationHistory = historyRows.rows.map((row) => ({ role: row.role, content: row.content }));
+  const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at DESC LIMIT 20', [sessionId]);
+
+  // SMART HISTORY PRUNING — keep last 6 full messages, summarize older ones
+  const MAX_FULL_MSG = 6;
+  const MAX_SUMMARY_MSG = 6;
+  const processedMessages = [];
+  let fullCount = 0;
+  let summaryCount = 0;
+
+  // historyRows.rows is sorted by created_at DESC (most recent first)
+  for (const msg of historyRows.rows) {
+    if (fullCount < MAX_FULL_MSG) {
+      processedMessages.unshift({ role: msg.role, content: msg.content });
+      fullCount++;
+    } else if (summaryCount < MAX_SUMMARY_MSG) {
+      processedMessages.unshift({
+        role: 'system',
+        content: `Previous conversation: ${msg.role === 'user' ? 'User asked' : 'Assistant said'}: "${msg.content.slice(0, 120)}"...`
+      });
+      summaryCount++;
+    } else {
+      break; // drop older messages
+    }
+  }
   // SECTION 7: RAG context retrieval
   const chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5);
   const contextText = chunks.length > 0 ? chunks.map((c) => c.content).join('\n\n') : '';
@@ -234,7 +256,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const phaseBlock = '\nCURRENT PHASE: ' + (session?.current_phase || 1) + '\n';
 
   const fullSystemPrompt = ragBlock + agentSystemPrompt + phaseBlock;
-  const messagesArray = [...conversationHistory, { role: 'user', content: message }];
+  const messagesArray = [...processedMessages, { role: 'user', content: message }];
 
   // SECTION 9: callWithFallback
   const callWithFallback = async (stream, config, systemPrompt, messages) => {
