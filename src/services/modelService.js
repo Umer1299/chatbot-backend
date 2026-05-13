@@ -1,17 +1,24 @@
 import pool from '../db/pool.js';
 
-const OPENAI_MODEL_ALIASES = {
+const PROVIDER_MODEL_ALIASES = {
+  openai: {
   'gpt-5.5': 'gpt-5',
   'gpt-5.5-pro': 'gpt-5-pro',
   'gpt-5.4': 'gpt-5',
   'gpt-5.4-pro': 'gpt-5-pro',
   'gpt-5.4-mini': 'gpt-5-mini',
   'gpt-5.4-nano': 'gpt-5-nano',
+  },
+  anthropic: {
+    'claude-sonnet-4-6': 'claude-sonnet-4-5-20250929',
+    'claude-opus-4-6': 'claude-opus-4-5-20251101',
+    'claude-opus-4-7': 'claude-opus-4-5-20251101'
+  }
 };
 
 function resolveProviderModelId(provider, apiModelId) {
-  if (provider !== 'openai') return apiModelId;
-  return OPENAI_MODEL_ALIASES[apiModelId] || apiModelId;
+  const aliases = PROVIDER_MODEL_ALIASES[provider] || {};
+  return aliases[apiModelId] || apiModelId;
 }
 
 // Plan hierarchy for access control
