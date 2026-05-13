@@ -21,6 +21,46 @@ function resolveProviderModelId(provider, apiModelId) {
   return aliases[apiModelId] || apiModelId;
 }
 
+const LEGACY_MODEL_ALIASES = {
+  'claude-sonnet': 'claude-sonnet-4-5-20250929',
+  'claude-opus': 'claude-opus-4-5-20251101'
+};
+
+export async function resolveCanonicalModelId(inputModelId) {
+  const requestedModelId = String(inputModelId || '').trim();
+  if (!requestedModelId) {
+    return null;
+  }
+
+  const directAlias = LEGACY_MODEL_ALIASES[requestedModelId] || requestedModelId;
+  const result = await pool.query(
+    `SELECT model_id, api_model_id, provider, is_active, branded_name, min_plan, sort_order
+     FROM model_configs
+     WHERE model_id = $1 OR api_model_id = $1
+     ORDER BY CASE WHEN model_id = $1 THEN 0 ELSE 1 END, is_active DESC, sort_order ASC, model_id ASC
+     LIMIT 1`,
+    [directAlias]
+  );
+
+  if (!result.rows.length) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  const resolvedApiModelId = resolveProviderModelId(row.provider, row.api_model_id);
+  return {
+    requestedModelId,
+    lookupModelId: directAlias,
+    modelId: row.model_id,
+    provider: row.provider,
+    dbApiModelId: row.api_model_id,
+    apiModelId: resolvedApiModelId,
+    isActive: row.is_active,
+    brandedName: row.branded_name,
+    requiredPlan: row.min_plan
+  };
+}
+
 // Plan hierarchy for access control
 
 // ──────────────────────────────────────────────
@@ -80,15 +120,18 @@ export async function validateModelAccess(modelId) {
 // - always returned, never stored in outer scope
 // ──────────────────────────────────────────────
 export async function getSafeModel(requestedModelId) {
-  const validation = await validateModelAccess(requestedModelId);
+  const canonical = await resolveCanonicalModelId(requestedModelId);
+  const canonicalModelId = canonical?.modelId || requestedModelId;
+  const validation = await validateModelAccess(canonicalModelId);
 
   const modelIdToUse = validation.allowed
-    ? requestedModelId
+    ? canonicalModelId
     : (validation.fallback ?? 'gpt-4o-mini');
 
   if (!validation.allowed) {
     console.warn('[modelService] Model fallback', {
       requested: requestedModelId,
+      normalized: canonicalModelId,
       using: modelIdToUse,
       reason: validation.reason
     });

@@ -4,7 +4,7 @@ import requireAuth from '../middleware/jwtAuth.js';
 import { redisClient } from '../services/redis.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 import { AGENT_TEMPLATES } from '../agents/templates.js';
-import { getAvailableModels, getLockedModels } from '../services/modelService.js';
+import { getAvailableModels, getLockedModels, resolveCanonicalModelId } from '../services/modelService.js';
 import { buildMasterPrompt, buildAgentPromptInstructions } from '../agents/promptBuilder.js';
 
 const router = Router();
@@ -81,31 +81,40 @@ router.patch('/model', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'modelId required' });
     }
 
-    // Check if model exists in database
-    const modelResult = await pool.query(
-      `SELECT model_id, branded_name, is_active, min_plan
-       FROM model_configs
-       WHERE model_id = $1`,
-      [modelId]
-    );
-
-    if (!modelResult.rows.length) {
+    const normalized = await resolveCanonicalModelId(modelId);
+    if (!normalized) {
+      console.warn('[business/model] Invalid model requested', {
+        businessId,
+        requestedModelId: modelId,
+        ip: req.ip
+      });
       return res.status(400).json({ error: 'Invalid model ID: ' + modelId });
     }
 
-    const model = modelResult.rows[0];
+    const canonicalModelId = normalized.modelId;
 
     // If model is inactive, deny with 403
-    if (!model.is_active) {
+    if (!normalized.isActive) {
       console.warn('[business/model] Inactive model requested', {
-        businessId, modelId, ip: req.ip
+        businessId,
+        requestedModelId: modelId,
+        canonicalModelId,
+        ip: req.ip
       });
       return res.status(403).json({
-        error: model.branded_name + ' is not currently available.',
+        error: normalized.brandedName + ' is not currently available.',
         currentPlan: plan,
-        requiredPlan: model.min_plan
+        requiredPlan: normalized.requiredPlan
       });
     }
+
+    console.info('[business/model] Model normalized', {
+      businessId,
+      requestedModelId: modelId,
+      canonicalModelId,
+      provider: normalized.provider,
+      providerApiModelId: normalized.apiModelId
+    });
 
     // Update both tables
     await Promise.all([
@@ -113,13 +122,13 @@ router.patch('/model', requireAuth, async (req, res) => {
         `UPDATE bot_configs
          SET selected_model = $1, updated_at = NOW()
          WHERE business_id = $2 AND active = true`,
-        [modelId, businessId]
+        [canonicalModelId, businessId]
       ),
       pool.query(
         `UPDATE businesses
          SET selected_model = $1, updated_at = NOW()
          WHERE id = $2`,
-        [modelId, businessId]
+        [canonicalModelId, businessId]
       )
     ]);
 
@@ -134,9 +143,9 @@ router.patch('/model', requireAuth, async (req, res) => {
 
     res.json({
       success: true,
-      selectedModel: modelId,
-      brandedName: model.branded_name,
-      message: 'Chatbot now uses ' + model.branded_name
+      selectedModel: canonicalModelId,
+      brandedName: normalized.brandedName,
+      message: 'Chatbot now uses ' + normalized.brandedName
     });
   } catch (err) {
     console.error('[business/model]', err.message);
