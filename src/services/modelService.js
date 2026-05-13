@@ -1,5 +1,19 @@
 import pool from '../db/pool.js';
 
+const OPENAI_MODEL_ALIASES = {
+  'gpt-5.5': 'gpt-5',
+  'gpt-5.5-pro': 'gpt-5-pro',
+  'gpt-5.4': 'gpt-5',
+  'gpt-5.4-pro': 'gpt-5-pro',
+  'gpt-5.4-mini': 'gpt-5-mini',
+  'gpt-5.4-nano': 'gpt-5-nano',
+};
+
+function resolveProviderModelId(provider, apiModelId) {
+  if (provider !== 'openai') return apiModelId;
+  return OPENAI_MODEL_ALIASES[apiModelId] || apiModelId;
+}
+
 // Plan hierarchy for access control
 
 // ──────────────────────────────────────────────
@@ -54,8 +68,8 @@ export async function validateModelAccess(modelId) {
 // Returns { modelId, apiModelId, provider, wasDowngraded }
 //
 // CRITICAL:
-// - api_model_id is read from model_configs table
-// - never hardcoded
+// - base api_model_id is read from model_configs table
+// - provider-specific alias normalization may occur at runtime
 // - always returned, never stored in outer scope
 // ──────────────────────────────────────────────
 export async function getSafeModel(requestedModelId) {
@@ -98,9 +112,19 @@ export async function getSafeModel(requestedModelId) {
   }
 
   const row = apiResult.rows[0];
+  const resolvedApiModelId = resolveProviderModelId(row.provider, row.api_model_id);
+
+  if (resolvedApiModelId !== row.api_model_id) {
+    console.info('[modelService] Provider model alias applied', {
+      modelId: modelIdToUse,
+      dbApiModelId: row.api_model_id,
+      resolvedApiModelId
+    });
+  }
+
   return {
     modelId: modelIdToUse,
-    apiModelId: row.api_model_id,
+    apiModelId: resolvedApiModelId,
     provider: row.provider,
     wasDowngraded: !validation.allowed
   };
