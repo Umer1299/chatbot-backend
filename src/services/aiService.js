@@ -39,7 +39,7 @@ function getOpenAIClient() {
 export async function claudeChat(systemPrompt, messages, options = {}) {
   try {
     const anthropic = getAnthropicClient();
-    const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+    const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929';
 
     const response = await anthropic.messages.create({
       model,
@@ -57,7 +57,7 @@ export async function claudeChat(systemPrompt, messages, options = {}) {
 
 export function claudeStream(systemPrompt, messages) {
   const anthropic = getAnthropicClient();
-  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+  const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929';
 
   return anthropic.messages.stream({
     model,

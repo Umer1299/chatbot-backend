@@ -20,7 +20,7 @@ async function generateLeadSummary(leadData, industry) {
   try {
     const anthropic = getAnthropicClient();
     if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
-    const response = await anthropic.messages.create({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5', max_tokens: 150, system: 'You write concise CRM lead summaries. Return JSON only. No markdown. No explanation.', messages: [{ role: 'user', content: prompt }] });
+    const response = await anthropic.messages.create({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929', max_tokens: 150, system: 'You write concise CRM lead summaries. Return JSON only. No markdown. No explanation.', messages: [{ role: 'user', content: prompt }] });
     return JSON.parse(response.content?.[0]?.text || '{}').summary;
   } catch {
     try {

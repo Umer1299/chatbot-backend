@@ -25,12 +25,12 @@ INSERT INTO model_configs (
   model_id, display_name, branded_name,
   provider, api_model_id, min_plan, is_active, sort_order
 ) VALUES
-  ('gpt-5.5', 'GPT-5.5', 'OpenAI GPT-5.5', 'openai', 'gpt-5.5', 'trial', true, 1),
-  ('gpt-5.5-pro', 'GPT-5.5 Pro', 'OpenAI GPT-5.5 Pro', 'openai', 'gpt-5.5-pro', 'trial', true, 2),
-  ('gpt-5.4', 'GPT-5.4', 'OpenAI GPT-5.4', 'openai', 'gpt-5.4', 'trial', true, 3),
-  ('gpt-5.4-pro', 'GPT-5.4 Pro', 'OpenAI GPT-5.4 Pro', 'openai', 'gpt-5.4-pro', 'trial', true, 4),
-  ('gpt-5.4-mini', 'GPT-5.4 Mini', 'OpenAI GPT-5.4 Mini', 'openai', 'gpt-5.4-mini', 'trial', true, 5),
-  ('gpt-5.4-nano', 'GPT-5.4 Nano', 'OpenAI GPT-5.4 Nano', 'openai', 'gpt-5.4-nano', 'trial', true, 6),
+  ('gpt-5.5', 'GPT-5.5', 'OpenAI GPT-5.5', 'openai', 'gpt-5', 'trial', true, 1),
+  ('gpt-5.5-pro', 'GPT-5.5 Pro', 'OpenAI GPT-5.5 Pro', 'openai', 'gpt-5-pro', 'trial', true, 2),
+  ('gpt-5.4', 'GPT-5.4', 'OpenAI GPT-5.4', 'openai', 'gpt-5', 'trial', true, 3),
+  ('gpt-5.4-pro', 'GPT-5.4 Pro', 'OpenAI GPT-5.4 Pro', 'openai', 'gpt-5-pro', 'trial', true, 4),
+  ('gpt-5.4-mini', 'GPT-5.4 Mini', 'OpenAI GPT-5.4 Mini', 'openai', 'gpt-5-mini', 'trial', true, 5),
+  ('gpt-5.4-nano', 'GPT-5.4 Nano', 'OpenAI GPT-5.4 Nano', 'openai', 'gpt-5-nano', 'trial', true, 6),
   ('gpt-5-mini', 'GPT-5 Mini', 'OpenAI GPT-5 Mini', 'openai', 'gpt-5-mini', 'trial', true, 7),
   ('gpt-5-nano', 'GPT-5 Nano', 'OpenAI GPT-5 Nano', 'openai', 'gpt-5-nano', 'trial', true, 8),
   ('gpt-4o', 'GPT-4o', 'OpenAI GPT-4o', 'openai', 'gpt-4o', 'trial', true, 9),
