@@ -259,7 +259,7 @@ router.get('/status', requireAuth, async (req, res) => {
 
 router.get('/bot-config', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, bc.welcome_message, b.industry
+    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.brand_logo_url, bc.welcome_message, b.industry
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
      WHERE bc.business_id = $1 AND bc.active = true
@@ -387,8 +387,21 @@ router.patch('/bot-config/draft', requireAuth, async (req, res) => {
      WHERE business_id = $9`,
     [logoUrl || null, faviconUrl || null, primaryColor || null, secondaryColor || null, JSON.stringify(fonts || []), welcomeMessage || null, JSON.stringify(starterPrompts || []), Boolean(approve), req.business.businessId],
   );
-  if (businessName) {
-    await pool.query('UPDATE businesses SET business_name = $1, updated_at = NOW() WHERE id = $2', [businessName, req.business.businessId]);
+  if (businessName || logoUrl) {
+    const updates = [];
+    const values = [];
+
+    if (businessName) {
+      values.push(businessName);
+      updates.push(`business_name = $${values.length}`);
+    }
+    if (logoUrl) {
+      values.push(logoUrl);
+      updates.push(`brand_logo_url = $${values.length}`);
+    }
+
+    values.push(req.business.businessId);
+    await pool.query(`UPDATE businesses SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${values.length}`, values);
   }
   return res.json({ success: true });
 });
@@ -396,7 +409,7 @@ router.patch('/bot-config/draft', requireAuth, async (req, res) => {
 router.get('/bot-config/:botId/preview', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
-            bc.welcome_message, bc.starter_prompts, bc.brand_logo_url, bc.brand_favicon_url,
+            bc.welcome_message, bc.starter_prompts, b.brand_logo_url, bc.brand_favicon_url,
             bc.brand_primary_color, bc.brand_secondary_color, bc.brand_fonts, bc.brand_status,
             b.is_disabled, b.disabled_reason
      FROM bot_configs bc
