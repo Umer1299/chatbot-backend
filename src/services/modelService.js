@@ -61,11 +61,9 @@ export async function resolveCanonicalModelId(inputModelId) {
   };
 }
 
-// Plan hierarchy for access control
-
 // ──────────────────────────────────────────────
-// getAvailableModels(plan)
-// Returns models this plan can access
+// getAvailableModels()
+// Returns all active models (no plan gating)
 // ──────────────────────────────────────────────
 export async function getAvailableModels() {
   const result = await pool.query(`
@@ -80,15 +78,15 @@ export async function getAvailableModels() {
 }
 
 // ──────────────────────────────────────────────
-// getLockedModels(plan)
-// Returns models this plan cannot access (for UI)
+// getLockedModels()
+// Plan locking disabled; always empty
 // ──────────────────────────────────────────────
 export async function getLockedModels() {
   return [];
 }
 
 // ──────────────────────────────────────────────
-// validateModelAccess(modelId, plan)
+// validateModelAccess(modelId)
 // Returns { allowed, reason, fallback, requiredPlan }
 // ──────────────────────────────────────────────
 export async function validateModelAccess(modelId) {
@@ -111,7 +109,7 @@ export async function validateModelAccess(modelId) {
 }
 
 // ──────────────────────────────────────────────
-// getSafeModel(requestedModelId, plan)
+// getSafeModel(requestedModelId)
 // Returns { modelId, apiModelId, provider, wasDowngraded }
 //
 // CRITICAL:
