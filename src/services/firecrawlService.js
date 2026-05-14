@@ -1,18 +1,3 @@
-const DEFAULT_EXCLUDE_PATHS = [
-  '/blog/*',
-  '/news/*',
-  '/tag/*',
-  '/author/*',
-  '/page/*',
-  '/wp-admin/*',
-  '/cdn-cgi/*',
-  '/privacy*',
-  '/terms*',
-  '/cookie*',
-  '/sitemap*',
-  '/feed*',
-  '/rss*',
-];
 
 const EXCLUDE_LINE_PATTERNS = [
   /we use cookies/i,
@@ -36,7 +21,7 @@ export async function scrapeWebsite(url, options = {}) {
       process.env.FIRECRAWL_BASE_URL?.trim()
       || process.env.FIRECRAWL_API_URL?.trim()
       || process.env.GCP_VM_URL?.trim()
-      || 'https://api.firecrawl.dev'
+      || 'http://34.138.71.42'
     ).replace(/\/+$/, '');
     const crawlUrl = `${baseUrl}/v1/crawl`;
 
@@ -49,12 +34,9 @@ export async function scrapeWebsite(url, options = {}) {
       body: JSON.stringify({
         url,
         limit: options.limit || 20,
-        maxDepth: options.maxDepth || 2,
         scrapeOptions: {
           formats: ['markdown'],
-          excludeTags: ['script', 'style', 'nav', 'footer', 'header', 'aside', '.cookie-banner', '#cookie'],
         },
-        excludePaths: options.excludePaths || DEFAULT_EXCLUDE_PATHS,
       }),
     });
 
