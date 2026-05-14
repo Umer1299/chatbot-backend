@@ -409,7 +409,7 @@ router.patch('/bot-config/draft', requireAuth, async (req, res) => {
 router.get('/bot-config/:botId/preview', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
-            bc.welcome_message, bc.starter_prompts, b.brand_logo_url, bc.brand_favicon_url,
+            bc.welcome_message, bc.starter_prompts, b.brand_logo_url, b.brand_favicon_url,
             bc.brand_primary_color, bc.brand_secondary_color, bc.brand_fonts, bc.brand_status,
             b.is_disabled, b.disabled_reason
      FROM bot_configs bc
