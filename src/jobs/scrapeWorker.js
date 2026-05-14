@@ -60,12 +60,29 @@ ${p.content || ''}`).join('\n');
 }
 
 export async function addScrapeJob(businessId, url, options = {}) {
+  const isRefresh = Boolean(options.isRefresh);
+
   const { rows } = await pool.query(
-    `INSERT INTO scrape_jobs (business_id, url, status, queued_at, is_refresh)
-     VALUES ($1, $2, 'queued', NOW(), $3)
+    `INSERT INTO scrape_jobs (business_id, url, status, queued_at)
+     VALUES ($1, $2, 'queued', NOW())
      RETURNING id`,
-    [businessId, url, Boolean(options.isRefresh)],
+    [businessId, url],
   );
+
+  if (isRefresh) {
+    await pool.query(
+      `UPDATE scrape_jobs
+       SET is_refresh = TRUE
+       WHERE id = $1
+         AND EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_name = 'scrape_jobs'
+             AND column_name = 'is_refresh'
+         )`,
+      [rows[0].id],
+    );
+  }
 
   return String(rows[0].id);
 }
