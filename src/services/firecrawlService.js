@@ -32,7 +32,12 @@ export async function scrapeWebsite(url, options = {}) {
   }
 
   try {
-    const baseUrl = (process.env.GCP_VM_URL?.trim() || 'https://api.firecrawl.dev').replace(/\/+$/, '');
+    const baseUrl = (
+      process.env.FIRECRAWL_BASE_URL?.trim()
+      || process.env.FIRECRAWL_API_URL?.trim()
+      || process.env.GCP_VM_URL?.trim()
+      || 'https://api.firecrawl.dev'
+    ).replace(/\/+$/, '');
     const crawlUrl = `${baseUrl}/v1/crawl`;
 
     const response = await fetch(crawlUrl, {
@@ -75,14 +80,26 @@ export async function scrapeWebsite(url, options = {}) {
           throw new Error(pollPayload?.error || pollPayload?.message || 'Crawl polling failed');
         }
 
-        const status = pollPayload?.status || pollPayload?.data?.status;
-        if (status === 'completed') {
+        const status = (
+          pollPayload?.status
+          || pollPayload?.data?.status
+          || pollPayload?.state
+          || pollPayload?.data?.state
+          || ''
+        ).toLowerCase();
+        if (['completed', 'done', 'success'].includes(status)) {
           pages = pollPayload?.data?.pages || pollPayload?.pages || pollPayload?.data || [];
           break;
         }
 
-        if (status === 'failed') {
-          throw new Error(pollPayload?.error || 'Firecrawl crawl failed');
+        if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) {
+          throw new Error(
+            pollPayload?.error
+            || pollPayload?.message
+            || pollPayload?.data?.error
+            || pollPayload?.data?.message
+            || 'Firecrawl crawl failed',
+          );
         }
 
         await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -112,7 +129,7 @@ export async function scrapeWebsite(url, options = {}) {
     };
   } catch (error) {
     console.error('[firecrawlService]', error.message);
-    return { pages: [], totalPages: 0, error: 'Unable to scrape the provided URL. Please try again.' };
+    return { pages: [], totalPages: 0, error: `Unable to scrape the provided URL. ${error.message}` };
   }
 }
 
