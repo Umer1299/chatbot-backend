@@ -9,6 +9,30 @@ import { buildMasterPrompt, buildAgentPromptInstructions } from '../agents/promp
 
 const router = Router();
 
+
+const MAX_PREVIEW_TEXT_LENGTH = 2000;
+const MAX_PREVIEW_ARRAY_ITEMS = 10;
+
+function sanitizePreviewText(value, maxLength = MAX_PREVIEW_TEXT_LENGTH) {
+  if (typeof value !== 'string') return null;
+  if (value.startsWith('data:')) return null;
+  return value.slice(0, maxLength);
+}
+
+function sanitizePreviewUrl(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  if (value.startsWith('data:')) return null;
+  return value.slice(0, MAX_PREVIEW_TEXT_LENGTH);
+}
+
+function sanitizePreviewList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => typeof item === 'string' && item.length > 0 && !item.startsWith('data:'))
+    .slice(0, MAX_PREVIEW_ARRAY_ITEMS)
+    .map((item) => item.slice(0, MAX_PREVIEW_TEXT_LENGTH));
+}
+
 router.get('/settings', requireAuth, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM businesses WHERE id = $1', [req.business.businessId]);
   return res.json({ business: rows[0] || null });
@@ -423,19 +447,19 @@ router.get('/bot-config/:botId/preview', async (req, res) => {
 
   return res.json({
     botId: rows[0].bot_id,
-    businessName: rows[0].business_name,
-    industry: rows[0].industry,
+    businessName: sanitizePreviewText(rows[0].business_name),
+    industry: sanitizePreviewText(rows[0].industry),
     primaryColor: rows[0].brand_primary_color || rows[0].primary_color,
     secondaryColor: rows[0].brand_secondary_color || null,
-    logoUrl: rows[0].brand_logo_url || null,
-    faviconUrl: rows[0].brand_favicon_url || null,
-    fonts: rows[0].brand_fonts || [],
-    welcomeMessage: rows[0].welcome_message,
-    starterPrompts: rows[0].starter_prompts || [],
+    logoUrl: sanitizePreviewUrl(rows[0].brand_logo_url),
+    faviconUrl: sanitizePreviewUrl(rows[0].brand_favicon_url),
+    fonts: sanitizePreviewList(rows[0].brand_fonts),
+    welcomeMessage: sanitizePreviewText(rows[0].welcome_message),
+    starterPrompts: sanitizePreviewList(rows[0].starter_prompts),
     brandStatus: rows[0].brand_status || "pending",
     isPreview: true,
     isDisabled: rows[0].is_disabled || false,
-    disabledMessage: rows[0].disabled_reason || null
+    disabledMessage: sanitizePreviewText(rows[0].disabled_reason)
   });
 });
 
