@@ -129,7 +129,7 @@ export async function scrapeWebsite(url, options = {}) {
 
     const normalizedPages = (Array.isArray(pages) ? pages : [])
       .map((page) => ({
-        url: page?.url || '',
+        url: removeSkipQueryParam(page?.url || ''),
         content: page?.markdown || page?.content || '',
         title: page?.metadata?.title || page?.title || '',
       }))
@@ -156,6 +156,23 @@ async function parseJsonResponse(response) {
     throw new Error(
       `Firecrawl returned a non-JSON response (status ${response.status} ${response.statusText}): ${compactBody || '<empty body>'}`,
     );
+  }
+}
+
+
+function removeSkipQueryParam(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl) return '';
+
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.searchParams.delete('skip');
+    return parsed.toString();
+  } catch {
+    return rawUrl.replace(/([?&])skip=\d+(&?)/i, (_, prefix, suffix) => {
+      if (prefix === '?' && suffix) return '?';
+      if (prefix === '?' && !suffix) return '';
+      return suffix ? prefix : '';
+    }).replace(/[?&]$/, '');
   }
 }
 
