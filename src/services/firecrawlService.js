@@ -105,7 +105,28 @@ export async function scrapeWebsite(url, options = {}) {
           || pollPayload?.data?.state
           || ''
         ).toLowerCase();
-        if (['completed', 'done', 'success'].includes(status)) {
+        const completedCount = Number(
+          pollPayload?.completed
+          ?? pollPayload?.data?.completed
+          ?? pollPayload?.progress?.completed
+          ?? pollPayload?.data?.progress?.completed,
+        );
+        const totalCount = Number(
+          pollPayload?.total
+          ?? pollPayload?.data?.total
+          ?? pollPayload?.progress?.total
+          ?? pollPayload?.data?.progress?.total,
+        );
+        const isProgressComplete = totalCount > 0 && completedCount >= totalCount;
+
+        if (['completed', 'done', 'success'].includes(status) || isProgressComplete) {
+          if (isProgressComplete && !['completed', 'done', 'success'].includes(status)) {
+            console.log(
+              `[scrape:${traceJobId}] Completion inferred from progress counters`,
+              { status, completed: completedCount, total: totalCount },
+            );
+          }
+
           pages = pollPayload?.data?.pages || pollPayload?.pages || pollPayload?.data || [];
           break;
         }
