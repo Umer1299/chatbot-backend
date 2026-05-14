@@ -35,10 +35,10 @@ export async function scrapeWebsite(url, options = {}) {
     const requestBody = {
       url,
       limit: crawlOptions.maxPages,
-      maxDepth: crawlOptions.maxDepth,
-      timeout: crawlOptions.timeout,
+      maxDiscoveryDepth: crawlOptions.maxDepth,
       scrapeOptions: {
-        formats: ['markdown'],
+        timeout: crawlOptions.timeout,
+        formats: ['markdown', 'html'],
       },
     };
 
@@ -46,6 +46,8 @@ export async function scrapeWebsite(url, options = {}) {
       `[scrape:${traceJobId}] Starting Firecrawl request`,
       { url, crawlUrl, crawlOptions, hasApiKey: Boolean(apiKey), requestBody },
     );
+
+    console.log(`[scrape:${traceJobId}] Firecrawl crawl request body`, requestBody);
 
     const response = await fetch(crawlUrl, {
       method: 'POST',
