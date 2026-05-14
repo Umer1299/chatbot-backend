@@ -32,7 +32,7 @@ export async function scrapeWebsite(url, options = {}) {
   }
 
   try {
-    const baseUrl = process.env.GCP_VM_URL?.trim() || 'https://api.firecrawl.dev';
+    const baseUrl = (process.env.GCP_VM_URL?.trim() || 'https://api.firecrawl.dev').replace(/\/+$/, '');
     const crawlUrl = `${baseUrl}/v1/crawl`;
 
     const response = await fetch(crawlUrl, {
@@ -53,7 +53,7 @@ export async function scrapeWebsite(url, options = {}) {
       }),
     });
 
-    const payload = await response.json();
+    const payload = await parseJsonResponse(response);
     if (!response.ok) {
       throw new Error(payload?.error || payload?.message || 'Failed to start crawl');
     }
@@ -70,7 +70,7 @@ export async function scrapeWebsite(url, options = {}) {
           headers: { Authorization: `Bearer ${apiKey}` },
         });
 
-        const pollPayload = await pollResp.json();
+        const pollPayload = await parseJsonResponse(pollResp);
         if (!pollResp.ok) {
           throw new Error(pollPayload?.error || pollPayload?.message || 'Crawl polling failed');
         }
@@ -113,6 +113,19 @@ export async function scrapeWebsite(url, options = {}) {
   } catch (error) {
     console.error('[firecrawlService]', error.message);
     return { pages: [], totalPages: 0, error: 'Unable to scrape the provided URL. Please try again.' };
+  }
+}
+
+async function parseJsonResponse(response) {
+  const rawBody = await response.text();
+
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    const compactBody = rawBody.replace(/\s+/g, ' ').trim().slice(0, 200);
+    throw new Error(
+      `Firecrawl returned a non-JSON response (status ${response.status} ${response.statusText}): ${compactBody || '<empty body>'}`,
+    );
   }
 }
 
