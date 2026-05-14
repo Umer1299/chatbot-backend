@@ -259,7 +259,7 @@ router.get('/status', requireAuth, async (req, res) => {
 
 router.get('/bot-config', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.brand_logo_url, bc.welcome_message, b.industry
+    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.brand_logo_url, b.brand_favicon_url, b.industry
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
      WHERE bc.business_id = $1 AND bc.active = true
