@@ -74,20 +74,25 @@ export async function scrapeWebsite(url, options = {}) {
 
     if (crawlJobId) {
       const pollUrl = `${baseUrl}/v1/crawl/${crawlJobId}`;
+      let activePollUrl = pollUrl;
       const start = Date.now();
       console.log(`[scrape:${traceJobId}] Polling crawl job`, { pollUrl, crawlJobId, crawlTimeoutMs });
 
       while (Date.now() - start < crawlTimeoutMs) {
-        const pollResp = await fetch(pollUrl, {
+        const pollResp = await fetch(activePollUrl, {
           signal: AbortSignal.timeout(crawlTimeoutMs),
           headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
         });
 
         const pollPayload = await parseJsonResponse(pollResp);
+        const nextPollUrl = removeSkipQueryParam(pollPayload?.next || pollPayload?.data?.next || '');
+        if (nextPollUrl) activePollUrl = nextPollUrl;
+
         console.log(`[scrape:${traceJobId}] Poll response`, {
           httpStatus: pollResp.status,
           payloadStatus: pollPayload?.status || pollPayload?.data?.status || pollPayload?.state || pollPayload?.data?.state,
-          payloadPreview: JSON.stringify(pollPayload).slice(0, 500),
+          nextPollUrl,
+          payloadPreview: JSON.stringify({ ...pollPayload, next: nextPollUrl || undefined }).slice(0, 500),
         });
         if (!pollResp.ok) {
           throw new Error(pollPayload?.error || pollPayload?.message || 'Crawl polling failed');
