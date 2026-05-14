@@ -431,17 +431,38 @@ router.patch('/bot-config/draft', requireAuth, async (req, res) => {
 });
 
 router.get('/bot-config/:botId/preview', async (req, res) => {
-  const { rows } = await pool.query(
-    `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
-            bc.welcome_message, bc.starter_prompts, b.brand_logo_url, b.brand_favicon_url,
-            bc.brand_primary_color, bc.brand_secondary_color, bc.brand_fonts, bc.brand_status,
-            b.is_disabled, b.disabled_reason
-     FROM bot_configs bc
-     JOIN businesses b ON bc.business_id = b.id
-     WHERE b.bot_id = $1
-     LIMIT 1`,
-    [req.params.botId],
-  );
+  let rows;
+
+  try {
+    const result = await pool.query(
+      `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
+              bc.welcome_message, bc.starter_prompts, b.brand_logo_url, b.brand_favicon_url,
+              bc.brand_primary_color, bc.brand_secondary_color, bc.brand_fonts, bc.brand_status,
+              b.is_disabled, b.disabled_reason
+       FROM bot_configs bc
+       JOIN businesses b ON bc.business_id = b.id
+       WHERE b.bot_id = $1
+       LIMIT 1`,
+      [req.params.botId],
+    );
+    rows = result.rows;
+  } catch (error) {
+    if (error?.code !== '42703') throw error;
+
+    const legacyResult = await pool.query(
+      `SELECT b.bot_id, b.business_name, b.industry, b.primary_color,
+              bc.welcome_message, bc.starter_prompts, b.brand_logo_url, b.brand_favicon_url,
+              NULL::TEXT AS brand_primary_color, NULL::TEXT AS brand_secondary_color,
+              '[]'::JSONB AS brand_fonts, 'pending'::TEXT AS brand_status,
+              b.is_disabled, b.disabled_reason
+       FROM bot_configs bc
+       JOIN businesses b ON bc.business_id = b.id
+       WHERE b.bot_id = $1
+       LIMIT 1`,
+      [req.params.botId],
+    );
+    rows = legacyResult.rows;
+  }
 
   if (!rows[0]) return res.status(404).json({ error: 'Bot config not found' });
 
