@@ -11,8 +11,16 @@ const EXCLUDE_LINE_PATTERNS = [
 
 export async function scrapeWebsite(url, options = {}) {
   const apiKey = process.env.FIRECRAWL_API_KEY;
+  const traceJobId = options.jobId || 'unknown-job';
+  const crawlTimeoutMs = options.timeoutMs || 300000;
+  const crawlOptions = {
+    maxPages: options.maxPages || 10,
+    maxDepth: options.maxDepth || 2,
+    timeout: options.crawlTimeout || crawlTimeoutMs,
+  };
 
   if (!apiKey) {
+    console.error(`[scrape:${traceJobId}] Missing FIRECRAWL_API_KEY in environment.`);
     return { pages: [], totalPages: 0, error: 'Missing FIRECRAWL_API_KEY' };
   }
 
@@ -24,40 +32,61 @@ export async function scrapeWebsite(url, options = {}) {
       || 'http://34.138.71.42'
     ).replace(/\/+$/, '');
     const crawlUrl = `${baseUrl}/v1/crawl`;
+    const requestBody = {
+      url,
+      limit: crawlOptions.maxPages,
+      maxDepth: crawlOptions.maxDepth,
+      timeout: crawlOptions.timeout,
+      scrapeOptions: {
+        formats: ['markdown'],
+      },
+    };
+
+    console.log(
+      `[scrape:${traceJobId}] Starting Firecrawl request`,
+      { url, crawlUrl, crawlOptions, hasApiKey: Boolean(apiKey), requestBody },
+    );
 
     const response = await fetch(crawlUrl, {
       method: 'POST',
+      signal: AbortSignal.timeout(crawlTimeoutMs),
       headers: {
         'x-api-key': apiKey,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        url,
-        limit: options.limit || 20,
-        scrapeOptions: {
-          formats: ['markdown'],
-        },
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const payload = await parseJsonResponse(response);
+    console.log(`[scrape:${traceJobId}] Firecrawl start response`, {
+      status: response.status,
+      statusText: response.statusText,
+      payload,
+    });
     if (!response.ok) {
       throw new Error(payload?.error || payload?.message || 'Failed to start crawl');
     }
 
     let pages = [];
-    const jobId = payload?.jobId || payload?.id || payload?.data?.jobId;
+    const crawlJobId = payload?.jobId || payload?.id || payload?.data?.jobId;
 
-    if (jobId) {
-      const pollUrl = `${baseUrl}/v1/crawl/${jobId}`;
+    if (crawlJobId) {
+      const pollUrl = `${baseUrl}/v1/crawl/${crawlJobId}`;
       const start = Date.now();
+      console.log(`[scrape:${traceJobId}] Polling crawl job`, { pollUrl, crawlJobId, crawlTimeoutMs });
 
-      while (Date.now() - start < 120000) {
+      while (Date.now() - start < crawlTimeoutMs) {
         const pollResp = await fetch(pollUrl, {
+          signal: AbortSignal.timeout(crawlTimeoutMs),
           headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
         });
 
         const pollPayload = await parseJsonResponse(pollResp);
+        console.log(`[scrape:${traceJobId}] Poll response`, {
+          httpStatus: pollResp.status,
+          payloadStatus: pollPayload?.status || pollPayload?.data?.status || pollPayload?.state || pollPayload?.data?.state,
+          payloadPreview: JSON.stringify(pollPayload).slice(0, 500),
+        });
         if (!pollResp.ok) {
           throw new Error(pollPayload?.error || pollPayload?.message || 'Crawl polling failed');
         }
@@ -88,10 +117,10 @@ export async function scrapeWebsite(url, options = {}) {
       }
 
       if (!pages.length) {
-        throw new Error('Firecrawl crawl timed out after 120 seconds');
+        throw new Error(`Firecrawl crawl timed out after ${crawlTimeoutMs} ms`);
       }
 
-      console.log(`Scraped ${pages.length} pages from ${url}`);
+      console.log(`[scrape:${traceJobId}] Scraped ${pages.length} pages from ${url}`);
     } else {
       pages = payload?.data?.pages || payload?.pages || payload?.data || [];
     }
@@ -110,7 +139,7 @@ export async function scrapeWebsite(url, options = {}) {
       error: null,
     };
   } catch (error) {
-    console.error('[firecrawlService]', error.message);
+    console.error(`[scrape:${traceJobId}] Firecrawl scrape error`, error);
     return { pages: [], totalPages: 0, error: `Unable to scrape the provided URL. ${error.message}` };
   }
 }

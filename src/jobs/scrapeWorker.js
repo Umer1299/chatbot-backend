@@ -128,13 +128,30 @@ async function updateJobProgress(jobId, step, percent, extras = {}) {
 }
 
 async function processScrapeJob(job) {
+  const traceJobId = `job-${job.id}`;
   try {
+    console.log(`[scrape:${traceJobId}] Starting scrape job`, {
+      businessId: job.business_id,
+      url: job.url,
+      isRefresh: Boolean(job.is_refresh),
+    });
     await updateJobProgress(job.id, 'Scraping website', 10, {
       status: 'scraping',
       started_at: new Date(),
     });
 
-    const result = await scrapeWebsite(job.url);
+    const result = await scrapeWebsite(job.url, {
+      jobId: traceJobId,
+      timeoutMs: 300000,
+      maxPages: 10,
+      maxDepth: 2,
+      crawlTimeout: 300000,
+    });
+    console.log(`[scrape:${traceJobId}] Scrape result received`, {
+      pages: result.pages?.length || 0,
+      totalPages: result.totalPages || 0,
+      error: result.error || null,
+    });
     if (result.error) {
       throw new Error(`Scraping failed: ${result.error}`);
     }
@@ -149,6 +166,10 @@ async function processScrapeJob(job) {
 
     const chunks = cleanAndChunkContent(result.pages);
     const filtered = chunks.filter(shouldEmbedChunk);
+    console.log(`[scrape:${traceJobId}] Chunking complete`, {
+      rawChunks: chunks.length,
+      filteredChunks: filtered.length,
+    });
 
     if (!filtered.length) {
       throw new Error('Could not extract usable content from this website');
@@ -159,7 +180,9 @@ async function processScrapeJob(job) {
       status: 'embedding',
     });
 
+    console.log(`[scrape:${traceJobId}] Embedding upsert started`, { chunkCount: filtered.length });
     await upsertChunks(job.business_id, filtered, 'website');
+    console.log(`[scrape:${traceJobId}] Embedding upsert completed`);
 
     await updateJobProgress(job.id, 'Analysing business', 65, {
       status: 'analyzing',
@@ -168,6 +191,7 @@ async function processScrapeJob(job) {
     const combinedText = filtered.join(' ');
     const modelInputText = combinedText.substring(0, 7000);
     const analysisResult = await detectIndustry(modelInputText);
+    console.log(`[scrape:${traceJobId}] Industry detection completed`, { industry: analysisResult.industry });
 
     await pool.query(
       `UPDATE businesses
@@ -186,6 +210,10 @@ async function processScrapeJob(job) {
       modelInputText,
       analysisResult,
     );
+    console.log(`[scrape:${traceJobId}] Content validation completed`, {
+      score: validation.score,
+      hasCriticalGaps: validation.hasCriticalGaps,
+    });
 
     const suggestedAgents = suggestAgents(
       analysisResult.industry,
@@ -222,6 +250,7 @@ async function processScrapeJob(job) {
       businessRow.availability_slots,
       validation,
     );
+    console.log(`[scrape:${traceJobId}] Chatbot content generation completed`);
     const contactInfo = extractContactInfo(combinedText);
     const extractedBusinessName = extractBusinessNameFromPages(result.pages, businessInfo.businessName);
     const brandExtracted = extractBrandData(result.pages, job.url);
@@ -336,8 +365,9 @@ async function processScrapeJob(job) {
       ],
     );
 
-    console.log(`Job complete for business ${job.business_id}`);
+    console.log(`[scrape:${traceJobId}] Job complete for business ${job.business_id}`);
   } catch (error) {
+    console.error(`[scrape:${traceJobId}] Job failed`, error);
     await pool.query(
       `UPDATE scrape_jobs
        SET status = 'failed',
