@@ -14,7 +14,7 @@ export async function scrapeWebsite(url, options = {}) {
   const traceJobId = options.jobId || 'unknown-job';
   const crawlTimeoutMs = options.timeoutMs || 300000;
   const crawlOptions = {
-    maxPages: options.maxPages || 10,
+    maxPages: options.maxPages,
     maxDepth: options.maxDepth || 2,
     timeout: options.crawlTimeout || crawlTimeoutMs,
   };
@@ -34,11 +34,11 @@ export async function scrapeWebsite(url, options = {}) {
     const crawlUrl = `${baseUrl}/v1/crawl`;
     const requestBody = {
       url,
-      limit: crawlOptions.maxPages,
+      ...(Number.isFinite(crawlOptions.maxPages) ? { limit: crawlOptions.maxPages } : {}),
       maxDiscoveryDepth: crawlOptions.maxDepth,
       scrapeOptions: {
         timeout: crawlOptions.timeout,
-        formats: ['markdown', 'html'],
+        formats: ['markdown'],
       },
     };
 
