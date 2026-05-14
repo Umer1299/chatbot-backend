@@ -38,7 +38,7 @@ export async function scrapeWebsite(url, options = {}) {
     const response = await fetch(crawlUrl, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        'x-api-key': apiKey,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -67,7 +67,7 @@ export async function scrapeWebsite(url, options = {}) {
 
       while (Date.now() - start < 120000) {
         const pollResp = await fetch(pollUrl, {
-          headers: { Authorization: `Bearer ${apiKey}` },
+          headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
         });
 
         const pollPayload = await parseJsonResponse(pollResp);
