@@ -52,7 +52,6 @@ router.post('/token', async (req, res) => {
         botId: business.bot_id,
       },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' },
     );
 
     return res.json({
