@@ -1,0 +1,2 @@
+ALTER TABLE scrape_jobs
+  ADD COLUMN IF NOT EXISTS is_refresh BOOLEAN DEFAULT false;
