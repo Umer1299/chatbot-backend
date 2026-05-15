@@ -263,7 +263,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     // Resolve model — enforces plan, reads from DB
     // resolvedModel is LOCAL to this function call
     const resolvedModel = await getSafeModel(
-      config.selected_model || 'gpt-4o-mini'
+      config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini'
     );
 
     console.log('[chat] Model resolved', {

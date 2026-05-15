@@ -1,4 +1,4 @@
-import { claudeChat } from '../services/aiService.js';
+import { scrapeLLM } from '../services/aiService.js';
 
 const FALLBACK_WELCOME = 'Hi! Thanks for reaching out. How can we help you today?';
 const FALLBACK_PROMPTS = [
@@ -32,7 +32,7 @@ export async function generateWelcomeMessage(businessInfo = {}, validation = {})
       },
     ];
 
-    const response = await claudeChat(systemPrompt, messages, { maxTokens: 120 });
+    const response = await scrapeLLM(systemPrompt, messages, { maxTokens: 120 });
     const text = String(response || '').trim().replace(/^"|"$/g, '');
     return text || FALLBACK_WELCOME;
   } catch (error) {
@@ -52,7 +52,7 @@ export async function generateStarterPrompts(businessInfo = {}, validation = {})
       },
     ];
 
-    const response = await claudeChat(systemPrompt, messages, { maxTokens: 200 });
+    const response = await scrapeLLM(systemPrompt, messages, { maxTokens: 200 });
     const cleaned = String(response || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 

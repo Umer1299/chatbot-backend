@@ -1,4 +1,4 @@
-import { claudeChat } from '../services/aiService.js';
+import { scrapeLLM } from '../services/aiService.js';
 
 const SAFE_DEFAULT = {
   industry: 'unknown',
@@ -41,7 +41,7 @@ ${(scrapedContent || '').substring(0, 3000)}`,
     ];
     const options = { maxTokens: 400 };
 
-    const response = await claudeChat(systemPrompt, messages, options);
+    const response = await scrapeLLM(systemPrompt, messages, options);
 
     const cleaned = String(response || '')
       .replace(/```json/gi, '')
