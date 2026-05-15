@@ -324,10 +324,16 @@ async function processScrapeJob(job) {
        ON CONFLICT (business_id)
        DO UPDATE SET
          detected_industry = EXCLUDED.detected_industry,
+         detected_services = EXCLUDED.detected_services,
+         detected_location = EXCLUDED.detected_location,
+         detection_confidence = EXCLUDED.detection_confidence,
+         content_quality_score = EXCLUDED.content_quality_score,
+         missing_fields = EXCLUDED.missing_fields,
+         auto_generated_fields = EXCLUDED.auto_generated_fields,
+         selected_agents = EXCLUDED.selected_agents,
          system_prompt = EXCLUDED.system_prompt,
          welcome_message = EXCLUDED.welcome_message,
          starter_prompts = EXCLUDED.starter_prompts,
-         selected_agents = EXCLUDED.selected_agents,
          is_draft = true,
          updated_at = NOW()`,
       [
