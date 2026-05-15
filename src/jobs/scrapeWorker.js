@@ -329,7 +329,6 @@ async function processScrapeJob(job) {
          starter_prompts = EXCLUDED.starter_prompts,
          selected_agents = EXCLUDED.selected_agents,
          is_draft = true,
-         brand_status = CASE WHEN $13 = true THEN 'pending' ELSE bot_configs.brand_status END,
          updated_at = NOW()`,
       [
         job.business_id,
@@ -344,7 +343,6 @@ async function processScrapeJob(job) {
         generatedContent.systemPrompt,
         generatedContent.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
-        Boolean(job.is_refresh),
       ],
     );
 
