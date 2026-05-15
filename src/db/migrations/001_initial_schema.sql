@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
                           ON DELETE CASCADE,
   content               TEXT NOT NULL,
   embedding             vector(1536),
+  content_hash          TEXT,
   source_url            TEXT,
   source_type           TEXT DEFAULT 'website'
                           CHECK (source_type IN (
@@ -103,6 +104,9 @@ CREATE INDEX IF NOT EXISTS idx_chunks_business
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding 
   ON knowledge_chunks 
   USING hnsw (embedding vector_cosine_ops);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_business_content_hash
+  ON knowledge_chunks(business_id, content_hash);
 
 CREATE TABLE IF NOT EXISTS scrape_jobs (
   id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),

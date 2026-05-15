@@ -41,8 +41,9 @@ async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) 
 
       await pool.query(
         `INSERT INTO knowledge_chunks
-          (business_id, content, embedding, source_type, chunk_index, word_count)
-         VALUES ($1, $2, $3::vector, $4, $5, $6)`,
+          (business_id, content, embedding, content_hash, source_type, chunk_index, word_count)
+         VALUES ($1, $2, $3::vector, md5($2), $4, $5, $6)
+         ON CONFLICT (business_id, content_hash) DO NOTHING`,
         [businessId, chunk, JSON.stringify(embedding), sourceType, chunkIndex, wordCount],
       );
 
@@ -66,12 +67,26 @@ export async function setupVectorTable() {
         business_id UUID NOT NULL,
         content TEXT NOT NULL,
         embedding vector(1536),
+        content_hash TEXT,
         source_url TEXT,
         source_type TEXT DEFAULT 'website',
         chunk_index INTEGER,
         word_count INTEGER,
         created_at TIMESTAMPTZ DEFAULT NOW()
       )
+    `);
+    await pool.query(`
+      ALTER TABLE knowledge_chunks
+      ADD COLUMN IF NOT EXISTS content_hash TEXT
+    `);
+    await pool.query(`
+      UPDATE knowledge_chunks
+      SET content_hash = md5(content)
+      WHERE content_hash IS NULL
+    `);
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_business_content_hash
+      ON knowledge_chunks(business_id, content_hash)
     `);
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_chunks_business
