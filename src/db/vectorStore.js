@@ -39,15 +39,20 @@ async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) 
       const chunkIndex = startIndex + i + j;
       const wordCount = chunk.split(/\s+/).filter(Boolean).length;
 
-      await pool.query(
+      const result = await pool.query(
         `INSERT INTO knowledge_chunks
           (business_id, content, embedding, content_hash, source_type, chunk_index, word_count)
          VALUES ($1, $2, $3::vector, md5($2), $4, $5, $6)
-         ON CONFLICT (business_id, content_hash) DO NOTHING`,
+         ON CONFLICT (business_id, content_hash) DO NOTHING
+         RETURNING id`,
         [businessId, chunk, JSON.stringify(embedding), sourceType, chunkIndex, wordCount],
       );
 
-      inserted += 1;
+      if (result.rowCount > 0) {
+        inserted += 1;
+      } else {
+        skipped += 1;
+      }
     }
 
     const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
