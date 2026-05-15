@@ -320,10 +320,10 @@ async function processScrapeJob(job) {
          missing_fields, auto_generated_fields,
          selected_agents, system_prompt,
          welcome_message, starter_prompts, is_draft,
-         brand_logo_url, brand_favicon_url, brand_primary_color, brand_secondary_color,
+         brand_secondary_color,
          brand_fonts, brand_welcome_message, brand_starter_prompts)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true,
-         $13, $14, $15, $16, $17, $18, $19)
+         $13, $14, $15, $16)
        ON CONFLICT (business_id)
        DO UPDATE SET
          detected_industry = EXCLUDED.detected_industry,
@@ -332,14 +332,11 @@ async function processScrapeJob(job) {
          starter_prompts = EXCLUDED.starter_prompts,
          selected_agents = EXCLUDED.selected_agents,
          is_draft = true,
-         brand_logo_url = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_logo_url ELSE EXCLUDED.brand_logo_url END,
-         brand_favicon_url = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_favicon_url ELSE EXCLUDED.brand_favicon_url END,
-         brand_primary_color = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_primary_color ELSE EXCLUDED.brand_primary_color END,
-         brand_secondary_color = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_secondary_color ELSE EXCLUDED.brand_secondary_color END,
-         brand_fonts = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_fonts ELSE EXCLUDED.brand_fonts END,
-         brand_welcome_message = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_welcome_message ELSE EXCLUDED.brand_welcome_message END,
-         brand_starter_prompts = CASE WHEN bot_configs.brand_status = 'approved' AND $20 = false THEN bot_configs.brand_starter_prompts ELSE EXCLUDED.brand_starter_prompts END,
-         brand_status = CASE WHEN $20 = true THEN 'pending' ELSE bot_configs.brand_status END,
+         brand_secondary_color = CASE WHEN bot_configs.brand_status = 'approved' AND $17 = false THEN bot_configs.brand_secondary_color ELSE EXCLUDED.brand_secondary_color END,
+         brand_fonts = CASE WHEN bot_configs.brand_status = 'approved' AND $17 = false THEN bot_configs.brand_fonts ELSE EXCLUDED.brand_fonts END,
+         brand_welcome_message = CASE WHEN bot_configs.brand_status = 'approved' AND $17 = false THEN bot_configs.brand_welcome_message ELSE EXCLUDED.brand_welcome_message END,
+         brand_starter_prompts = CASE WHEN bot_configs.brand_status = 'approved' AND $17 = false THEN bot_configs.brand_starter_prompts ELSE EXCLUDED.brand_starter_prompts END,
+         brand_status = CASE WHEN $17 = true THEN 'pending' ELSE bot_configs.brand_status END,
          updated_at = NOW()`,
       [
         job.business_id,
@@ -354,9 +351,6 @@ async function processScrapeJob(job) {
         generatedContent.systemPrompt,
         generatedContent.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
-        brandExtracted.logoUrl || logoUrl,
-        brandExtracted.faviconUrl,
-        brandExtracted.primaryColor || primaryColor,
         brandExtracted.secondaryColor,
         JSON.stringify(brandExtracted.fonts || []),
         generatedContent.welcomeMessage,
