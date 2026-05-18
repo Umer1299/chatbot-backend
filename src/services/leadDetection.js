@@ -7,11 +7,14 @@ const LEAD_SIGNAL_PATTERNS = [
   /\bmy name is\b/i,
   /\bi\s*am\b/i,
   /\bi['’]m\b/i,
+  /\bthis is\b/i,
   /\bfrom\s+[A-Za-z0-9&'\-.\s]{2,80}/i,
   /\bwe need\b/i,
   /\blooking for\b/i,
   /\bquote\b/i,
   /\bbudget\b/i,
+  /\blaunch\b/i,
+  /\btimeline\b/i,
   /\bbook a call\b/i,
   /\bwebsite\b/i,
   /\bhosting\b/i,
@@ -70,7 +73,7 @@ export function extractDeterministicLeadData(message = '') {
   const needPhrase = text.match(/\b(?:we need|need|looking for|want)\s+(.*?)(?:\.|$)/i);
   if (needPhrase?.[1]) serviceNeed = needPhrase[1].trim().replace(/^help with\s+/i, '');
   const budgetMatch = text.match(/(?:budget\s*(?:is|around|of)?\s*)?([£$€]\s?\d[\d,]*(?:\s?[–-]\s?[£$€]?\s?\d[\d,]*)?)/i);
-  const timelineMatch = text.match(/\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|asap|immediately|urgent)\b/i);
+  const timelineMatch = text.match(/\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|before\s+[A-Za-z]+|by\s+[A-Za-z]+|asap|immediately|urgent)\b/i);
 
   const churchName = organizationRaw;
   const shouldHotScore = Boolean((email || phone) && (serviceNeed || timelineMatch?.[1] || budgetMatch?.[1]));

@@ -26,6 +26,16 @@ const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedC
 const LEAD_EXTRACTOR_MODEL = process.env.LEAD_EXTRACTOR_MODEL || 'gpt-4o-mini';
 const LEAD_EXTRACTOR_MAX_TOKENS = Number(process.env.LEAD_EXTRACTOR_MAX_TOKENS || 300);
 const LEAD_EXTRACTOR_TIMEOUT_MS = Number(process.env.LEAD_EXTRACTOR_TIMEOUT_MS || 4000);
+const LEAD_EXTRACTOR_ENABLED = String(process.env.LEAD_EXTRACTOR_ENABLED || 'true').toLowerCase() === 'true';
+
+function hasMinimumLeadDataForSave(lead = {}) {
+  const email = Boolean(lead.email);
+  const phone = Boolean(lead.phone);
+  const serviceNeed = Boolean(lead.serviceNeed);
+  const companyName = Boolean(lead.companyName || lead.company_name || lead.churchName);
+  const name = Boolean(lead.fullName || lead.name);
+  return (email && serviceNeed) || (phone && serviceNeed) || (email && companyName) || (phone && companyName) || (name && companyName && serviceNeed);
+}
 
 function normalizeMessageForCache(input = '') {
   return String(input).toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
@@ -118,7 +128,7 @@ async function generateLeadSummary(leadData, industry) {
 
 async function saveLead(config, sessionId, leadData, namespace) {
   try {
-    if (!config || !sessionId || !leadData) return { status: 'skipped', capturedFields: [] };
+    if (!config || !sessionId || !leadData || !hasMinimumLeadDataForSave(leadData)) return { status: 'skipped', capturedFields: [] };
     const industryData = {
       ...leadData,
       name: leadData.name || leadData.fullName || null,
@@ -200,7 +210,7 @@ async function saveLead(config, sessionId, leadData, namespace) {
 
     let status = 'inserted';
     if (existingLead) {
-      status = existingByEmail ? 'deduped_email' : (existingByPhone ? 'deduped_phone' : 'updated_session');
+      status = existingByEmail || existingByPhone ? 'deduped' : 'updated';
       await pool.query(`
         UPDATE leads SET
           full_name = COALESCE(full_name, $1),
@@ -224,8 +234,8 @@ async function saveLead(config, sessionId, leadData, namespace) {
     sendLeadAlert(config, { ...savedLead, project_details: projectDetails, ai_summary: aiSummary, score_reasons: normalizedLead.score_reasons || [] }).catch((err) => console.error('Email alert failed:', err.message));
     return { status, capturedFields };
   } catch (error) {
-    console.error('saveLead error:', error.message);
-    return { status: 'skipped', capturedFields: [] };
+    console.error('lead_save_failed', { error: error?.message || 'unknown_error' });
+    return { status: 'failed', capturedFields: [] };
   }
 }
 
@@ -295,9 +305,15 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   perf.with({ businessId: config.business_id, botId });
 
   const deterministicLead = extractDeterministicLeadData(message);
+  const leadSignalsDetected = Boolean(deterministicLead?.leadSignals?.length);
+  perf.log('lead_pipeline_start', { requestId, businessId: config.business_id, botId, sessionId, leadExtractorEnabled: LEAD_EXTRACTOR_ENABLED });
+  perf.log('lead_signal_detection_done', { requestId, businessId: config.business_id, botId, sessionId, leadSignalsDetected });
+  perf.log('deterministic_lead_extraction_done', { requestId, businessId: config.business_id, botId, sessionId, deterministicLeadDetected: Boolean(deterministicLead?.extracted), deterministicConfidence: deterministicLead?.confidence || 0 });
   summary.leadExtractionAttempted = true;
+  summary.leadSignalsDetected = leadSignalsDetected;
   summary.deterministicLeadDetected = Boolean(deterministicLead?.extracted);
   summary.deterministicLeadConfidence = deterministicLead?.confidence || 0;
+  summary.leadExtractorEnabled = LEAD_EXTRACTOR_ENABLED;
   summary.leadExtractorCalled = false;
   summary.leadExtractorCacheHit = false;
   summary.leadExtractorModel = LEAD_EXTRACTOR_MODEL;
@@ -309,80 +325,62 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   summary.leadExtractorCostUsd = 0;
   summary.leadExtractorFilledFields = [];
   summary.leadDedupStrategy = 'none';
-  summary.leadDataDetected = Boolean(deterministicLead?.extracted);
   let leadToSave = deterministicLead?.extracted || null;
-  if (deterministicLead?.isConfident && !shouldRunLeadAgent(message, deterministicLead) && leadToSave) {
-    const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
-    summary.leadCaptureStatus = leadResult.status;
-    summary.leadDedupStrategy = leadResult.status;
-    summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','fullName','email','phone','churchName','company_name','serviceNeed','location','budgetRange','timeline'].includes(field));
-  } else if (shouldRunLeadAgent(message, deterministicLead)) {
+  let aiLead = null;
+  const shouldCallLeadExtractor = LEAD_EXTRACTOR_ENABLED && shouldRunLeadAgent(message, deterministicLead);
+  summary.leadExtractorCalled = shouldCallLeadExtractor;
+  perf.log('lead_extractor_decision', { requestId, businessId: config.business_id, botId, sessionId, leadExtractorEnabled: LEAD_EXTRACTOR_ENABLED, leadExtractorCalled: shouldCallLeadExtractor, leadExtractorSkippedReason: shouldCallLeadExtractor ? null : (LEAD_EXTRACTOR_ENABLED ? 'no_signal_or_confident_deterministic' : 'disabled') });
+
+  if (shouldCallLeadExtractor) {
     const normalizedMessage = normalizeMessageForCache(message);
     const cacheKey = `lead-extract:${config.business_id}:${sessionId}:${Buffer.from(normalizedMessage).toString('base64')}`;
-    summary.leadExtractorCalled = true;
-    let aiLead = null;
+    const provider = String(process.env.LEAD_EXTRACTOR_PROVIDER || 'openai').toLowerCase();
+    const providerApiKey = provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY;
+    perf.log('lead_extractor_config', { requestId, businessId: config.business_id, botId, sessionId, LEAD_EXTRACTOR_ENABLED, leadExtractorProviderConfigured: Boolean(process.env.LEAD_EXTRACTOR_PROVIDER), leadExtractorModelConfigured: Boolean(LEAD_EXTRACTOR_MODEL), leadExtractorApiKeyPresent: Boolean(providerApiKey) });
     const cached = await redisClient.get(cacheKey).catch(() => null);
     if (cached) {
       summary.leadExtractorCacheHit = true;
-      try {
-        aiLead = JSON.parse(cached);
-      } catch {
-        aiLead = null;
-      }
+      try { aiLead = JSON.parse(cached); } catch { aiLead = null; }
+    } else if (!provider || !LEAD_EXTRACTOR_MODEL || !providerApiKey) {
+      summary.leadExtractorSkippedReason = 'not_configured';
     } else {
-      const provider = String(process.env.LEAD_EXTRACTOR_PROVIDER || 'openai').toLowerCase();
-      const providerApiKey = provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY;
-      if (!provider || !LEAD_EXTRACTOR_MODEL || !providerApiKey) {
-        summary.leadExtractorSkippedReason = 'not_configured';
-        perf.log('lead_extractor_skipped', { leadExtractorSkippedReason: 'not_configured' });
-      } else {
-        try {
-          const openai = getOpenAIClient();
-          if (!openai) throw new Error('lead_extractor_not_configured');
-          const prompt = `Return strict JSON object only with fields: isLead, fullName, name, email, phone, companyName, company_name, churchName, location, serviceNeed, budgetRange, budget_range, timeline, leadScore, scoreReasons. Extract only from this message: ${message}`;
-          const rsp = await withTimeout((signal) => openai.chat.completions.create({
-            model: LEAD_EXTRACTOR_MODEL,
-            max_tokens: LEAD_EXTRACTOR_MAX_TOKENS,
-            response_format: { type: 'json_object' },
-            messages: [{ role: 'system', content: 'You are a lead extraction agent. Output strict JSON only. No prose.' }, { role: 'user', content: prompt }],
-            signal
-          }), LEAD_EXTRACTOR_TIMEOUT_MS);
-          try {
-            aiLead = JSON.parse(rsp.choices?.[0]?.message?.content || '{}');
-          } catch {
-            throw new Error('lead_extractor_invalid_json');
-          }
-          summary.leadExtractorInputTokens = rsp?.usage?.prompt_tokens || 0;
-          summary.leadExtractorOutputTokens = rsp?.usage?.completion_tokens || 0;
-          summary.leadExtractorCostUsd = estimateCost(LEAD_EXTRACTOR_MODEL, summary.leadExtractorInputTokens, summary.leadExtractorOutputTokens);
-          await redisClient.setex(cacheKey, 3600, JSON.stringify(aiLead)).catch(() => null);
-        } catch (error) {
-          summary.leadExtractorFailed = true;
-          summary.errorStage = 'lead_extractor';
-          perf.error('lead_extractor_failed', error, { code: safeLeadExtractorErrorCode(error) });
-        }
+      try {
+        const openai = getOpenAIClient();
+        if (!openai) throw new Error('lead_extractor_not_configured');
+        const prompt = `Return strict JSON object only with fields: isLead, fullName, name, email, phone, companyName, company_name, churchName, location, serviceNeed, budgetRange, budget_range, timeline, leadScore, scoreReasons. Extract only from this message: ${message}`;
+        const rsp = await withTimeout((signal) => openai.chat.completions.create({ model: LEAD_EXTRACTOR_MODEL, max_tokens: LEAD_EXTRACTOR_MAX_TOKENS, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'You are a lead extraction agent. Output strict JSON only. No prose.' }, { role: 'user', content: prompt }], signal }), LEAD_EXTRACTOR_TIMEOUT_MS);
+        aiLead = JSON.parse(rsp.choices?.[0]?.message?.content || '{}');
+        summary.leadExtractorInputTokens = rsp?.usage?.prompt_tokens || 0;
+        summary.leadExtractorOutputTokens = rsp?.usage?.completion_tokens || 0;
+        summary.leadExtractorCostUsd = estimateCost(LEAD_EXTRACTOR_MODEL, summary.leadExtractorInputTokens, summary.leadExtractorOutputTokens);
+      } catch (error) {
+        summary.leadExtractorFailed = true;
+        perf.error('lead_extractor_failed', error, { code: safeLeadExtractorErrorCode(error) });
       }
     }
-    if (aiLead?.isLead) {
-      const before = leadToSave || {};
-      leadToSave = mergeLeadData(leadToSave || {}, aiLead || {});
-      leadToSave.name = leadToSave.fullName || leadToSave.name || null;
-      leadToSave.churchName = leadToSave.companyName || leadToSave.company_name || leadToSave.churchName || null;
-      leadToSave.company_name = leadToSave.companyName || leadToSave.company_name || leadToSave.churchName || null;
-      summary.leadExtractorFilledFields = ['fullName', 'budgetRange', 'timeline', 'companyName', 'location', 'serviceNeed'].filter((f) => !before[f] && leadToSave[f]);
-      const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
-      summary.leadDataDetected = true;
-      summary.leadCaptureStatus = leadResult.status;
-      summary.leadDedupStrategy = leadResult.status;
-      summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','fullName','email','phone','churchName','company_name','serviceNeed','location','budgetRange','timeline'].includes(field));
-    }
-  } else if (leadToSave) {
-    if ((leadToSave.email || leadToSave.phone) && (leadToSave.serviceNeed || leadToSave.timeline || leadToSave.budgetRange)) leadToSave.lead_score = 'hot';
+  } else {
+    summary.leadExtractorSkippedReason = LEAD_EXTRACTOR_ENABLED ? 'no_signal_or_confident_deterministic' : 'disabled';
+  }
+
+  if (aiLead?.isLead) {
+    const before = leadToSave || {};
+    leadToSave = mergeLeadData(leadToSave || {}, aiLead || {});
+    summary.leadExtractorFilledFields = ['fullName', 'budgetRange', 'timeline', 'companyName', 'location', 'serviceNeed'].filter((f) => !before[f] && leadToSave[f]);
+  }
+  perf.log(aiLead?.isLead ? 'lead_extractor_done' : 'lead_extractor_skipped', { requestId, businessId: config.business_id, botId, sessionId, leadExtractorCalled: summary.leadExtractorCalled, leadExtractorSkippedReason: summary.leadExtractorSkippedReason, leadExtractorFailed: summary.leadExtractorFailed });
+
+  summary.leadDataDetected = Boolean(leadToSave);
+  if (leadToSave && hasMinimumLeadDataForSave(leadToSave)) {
+    summary.leadSaveAttempted = true;
+    perf.log('lead_save_start', { requestId, businessId: config.business_id, botId, sessionId, leadSaveAttempted: true });
     const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
     summary.leadCaptureStatus = leadResult.status;
     summary.leadDedupStrategy = leadResult.status;
     summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','fullName','email','phone','churchName','company_name','serviceNeed','location','budgetRange','timeline'].includes(field));
+    perf.log('lead_save_done', { requestId, businessId: config.business_id, botId, sessionId, leadCaptureStatus: summary.leadCaptureStatus, capturedFields: summary.capturedFields });
   }
+  perf.log('lead_pipeline_done', { requestId, businessId: config.business_id, botId, sessionId, leadSignalsDetected: summary.leadSignalsDetected, deterministicLeadDetected: summary.deterministicLeadDetected, deterministicConfidence: summary.deterministicLeadConfidence, leadExtractorEnabled: summary.leadExtractorEnabled, leadExtractorCalled: summary.leadExtractorCalled, leadExtractorSkippedReason: summary.leadExtractorSkippedReason, leadExtractorFailed: summary.leadExtractorFailed, leadDataDetected: summary.leadDataDetected, leadSaveAttempted: Boolean(summary.leadSaveAttempted), leadCaptureStatus: summary.leadCaptureStatus, capturedFields: summary.capturedFields });
+
 
   // SECTION 3: is_disabled check
   if (config.is_disabled) {
