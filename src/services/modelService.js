@@ -10,7 +10,6 @@ const PROVIDER_MODEL_ALIASES = {
   'gpt-5.4-nano': 'gpt-5-nano',
   },
   anthropic: {
-    'claude-sonnet-4-6': 'claude-sonnet-4-5-20250929',
     'claude-opus-4-6': 'claude-opus-4-5-20251101',
     'claude-opus-4-7': 'claude-opus-4-5-20251101'
   }
