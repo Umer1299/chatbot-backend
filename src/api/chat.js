@@ -14,6 +14,7 @@ import { estimateCost } from '../services/tokenCounter.js';
 import { getModelCreditCost } from '../services/modelPricing.js';
 import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
 import { buildAnthropicPayload } from '../services/anthropicMessageFormatter.js';
+import { extractDeterministicLeadData } from '../services/leadDetection.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -82,70 +83,93 @@ async function generateLeadSummary(leadData, industry) {
 
 async function saveLead(config, sessionId, leadData, namespace) {
   try {
-    if (!config || !sessionId || !leadData) return;
-    const dedupeKey = `lead:${namespace}:${sessionId}`;
-    try { if (await redisClient.get(dedupeKey)) return console.log('Duplicate lead skipped'); } catch (e) { console.error(e.message); }
+    if (!config || !sessionId || !leadData) return { status: 'skipped', capturedFields: [] };
+    const capturedFields = Object.keys(leadData).filter((k) => leadData[k]);
     const aiSummary = await generateLeadSummary(leadData, config.industry);
     const projectDetails = generateProjectDetails(config.industry, leadData);
-    const result = await pool.query(`
-  INSERT INTO leads (
-    business_id, session_id, full_name, phone, email, company_name,
-    lead_score, score_reasons, ai_summary, project_details,
-    industry, industry_data, budget_range, is_decision_maker,
-    calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason,
-    agents_used, source, status, created_at, updated_at
-  ) VALUES (
-    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-    $11,$12,$13,$14,$15,$16,$17,$18,
-    $19,'website_chatbot','new',NOW(),NOW()
-  )
-  ON CONFLICT (business_id, session_id)
-  WHERE session_id IS NOT NULL
-  DO UPDATE SET
-    full_name = COALESCE(EXCLUDED.full_name, leads.full_name),
-    phone = COALESCE(EXCLUDED.phone, leads.phone),
-    email = COALESCE(EXCLUDED.email, leads.email),
-    company_name = COALESCE(EXCLUDED.company_name, leads.company_name),
-    lead_score = EXCLUDED.lead_score,
-    score_reasons = EXCLUDED.score_reasons,
-    ai_summary = EXCLUDED.ai_summary,
-    project_details = EXCLUDED.project_details,
-    industry = EXCLUDED.industry,
-    industry_data = EXCLUDED.industry_data,
-    budget_range = EXCLUDED.budget_range,
-    is_decision_maker = EXCLUDED.is_decision_maker,
-    calendly_link_shown = EXCLUDED.calendly_link_shown,
-    urgency_flag = EXCLUDED.urgency_flag,
-    urgency_reason = EXCLUDED.urgency_reason,
-    agents_used = EXCLUDED.agents_used,
-    updated_at = NOW()
-  RETURNING *
-`, [
-  config.business_id, sessionId,
-  leadData.name, leadData.phone, leadData.email, leadData.company_name || null,
-  leadData.lead_score, leadData.score_reasons || [],
-  aiSummary, projectDetails,
-  config.industry,
-  JSON.stringify(leadData.industry_data || leadData),
-  leadData.budget_range, leadData.is_decision_maker,
-  Boolean(config.calendly_link || config.calendlyLink),
-  false,   // appointment_scheduled – placeholder; will be set later if needed
-  leadData.urgency_flag || false,
-  leadData.urgency_reason || null,
-  leadData.agents_used || []
-]);
-    const savedLead = result?.rows?.[0];
+
+    const existingByEmail = leadData.email
+      ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND email=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.email])).rows[0]
+      : null;
+    const existingBySession = !existingByEmail
+      ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND session_id=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, sessionId])).rows[0]
+      : null;
+    const existingLead = existingByEmail || existingBySession || null;
+
+    const upsertResult = await pool.query(`
+      INSERT INTO leads (
+        business_id, session_id, full_name, phone, email, company_name,
+        lead_score, score_reasons, ai_summary, project_details,
+        industry, industry_data, budget_range, is_decision_maker,
+        calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason,
+        agents_used, source, status, created_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+        $11,$12,$13,$14,$15,$16,$17,$18,
+        $19,'website_chatbot','new',NOW(),NOW()
+      )
+      ON CONFLICT (business_id, session_id)
+      WHERE session_id IS NOT NULL
+      DO UPDATE SET
+        full_name = COALESCE(leads.full_name, EXCLUDED.full_name),
+        phone = COALESCE(leads.phone, EXCLUDED.phone),
+        email = COALESCE(leads.email, EXCLUDED.email),
+        company_name = COALESCE(leads.company_name, EXCLUDED.company_name),
+        lead_score = COALESCE(EXCLUDED.lead_score, leads.lead_score),
+        score_reasons = CASE WHEN array_length(leads.score_reasons,1) > 0 THEN leads.score_reasons ELSE EXCLUDED.score_reasons END,
+        ai_summary = COALESCE(leads.ai_summary, EXCLUDED.ai_summary),
+        project_details = COALESCE(leads.project_details, EXCLUDED.project_details),
+        industry_data = leads.industry_data || EXCLUDED.industry_data,
+        urgency_flag = leads.urgency_flag OR EXCLUDED.urgency_flag,
+        urgency_reason = COALESCE(leads.urgency_reason, EXCLUDED.urgency_reason),
+        agents_used = CASE WHEN array_length(leads.agents_used,1) > 0 THEN leads.agents_used ELSE EXCLUDED.agents_used END,
+        updated_at = NOW()
+      RETURNING *
+    `, [
+      config.business_id, sessionId,
+      leadData.name || null, leadData.phone || null, leadData.email || null, leadData.company_name || leadData.churchName || null,
+      leadData.lead_score || 'warm', leadData.score_reasons || [],
+      aiSummary, projectDetails,
+      config.industry,
+      JSON.stringify({ ...leadData, namespace, botId: namespace }),
+      leadData.budget_range || null, leadData.is_decision_maker || null,
+      Boolean(config.calendly_link || config.calendlyLink),
+      false,
+      leadData.urgency_flag || false,
+      leadData.urgency_reason || null,
+      leadData.agents_used || []
+    ]);
+
+    let status = 'inserted';
+    if (existingLead) {
+      status = existingByEmail ? 'deduped' : 'updated';
+      await pool.query(`
+        UPDATE leads SET
+          full_name = COALESCE(full_name, $1),
+          phone = COALESCE(phone, $2),
+          email = COALESCE(email, $3),
+          company_name = COALESCE(company_name, $4),
+          lead_score = COALESCE(lead_score, $5),
+          score_reasons = CASE WHEN array_length(score_reasons,1) > 0 THEN score_reasons ELSE $6 END,
+          ai_summary = COALESCE(ai_summary, $7),
+          project_details = COALESCE(project_details, $8),
+          industry_data = industry_data || $9::jsonb,
+          updated_at = NOW()
+        WHERE id = $10
+      `,[leadData.name||null,leadData.phone||null,leadData.email||null,leadData.company_name||leadData.churchName||null,leadData.lead_score||'warm',leadData.score_reasons||[],aiSummary,projectDetails,JSON.stringify({ ...leadData, namespace, botId: namespace }),existingLead.id]);
+    }
+
+    const savedLead = existingLead || upsertResult?.rows?.[0];
     if (savedLead?.id) {
       await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW() WHERE id=$2", [savedLead.id, sessionId]);
     }
-    try { await redisClient.setex(dedupeKey, 3600, '1'); } catch (e) { console.error(e.message); }
-    if (process.env.BUBBLE_API_URL && process.env.BUBBLE_API_KEY && savedLead) {
-      fetch(`${process.env.BUBBLE_API_URL}/api/1.1/obj/lead`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ full_name: leadData.name, phone: leadData.phone, email: leadData.email, lead_score: leadData.lead_score, status: 'new', industry: config.industry, ai_summary: aiSummary, project_details: projectDetails, budget_range: leadData.budget_range, is_decision_maker: leadData.is_decision_maker, has_appointment: false, urgency_flag: leadData.urgency_flag || false, session_id: savedLead.id }) }).catch((err) => console.error('Bubble push failed:', err.message));
-    }
     sendLeadAlert(config, { ...savedLead, project_details: projectDetails, ai_summary: aiSummary, score_reasons: leadData.score_reasons || [] }).catch((err) => console.error('Email alert failed:', err.message));
-  } catch (error) { console.error('saveLead error:', error.message); }
+    return { status, capturedFields };
+  } catch (error) {
+    console.error('saveLead error:', error.message);
+    return { status: 'skipped', capturedFields: [] };
+  }
 }
-
 
 // ── Analytics helpers ──
 function detectIntentCategory(text) {
@@ -179,7 +203,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const requestStart = performance.now();
   const perf = createChatLogger({ event: 'chat_request_start', requestId, namespace: req.namespace || null, sessionId: req.body?.sessionId || null });
   perf.log('chat_request_start', { stream: isStreaming });
-  const summary = { status: 'error', redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {}, simpleIntent: null, replySource: null, aiSkipped: false, aiSkipReason: null, replyCacheHit: 'not_applicable', ragSkipped: false, ragSkipReason: null };
+  const summary = { status: 'error', leadExtractionAttempted: false, leadDataDetected: false, leadCaptureStatus: 'skipped', capturedFields: [], redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {}, simpleIntent: null, replySource: null, aiSkipped: false, aiSkipReason: null, replyCacheHit: 'not_applicable', ragSkipped: false, ragSkipReason: null };
 
   // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
@@ -211,6 +235,15 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
   summary.businessId = config.business_id;
   perf.with({ businessId: config.business_id, botId });
+
+  const deterministicLead = extractDeterministicLeadData(message);
+  summary.leadExtractionAttempted = true;
+  summary.leadDataDetected = Boolean(deterministicLead);
+  if (deterministicLead) {
+    const leadResult = await saveLead(config, sessionId, deterministicLead, req.namespace);
+    summary.leadCaptureStatus = leadResult.status;
+    summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','email','phone','churchName','company_name','serviceNeed','location'].includes(field));
+  }
 
   // SECTION 3: is_disabled check
   if (config.is_disabled) {
@@ -630,7 +663,7 @@ function cleanAssistantResponse(text = '') {
     );
     tasks.push((async () => { const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/); if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]); })());
     tasks.push((async () => { if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); } })());
-    tasks.push((async () => { const parsedLead = parseLeadDataFromResponse(fullResponse); const leadData = normalizeLeadData(parsedLead, message); if (leadData && (leadData.email || leadData.phone || leadData.name)) { await saveLead(config, sessionId, leadData, req.namespace); } })());
+    tasks.push((async () => { const parsedLead = parseLeadDataFromResponse(fullResponse); const leadData = normalizeLeadData(parsedLead, message); if (leadData && (leadData.email || leadData.phone || leadData.name)) { const leadResult = await saveLead(config, sessionId, leadData, req.namespace); summary.leadDataDetected = true; summary.leadCaptureStatus = leadResult.status; summary.capturedFields = Array.from(new Set([...(summary.capturedFields || []), ...leadResult.capturedFields])); } })());
     await Promise.allSettled(tasks);
   };
 
