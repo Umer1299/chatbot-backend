@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import jwt from 'jsonwebtoken';
 import pool from '../db/pool.js';
 import { redisClient } from '../services/redis.js';
 import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
@@ -10,26 +9,51 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-async function loadTokenDataFromDb(token) {
-  const decoded = jwt.verify(token, process.env.JWT_SECRET);
-  const botId = decoded?.botId;
-  const businessId = decoded?.businessId;
-  if (!botId || !businessId) return null;
+function getHeaderSource(req) {
+  const chatbotToken = req.headers['x-chatbot-token'];
+  const authHeader = req.headers.authorization;
 
+  if (chatbotToken) return 'x-chatbot-token';
+  if (authHeader) return 'authorization';
+  return 'missing';
+}
+
+async function loadTokenDataFromDb(token) {
   const result = await pool.query(
     `SELECT id, bot_id
      FROM businesses
-     WHERE id = $1 AND bot_id = $2
+     WHERE bot_id = $1
      LIMIT 1`,
-    [businessId, botId],
+    [token],
   );
 
   if (!result.rows[0]) return null;
 
   return {
-    namespace: botId,
-    businessId,
-    botId,
+    namespace: result.rows[0].bot_id,
+    businessId: result.rows[0].id,
+    botId: result.rows[0].bot_id,
+  };
+}
+
+async function loadTokenDataFromRedis(token) {
+  const namespace = await redisClient.get(`chatbot_token:${token}`);
+  if (!namespace) return null;
+
+  const business = await pool.query(
+    `SELECT id, bot_id
+     FROM businesses
+     WHERE bot_id = $1
+     LIMIT 1`,
+    [namespace],
+  );
+
+  if (!business.rows[0]) return null;
+
+  return {
+    namespace: business.rows[0].bot_id,
+    businessId: business.rows[0].id,
+    botId: business.rows[0].bot_id,
   };
 }
 
@@ -37,11 +61,15 @@ export async function tokenAuth(req, res, next) {
   req.requestId = req.requestId || getRequestId(req);
   const chatLog = createChatLogger({ requestId: req.requestId, namespace: req.namespace || null });
   const authStart = performance.now();
-  chatLog.log('token_auth_start');
+
+  chatLog.log('token_auth_started');
+  const headerSource = getHeaderSource(req);
+  chatLog.log('token_auth_header_source', { source: headerSource });
 
   const token = req.headers['x-chatbot-token'];
   if (!token) {
-    return res.status(401).json({ error: 'Missing x-chatbot-token header' });
+    chatLog.log('token_auth_failed', { reason: 'missing_chatbot_token' });
+    return res.status(401).json({ error: 'Missing chatbot token' });
   }
 
   const tokenHash = hashToken(token);
@@ -55,46 +83,64 @@ export async function tokenAuth(req, res, next) {
     if (cached) {
       tokenData = JSON.parse(cached);
       req.redisTokenCacheHit = true;
-      chatLog.log('token_auth_cache_hit', { tokenCacheKey: 'chatbot:token:<sha256>', durationMs: Number((performance.now() - authStart).toFixed(2)), businessId: tokenData.businessId || null, botId: tokenData.botId || null, namespace: tokenData.namespace || null });
+      chatLog.log('token_auth_cache_hit', { token_auth_cache_hit: true });
     } else {
-      chatLog.log('token_auth_cache_miss', { tokenCacheKey: 'chatbot:token:<sha256>', durationMs: Number((performance.now() - authStart).toFixed(2)) });
+      chatLog.log('token_auth_cache_hit', { token_auth_cache_hit: false });
     }
   } catch (error) {
     req.redisTokenCacheHit = 'error_fallback';
-    chatLog.error('redis_error', error, { operation: 'token_auth_cache_read', fallback: 'db_lookup' });
+    chatLog.error('redis_error', error, { operation: 'token_auth_cache_read', fallback: 'lookup_chatbot_token_mapping' });
+    chatLog.log('token_auth_cache_hit', { token_auth_cache_hit: false });
+  }
+
+  let usedDbFallback = false;
+
+  if (!tokenData) {
+    try {
+      tokenData = await loadTokenDataFromRedis(token);
+    } catch (error) {
+      chatLog.error('redis_error', error, { operation: 'chatbot_token_lookup', fallback: 'db_lookup' });
+    }
   }
 
   if (!tokenData) {
-    chatLog.log('token_auth_db_fallback_start', { durationMs: Number((performance.now() - authStart).toFixed(2)) });
+    usedDbFallback = true;
+    chatLog.log('token_auth_db_fallback', { token_auth_db_fallback: true });
     try {
       tokenData = await loadTokenDataFromDb(token);
     } catch (error) {
       chatLog.error('token_auth_db_fallback_failed', error);
       tokenData = null;
     }
-    chatLog.log('token_auth_db_fallback_done', { durationMs: Number((performance.now() - authStart).toFixed(2)), dbTokenValid: Boolean(tokenData) });
+  } else {
+    chatLog.log('token_auth_db_fallback', { token_auth_db_fallback: false });
+  }
 
-    if (tokenData) {
-      try {
-        await redisClient.setex(tokenCacheKey, TOKEN_CACHE_TTL_SECONDS, JSON.stringify(tokenData));
-        chatLog.log('token_auth_cache_set', { tokenCacheKey: 'chatbot:token:<sha256>', ttlSeconds: TOKEN_CACHE_TTL_SECONDS, durationMs: Number((performance.now() - authStart).toFixed(2)), businessId: tokenData.businessId, botId: tokenData.botId, namespace: tokenData.namespace });
-      } catch (error) {
-        chatLog.error('redis_error', error, { operation: 'token_auth_cache_write', fallback: 'continue_without_cache' });
-      }
+  if (tokenData) {
+    try {
+      await redisClient.setex(tokenCacheKey, TOKEN_CACHE_TTL_SECONDS, JSON.stringify(tokenData));
+    } catch (error) {
+      chatLog.error('redis_error', error, { operation: 'token_auth_cache_write', fallback: 'continue_without_cache' });
     }
   }
 
   if (!tokenData?.namespace) {
-    return res.status(403).json({ error: 'Invalid or expired token' });
+    if (usedDbFallback) {
+      chatLog.log('token_auth_db_fallback', { token_auth_db_fallback: true });
+    }
+    chatLog.log('token_auth_failed', { reason: 'invalid_chatbot_token' });
+    return res.status(401).json({ error: 'Invalid chatbot token' });
   }
 
   req.chatbotToken = token;
   req.namespace = tokenData.namespace;
   req.businessId = tokenData.businessId || null;
   req.botId = tokenData.botId || tokenData.namespace;
+
   chatLog.with({ namespace: tokenData.namespace, businessId: tokenData.businessId || null, botId: tokenData.botId || null });
   const totalMs = Number((performance.now() - authStart).toFixed(2));
   chatLog.log('token_auth_done', { durationMs: totalMs, redisTokenCacheHit: req.redisTokenCacheHit });
   if (totalMs > 200) chatLog.warn('slow_token_auth', { durationMs: totalMs });
-  next();
+
+  return next();
 }
