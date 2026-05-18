@@ -14,7 +14,7 @@ import { estimateCost } from '../services/tokenCounter.js';
 import { getModelCreditCost } from '../services/modelPricing.js';
 import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
 import { buildAnthropicPayload } from '../services/anthropicMessageFormatter.js';
-import { extractDeterministicLeadData } from '../services/leadDetection.js';
+import { extractDeterministicLeadData, shouldRunLeadAgent } from '../services/leadDetection.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -22,6 +22,8 @@ const getOpenAIClient = () => process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_USAGE = { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, creditsUsed: 1 };
 const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0 };
+const LEAD_EXTRACTOR_MODEL = process.env.LEAD_EXTRACTOR_MODEL || 'gpt-4o-mini';
+const LEAD_EXTRACTOR_MAX_TOKENS = Number(process.env.LEAD_EXTRACTOR_MAX_TOKENS || 300);
 
 function normalizeMessageForCache(input = '') {
   return String(input).toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
@@ -91,10 +93,18 @@ async function saveLead(config, sessionId, leadData, namespace) {
     const existingByEmail = leadData.email
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND email=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.email])).rows[0]
       : null;
-    const existingBySession = !existingByEmail
+    const existingByPhone = (!existingByEmail && leadData.phone)
+      ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND phone=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.phone])).rows[0]
+      : null;
+    const existingBySession = (!existingByEmail && !existingByPhone)
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND session_id=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, sessionId])).rows[0]
       : null;
-    const existingLead = existingByEmail || existingBySession || null;
+    const hasConflictWithSession = existingBySession && (
+      (leadData.email && existingBySession.email && leadData.email !== existingBySession.email) ||
+      (leadData.company_name && existingBySession.company_name && leadData.company_name !== existingBySession.company_name) ||
+      (leadData.name && existingBySession.full_name && leadData.name !== existingBySession.full_name)
+    );
+    const existingLead = hasConflictWithSession ? null : (existingByEmail || existingByPhone || existingBySession || null);
 
     const upsertResult = await pool.query(`
       INSERT INTO leads (
@@ -142,7 +152,7 @@ async function saveLead(config, sessionId, leadData, namespace) {
 
     let status = 'inserted';
     if (existingLead) {
-      status = existingByEmail ? 'deduped' : 'updated';
+      status = existingByEmail ? 'deduped_email' : (existingByPhone ? 'deduped_phone' : 'updated_session');
       await pool.query(`
         UPDATE leads SET
           full_name = COALESCE(full_name, $1),
@@ -238,11 +248,56 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   const deterministicLead = extractDeterministicLeadData(message);
   summary.leadExtractionAttempted = true;
-  summary.leadDataDetected = Boolean(deterministicLead);
-  if (deterministicLead) {
-    const leadResult = await saveLead(config, sessionId, deterministicLead, req.namespace);
+  summary.deterministicLeadDetected = Boolean(deterministicLead?.extracted);
+  summary.deterministicLeadConfidence = deterministicLead?.confidence || 0;
+  summary.leadExtractorCalled = false;
+  summary.leadExtractorCacheHit = false;
+  summary.leadExtractorModel = LEAD_EXTRACTOR_MODEL;
+  summary.leadExtractorInputTokens = 0;
+  summary.leadExtractorOutputTokens = 0;
+  summary.leadExtractorCostUsd = 0;
+  summary.leadDedupStrategy = 'none';
+  summary.leadDataDetected = Boolean(deterministicLead?.extracted);
+  let leadToSave = deterministicLead?.extracted || null;
+  if (deterministicLead?.isConfident && leadToSave) {
+    const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
     summary.leadCaptureStatus = leadResult.status;
+    summary.leadDedupStrategy = leadResult.status;
     summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','email','phone','churchName','company_name','serviceNeed','location'].includes(field));
+  } else if (shouldRunLeadAgent(message, deterministicLead)) {
+    const normalizedMessage = normalizeMessageForCache(message);
+    const cacheKey = `lead-extract:${config.business_id}:${sessionId}:${Buffer.from(normalizedMessage).toString('base64')}`;
+    summary.leadExtractorCalled = true;
+    let aiLead = null;
+    const cached = await redisClient.get(cacheKey).catch(() => null);
+    if (cached) {
+      summary.leadExtractorCacheHit = true;
+      aiLead = JSON.parse(cached);
+    } else {
+      const openai = getOpenAIClient();
+      if (openai) {
+        const prompt = `Return strict JSON only with schema fields. Extract only from this message: ${message}`;
+        const rsp = await openai.chat.completions.create({
+          model: LEAD_EXTRACTOR_MODEL,
+          max_tokens: LEAD_EXTRACTOR_MAX_TOKENS,
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'system', content: 'You are a lead extraction agent. Output JSON only.' }, { role: 'user', content: prompt }]
+        });
+        aiLead = JSON.parse(rsp.choices?.[0]?.message?.content || '{}');
+        summary.leadExtractorInputTokens = rsp.usage?.prompt_tokens || 0;
+        summary.leadExtractorOutputTokens = rsp.usage?.completion_tokens || 0;
+        summary.leadExtractorCostUsd = estimateCost(LEAD_EXTRACTOR_MODEL, summary.leadExtractorInputTokens, summary.leadExtractorOutputTokens);
+        await redisClient.setex(cacheKey, 3600, JSON.stringify(aiLead)).catch(() => null);
+      }
+    }
+    if (aiLead?.isLead) {
+      leadToSave = { ...leadToSave, name: aiLead.fullName || leadToSave?.name || null, email: aiLead.email || leadToSave?.email || null, phone: aiLead.phone || leadToSave?.phone || null, churchName: aiLead.companyName || leadToSave?.churchName || null, company_name: aiLead.companyName || leadToSave?.company_name || null, location: aiLead.location || leadToSave?.location || null, serviceNeed: aiLead.serviceNeed || leadToSave?.serviceNeed || null, lead_score: aiLead.leadScore || leadToSave?.lead_score || 'warm', score_reasons: aiLead.scoreReasons || leadToSave?.score_reasons || ['ai_extractor'] };
+      const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
+      summary.leadDataDetected = true;
+      summary.leadCaptureStatus = leadResult.status;
+      summary.leadDedupStrategy = leadResult.status;
+      summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','email','phone','churchName','company_name','serviceNeed','location'].includes(field));
+    }
   }
 
   // SECTION 3: is_disabled check
