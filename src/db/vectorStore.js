@@ -143,14 +143,20 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
   }
 }
 
-export async function getRelevantChunks(businessId, queryText, namespace, limit = 5) {
+export async function getRelevantChunks(businessId, queryText, namespace, limit = 5, options = {}) {
   const cacheKey = `rag:${namespace}:${queryText.substring(0, 40).replace(/\s+/g, '-').toLowerCase()}`;
 
   if (redisClient) {
     try {
       const cached = await redisClient.get(cacheKey);
-      if (cached) return JSON.parse(cached);
+      if (cached) {
+        const rows = JSON.parse(cached);
+        if (typeof options.onCacheStatus === 'function') options.onCacheStatus(true, cacheKey);
+        return rows;
+      }
+      if (typeof options.onCacheStatus === 'function') options.onCacheStatus(false, cacheKey);
     } catch (error) {
+      if (typeof options.onCacheStatus === 'function') options.onCacheStatus('error_fallback', cacheKey);
       console.warn('Redis read failed, using DB fallback:', error.message);
     }
   }
