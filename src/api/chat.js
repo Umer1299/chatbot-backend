@@ -149,7 +149,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const requestStart = performance.now();
   const perf = createChatLogger({ event: 'chat_request_start', requestId, namespace: req.namespace || null, sessionId: req.body?.sessionId || null });
   perf.log('chat_request_start', { stream: isStreaming });
-  const summary = { status: 'error', redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null };
+  const summary = { status: 'error', redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {} };
 
   // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
@@ -176,6 +176,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
   }
   const cfgMs = perf.endTimer('bot_config_lookup', { botConfigCacheHit: summary.botConfigCacheHit });
+  if (cfgMs != null) summary.stepTimingsMs.botConfigLookup = cfgMs;
   if (cfgMs && cfgMs > 300) perf.warn('slow_bot_config_fetch', { durationMs: cfgMs });
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
   summary.businessId = config.business_id;
@@ -234,9 +235,12 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   // SECTION 5: Escalation keyword check
   const escalationDetected = ['speak to someone', 'speak to a person', 'call me', 'real person', 'human agent', 'talk to someone', 'complaint', 'legal action', 'urgent help', 'want to speak'].some((kw) => message.toLowerCase().includes(kw));
   // SECTION 6: Load session + history
+  perf.startTimer('session_history_load');
   let session = (await pool.query('SELECT * FROM sessions WHERE id=$1', [sessionId])).rows[0] || null;
   if (!session) { await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]); session = { current_phase: 1 }; }
   const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at DESC LIMIT 20', [sessionId]);
+  const sessionHistoryMs = perf.endTimer('session_history_load', { historyCount: historyRows.rows.length });
+  if (sessionHistoryMs != null) summary.stepTimingsMs.sessionHistoryLoad = sessionHistoryMs;
 
   // SMART HISTORY PRUNING — keep last 6 full messages, summarize older ones
   const MAX_FULL_MSG = 6;
@@ -280,6 +284,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     if (summary.ragCacheHit === 'not_applicable') summary.ragCacheHit = 'error_fallback';
   }
   const ragMs = perf.endTimer('rag_search', { ragChunksReturned: chunks.length });
+  if (ragMs != null) summary.stepTimingsMs.ragSearch = ragMs;
   if (ragMs && ragMs > 800) perf.warn('slow_pgvector_search', { durationMs: ragMs });
   const contextText = chunks.length > 0 ? chunks.map((c) => c.content).join('\n\n') : '';
   summary.ragChunksInjected = chunks.length;
@@ -311,6 +316,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const phaseBlock = '\nCURRENT PHASE: ' + (session?.current_phase || 1) + '\n';
 
   const promptMs = perf.endTimer('prompt_build', { selectedAgents: usedAgents, promptChars: (ragBlock + agentSystemPrompt + phaseBlock).length });
+  if (promptMs != null) summary.stepTimingsMs.promptBuild = promptMs;
   if (promptMs && promptMs > 300) perf.warn('slow_prompt_build', { durationMs: promptMs });
   perf.log('prompt_features', { hasBusinessProfile: true, hasRagContext: Boolean(contextText), hasSelectedAgentInstructions: usedAgents.length > 0, hasLeadCaptureInstructions: /LEAD_DATA/.test(agentSystemPrompt), hasBookingDiscoveryInstructions: /book|discovery|appointment/i.test(agentSystemPrompt), selectedAgentsCount: usedAgents.length, selectedAgents: usedAgents });
   summary.selectedAgents = usedAgents;
@@ -585,6 +591,7 @@ function cleanAssistantResponse(text = '') {
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
       const usage = buildUsageSummary(streamUsage, result.resolvedModel.modelId);
       summary.inputTokens = usage.inputTokens; summary.outputTokens = usage.outputTokens; summary.totalTokens = usage.inputTokens + usage.outputTokens; summary.estimatedCostUsd = usage.estimatedCostUsd; summary.creditsUsed = usage.creditsUsed; summary.aiDurationMs = perf.endTimer('ai_call', { event: 'ai_call_done', provider: result.resolvedModel.provider, modelId: result.resolvedModel.modelId, apiModelId: result.resolvedModel.apiModelId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.inputTokens + usage.outputTokens, estimatedCostUsd: usage.estimatedCostUsd, creditsUsed: usage.creditsUsed, timeToFirstTokenMs: summary.timeToFirstTokenMs });
+      if (summary.aiDurationMs != null) summary.stepTimingsMs.aiCall = summary.aiDurationMs;
       if (summary.aiDurationMs && summary.aiDurationMs > 4000) perf.warn('slow_ai_call', { durationMs: summary.aiDurationMs });
       const cleanResponse = cleanAssistantResponse(fullResponse);
       res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, agentsUsed: usedAgents, usage })}\n\n`);
@@ -607,6 +614,7 @@ function cleanAssistantResponse(text = '') {
     const cleanResponse = cleanAssistantResponse(fullResponse);
     summary.inputTokens = result.usage?.inputTokens || 0; summary.outputTokens = result.usage?.outputTokens || 0; summary.totalTokens = summary.inputTokens + summary.outputTokens; summary.estimatedCostUsd = result.usage?.estimatedCostUsd || 0; summary.creditsUsed = result.usage?.creditsUsed || 0;
     summary.aiDurationMs = perf.endTimer('ai_call', { event: 'ai_call_done', provider: result.resolvedModel.provider, modelId: result.resolvedModel.modelId, apiModelId: result.resolvedModel.apiModelId, inputTokens: summary.inputTokens, outputTokens: summary.outputTokens, totalTokens: summary.totalTokens, estimatedCostUsd: summary.estimatedCostUsd, creditsUsed: summary.creditsUsed });
+    if (summary.aiDurationMs != null) summary.stepTimingsMs.aiCall = summary.aiDurationMs;
     if (summary.aiDurationMs && summary.aiDurationMs > 4000) perf.warn('slow_ai_call', { durationMs: summary.aiDurationMs });
     res.json({
       reply: cleanResponse,
@@ -621,9 +629,12 @@ function cleanAssistantResponse(text = '') {
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   } finally {
     const totalDurationMs = Number((performance.now() - requestStart).toFixed(2));
-    if (totalDurationMs > 1000) perf.warn('slow_backend_non_ai', { totalDurationMs });
+    const nonAiDurationMs = summary.aiDurationMs != null ? Number((totalDurationMs - summary.aiDurationMs).toFixed(2)) : null;
+    summary.stepTimingsMs.total = totalDurationMs;
+    summary.stepTimingsMs.nonAi = nonAiDurationMs;
+    if (totalDurationMs > 1000) perf.warn('slow_backend_non_ai', { totalDurationMs, nonAiDurationMs });
     if (totalDurationMs > 5000) perf.warn('slow_chat_request', { totalDurationMs });
-    perf.log('chat_request_summary', { ...summary, totalDurationMs }, true);
+    perf.log('chat_request_summary', { ...summary, totalDurationMs, nonAiDurationMs }, true);
   }
 });
 
