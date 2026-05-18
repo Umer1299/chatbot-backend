@@ -10,11 +10,22 @@ import { sanitizeMessage } from '../middleware/sanitize.js';
 import { tokenAuth } from '../middleware/tokenAuth.js';
 import { domainRestriction } from '../middleware/domainRestriction.js';
 import { redisClient } from '../services/redis.js';
+import { estimateCost } from '../services/tokenCounter.js';
+import { getModelCreditCost } from '../services/modelPricing.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
 const getOpenAIClient = () => process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_USAGE = { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, creditsUsed: 1 };
+
+function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
+  const inputTokens = Number.isFinite(rawUsage?.input_tokens) ? rawUsage.input_tokens : 0;
+  const outputTokens = Number.isFinite(rawUsage?.output_tokens) ? rawUsage.output_tokens : 0;
+  const estimatedCostUsd = estimateCost(modelId, inputTokens, outputTokens);
+  const creditsUsed = getModelCreditCost(modelId);
+  return { inputTokens, outputTokens, estimatedCostUsd, creditsUsed };
+}
 
 async function generateLeadSummary(leadData, industry) {
   const prompt = `Write a 2-sentence lead summary for a busy ${industry} business owner. Include: name, what they need, budget if known, and why this is a ${leadData?.lead_score} lead. Be direct. Max 40 words total. Lead: ${JSON.stringify(leadData)} Return: {"summary":"string"}`;
@@ -327,7 +338,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         });
         return {
           reply: response.content[0].text,
-          resolvedModel
+          resolvedModel,
+          usage: buildUsageSummary(response.usage, resolvedModel.modelId)
         };
       } catch (anthropicErr) {
         console.error('[chat] Anthropic request failed:', anthropicErr.message);
@@ -344,7 +356,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         });
           return {
             reply: fb.choices[0].message.content,
-            resolvedModel: { ...resolvedModel, wasDowngraded: true }
+            resolvedModel: { ...resolvedModel, wasDowngraded: true },
+            usage: DEFAULT_USAGE
           };
         } catch (openaiFallbackErr) {
           console.error('[chat] OpenAI fallback failed:', openaiFallbackErr.message);
@@ -396,7 +409,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       });
       return {
         reply: response.choices[0].message.content,
-        resolvedModel
+        resolvedModel,
+        usage: DEFAULT_USAGE
       };
     }
 
@@ -479,11 +493,20 @@ function cleanAssistantResponse(text = '') {
     const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15000);
     const timeout = setTimeout(() => { clearInterval(keepAlive); res.write('data: [DONE]\n\n'); res.end(); }, 30000);
     let fullResponse = ''; let calendlyUrl = null;
+    let streamUsage = { input_tokens: 0, output_tokens: 0 };
     try {
       const result = await callWithFallback(true, config, fullSystemPrompt, messagesArray);
       const stream = result.stream;
       // result.resolvedModel will be used later in the meta frame
       for await (const chunk of stream) {
+        if (chunk?.type === 'message_start' && chunk?.message?.usage) {
+          streamUsage.input_tokens = Number.isFinite(chunk.message.usage.input_tokens) ? chunk.message.usage.input_tokens : streamUsage.input_tokens;
+          streamUsage.output_tokens = Number.isFinite(chunk.message.usage.output_tokens) ? chunk.message.usage.output_tokens : streamUsage.output_tokens;
+        }
+        if (chunk?.type === 'message_delta' && chunk?.usage) {
+          if (Number.isFinite(chunk.usage.input_tokens)) streamUsage.input_tokens = chunk.usage.input_tokens;
+          if (Number.isFinite(chunk.usage.output_tokens)) streamUsage.output_tokens = chunk.usage.output_tokens;
+        }
         if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
           const token = chunk.delta.text; fullResponse += token;
           res.write(`data: ${JSON.stringify({ text: token, token })}\n\n`);
@@ -492,8 +515,9 @@ function cleanAssistantResponse(text = '') {
       clearInterval(keepAlive); clearTimeout(timeout);
       const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/); if (calendlyMatch) calendlyUrl = calendlyMatch[1];
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
+      const usage = buildUsageSummary(streamUsage, result.resolvedModel.modelId);
       const cleanResponse = cleanAssistantResponse(fullResponse);
-      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, agentsUsed: usedAgents })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, agentsUsed: usedAgents, usage })}\n\n`);
       res.write('data: [DONE]\n\n'); res.end();
       processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
     } catch (streamError) {
@@ -511,7 +535,8 @@ function cleanAssistantResponse(text = '') {
     res.json({
       reply: cleanResponse,
       resolvedModel: result.resolvedModel,
-      agentsUsed: usedAgents
+      agentsUsed: usedAgents,
+      usage: result.usage || DEFAULT_USAGE
     });
     processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
   } catch {
