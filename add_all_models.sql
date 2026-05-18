@@ -24,7 +24,7 @@ INSERT INTO model_configs (
   ('gpt-4', 'GPT-4', 'AI [GPT-4]', 'openai', 'gpt-4', 'trial', true, 24),
   ('claude-opus-4-7', 'Claude Opus 4.7', 'Advanced AI [Claude Opus 4.7]', 'anthropic', 'claude-opus-4-20250514', 'trial', true, 30),
   ('claude-opus-4-6', 'Claude Opus 4.6', 'Advanced AI [Claude Opus 4.6]', 'anthropic', 'claude-opus-4-20250514', 'trial', true, 31),
-  ('claude-sonnet-4-6', 'Claude Sonnet 4.6', 'Advanced AI [Claude Sonnet 4.6]', 'anthropic', 'claude-sonnet-4-20250514', 'trial', true, 32),
+  ('claude-sonnet-4-6', 'Claude Sonnet 4.6', 'Advanced AI [Claude Sonnet 4.6]', 'anthropic', 'claude-sonnet-4-6', 'trial', true, 32),
   ('claude-haiku-4-5-20251001', 'Claude Haiku 4.5', 'Fast AI [Claude Haiku 4.5]', 'anthropic', 'claude-haiku-4-5-20251001', 'trial', true, 33),
   ('claude-sonnet-4-5-20250929', 'Claude Sonnet 4.5', 'Advanced AI [Claude Sonnet 4.5]', 'anthropic', 'claude-sonnet-4-5-20250929', 'trial', true, 34),
   ('claude-opus-4-5-20251101', 'Claude Opus 4.5', 'Advanced AI [Claude Opus 4.5]', 'anthropic', 'claude-opus-4-5-20251101', 'trial', true, 35),

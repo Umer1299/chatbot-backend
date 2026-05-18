@@ -14,6 +14,7 @@ import { redisClient } from '../services/redis.js';
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
 const getOpenAIClient = () => process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 
 async function generateLeadSummary(leadData, industry) {
   const prompt = `Write a 2-sentence lead summary for a busy ${industry} business owner. Include: name, what they need, budget if known, and why this is a ${leadData?.lead_score} lead. Be direct. Max 40 words total. Lead: ${JSON.stringify(leadData)} Return: {"summary":"string"}`;
@@ -228,7 +229,13 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     }
   }
   // SECTION 7: RAG context retrieval
-  const chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5);
+  let chunks = [];
+  try {
+    chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5);
+  } catch (ragError) {
+    console.error('[chat] RAG retrieval failed; continuing without RAG context:', ragError.message);
+    chunks = [];
+  }
   const contextText = chunks.length > 0 ? chunks.map((c) => c.content).join('\n\n') : '';
 
   // SECTION 8: Build system prompt
@@ -277,11 +284,24 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
     // ── Anthropic provider ──────────────────────
     if (resolvedModel.provider === 'anthropic') {
+      const anthropicModel = (typeof resolvedModel.apiModelId === 'string' && resolvedModel.apiModelId.startsWith('claude-'))
+        ? resolvedModel.apiModelId
+        : DEFAULT_ANTHROPIC_MODEL;
+
+      if (anthropicModel !== resolvedModel.apiModelId) {
+        console.warn('[chat] Invalid or missing Anthropic model, applying safe default', {
+          requested: config.selected_model,
+          resolvedApiModelId: resolvedModel.apiModelId,
+          fallbackApiModelId: anthropicModel
+        });
+      }
+
       if (stream) {
         const anthropic = getAnthropicClient();
         if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
+        console.log('[anthropic] final model sent:', anthropicModel);
         const anthropicStream = await anthropic.messages.stream({
-          model: resolvedModel.apiModelId,
+          model: anthropicModel,
           max_tokens: 1000,
           system: systemPrompt,
           messages
@@ -293,8 +313,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       try {
         const anthropic = getAnthropicClient();
         if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
+        console.log('[anthropic] final model sent:', anthropicModel);
         const response = await anthropic.messages.create({
-          model: resolvedModel.apiModelId,
+          model: anthropicModel,
           max_tokens: 1000,
           system: systemPrompt,
           messages
@@ -304,10 +325,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
           resolvedModel
         };
       } catch (anthropicErr) {
-        console.warn('[chat] Anthropic failed, falling back to OpenAI:', anthropicErr.message);
+        console.error('[chat] Anthropic request failed:', anthropicErr.message);
         const openai = getOpenAIClient();
         if (!openai) throw anthropicErr;
-        const fb = await openai.chat.completions.create({
+        try {
+          const fb = await openai.chat.completions.create({
           model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini',
           max_tokens: 1000,
           messages: [
@@ -315,10 +337,14 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
             ...messages
           ]
         });
-        return {
-          reply: fb.choices[0].message.content,
-          resolvedModel: { ...resolvedModel, wasDowngraded: true }
-        };
+          return {
+            reply: fb.choices[0].message.content,
+            resolvedModel: { ...resolvedModel, wasDowngraded: true }
+          };
+        } catch (openaiFallbackErr) {
+          console.error('[chat] OpenAI fallback failed:', openaiFallbackErr.message);
+          throw openaiFallbackErr;
+        }
       }
     }
 

@@ -130,7 +130,12 @@ export async function getEmbedding(text) {
 
     return result?.data?.[0]?.embedding || null;
   } catch (error) {
-    console.error('Embedding generation error:', error.message);
+    const isQuotaError = error?.status === 429 || error?.code === 'insufficient_quota' || /quota|429/i.test(error?.message || '');
+    if (isQuotaError) {
+      console.error('[rag] OpenAI embeddings quota/rate-limit error (non-fatal):', error.message);
+    } else {
+      console.error('Embedding generation error:', error.message);
+    }
     return null;
   }
 }
