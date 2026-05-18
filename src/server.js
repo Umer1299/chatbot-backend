@@ -7,6 +7,14 @@ import { redisClient } from './services/redis.js';
 
 const PORT = process.env.PORT || 3000;
 
+process.on('unhandledRejection', (reason) => {
+  console.error(JSON.stringify({ event: 'process_unhandled_rejection', message: reason?.message || String(reason) }));
+});
+
+process.on('uncaughtException', (error) => {
+  console.error(JSON.stringify({ event: 'process_uncaught_exception', message: error?.message || 'unknown_error' }));
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 

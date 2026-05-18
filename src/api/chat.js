@@ -15,6 +15,7 @@ import { getModelCreditCost } from '../services/modelPricing.js';
 import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
 import { buildAnthropicPayload } from '../services/anthropicMessageFormatter.js';
 import { extractDeterministicLeadData, shouldRunLeadAgent } from '../services/leadDetection.js';
+import { safeLeadExtractorErrorCode, withTimeout } from '../services/leadExtractorSafety.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -24,6 +25,7 @@ const DEFAULT_USAGE = { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, cr
 const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0 };
 const LEAD_EXTRACTOR_MODEL = process.env.LEAD_EXTRACTOR_MODEL || 'gpt-4o-mini';
 const LEAD_EXTRACTOR_MAX_TOKENS = Number(process.env.LEAD_EXTRACTOR_MAX_TOKENS || 300);
+const LEAD_EXTRACTOR_TIMEOUT_MS = Number(process.env.LEAD_EXTRACTOR_TIMEOUT_MS || 4000);
 
 function normalizeMessageForCache(input = '') {
   return String(input).toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
@@ -299,6 +301,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   summary.leadExtractorCalled = false;
   summary.leadExtractorCacheHit = false;
   summary.leadExtractorModel = LEAD_EXTRACTOR_MODEL;
+  summary.leadExtractorProvider = process.env.LEAD_EXTRACTOR_PROVIDER || 'openai';
+  summary.leadExtractorFailed = false;
+  summary.leadExtractorSkippedReason = null;
   summary.leadExtractorInputTokens = 0;
   summary.leadExtractorOutputTokens = 0;
   summary.leadExtractorCostUsd = 0;
@@ -319,22 +324,43 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const cached = await redisClient.get(cacheKey).catch(() => null);
     if (cached) {
       summary.leadExtractorCacheHit = true;
-      aiLead = JSON.parse(cached);
+      try {
+        aiLead = JSON.parse(cached);
+      } catch {
+        aiLead = null;
+      }
     } else {
-      const openai = getOpenAIClient();
-      if (openai) {
-        const prompt = `Return strict JSON only with schema fields. Extract only from this message: ${message}`;
-        const rsp = await openai.chat.completions.create({
-          model: LEAD_EXTRACTOR_MODEL,
-          max_tokens: LEAD_EXTRACTOR_MAX_TOKENS,
-          response_format: { type: 'json_object' },
-          messages: [{ role: 'system', content: 'You are a lead extraction agent. Output JSON only.' }, { role: 'user', content: prompt }]
-        });
-        aiLead = JSON.parse(rsp.choices?.[0]?.message?.content || '{}');
-        summary.leadExtractorInputTokens = rsp.usage?.prompt_tokens || 0;
-        summary.leadExtractorOutputTokens = rsp.usage?.completion_tokens || 0;
-        summary.leadExtractorCostUsd = estimateCost(LEAD_EXTRACTOR_MODEL, summary.leadExtractorInputTokens, summary.leadExtractorOutputTokens);
-        await redisClient.setex(cacheKey, 3600, JSON.stringify(aiLead)).catch(() => null);
+      const provider = String(process.env.LEAD_EXTRACTOR_PROVIDER || 'openai').toLowerCase();
+      const providerApiKey = provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY;
+      if (!provider || !LEAD_EXTRACTOR_MODEL || !providerApiKey) {
+        summary.leadExtractorSkippedReason = 'not_configured';
+        perf.log('lead_extractor_skipped', { leadExtractorSkippedReason: 'not_configured' });
+      } else {
+        try {
+          const openai = getOpenAIClient();
+          if (!openai) throw new Error('lead_extractor_not_configured');
+          const prompt = `Return strict JSON object only with fields: isLead, fullName, name, email, phone, companyName, company_name, churchName, location, serviceNeed, budgetRange, budget_range, timeline, leadScore, scoreReasons. Extract only from this message: ${message}`;
+          const rsp = await withTimeout((signal) => openai.chat.completions.create({
+            model: LEAD_EXTRACTOR_MODEL,
+            max_tokens: LEAD_EXTRACTOR_MAX_TOKENS,
+            response_format: { type: 'json_object' },
+            messages: [{ role: 'system', content: 'You are a lead extraction agent. Output strict JSON only. No prose.' }, { role: 'user', content: prompt }],
+            signal
+          }), LEAD_EXTRACTOR_TIMEOUT_MS);
+          try {
+            aiLead = JSON.parse(rsp.choices?.[0]?.message?.content || '{}');
+          } catch {
+            throw new Error('lead_extractor_invalid_json');
+          }
+          summary.leadExtractorInputTokens = rsp?.usage?.prompt_tokens || 0;
+          summary.leadExtractorOutputTokens = rsp?.usage?.completion_tokens || 0;
+          summary.leadExtractorCostUsd = estimateCost(LEAD_EXTRACTOR_MODEL, summary.leadExtractorInputTokens, summary.leadExtractorOutputTokens);
+          await redisClient.setex(cacheKey, 3600, JSON.stringify(aiLead)).catch(() => null);
+        } catch (error) {
+          summary.leadExtractorFailed = true;
+          summary.errorStage = 'lead_extractor';
+          perf.error('lead_extractor_failed', error, { code: safeLeadExtractorErrorCode(error) });
+        }
       }
     }
     if (aiLead?.isLead) {
@@ -823,7 +849,10 @@ function cleanAssistantResponse(text = '') {
       summary.status = 'success';
     } catch (streamError) {
       clearInterval(keepAlive); clearTimeout(timeout);
-      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Something went wrong. Please try again.' })}\n\n`); res.write('data: [DONE]\n\n'); res.end();
+      summary.errorStage = summary.errorStage || 'streaming_response';
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Something went wrong. Please try again.' })}\n\n`); res.write('data: [DONE]\n\n'); res.end();
+      }
     }
     return;
   }
@@ -867,7 +896,8 @@ function cleanAssistantResponse(text = '') {
     summary.status = 'success';
   } catch (error) {
     perf.error('chat_request_error', error);
-    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+    summary.errorStage = summary.errorStage || 'chat_response';
+    if (!res.headersSent && !res.writableEnded) res.status(500).json({ error: 'Something went wrong. Please try again.' });
   } finally {
     const totalDurationMs = Number((performance.now() - requestStart).toFixed(2));
     const nonAiDurationMs = summary.aiDurationMs != null ? Number((totalDurationMs - summary.aiDurationMs).toFixed(2)) : null;
