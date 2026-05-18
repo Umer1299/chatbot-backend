@@ -86,9 +86,21 @@ async function generateLeadSummary(leadData, industry) {
 async function saveLead(config, sessionId, leadData, namespace) {
   try {
     if (!config || !sessionId || !leadData) return { status: 'skipped', capturedFields: [] };
-    const capturedFields = Object.keys(leadData).filter((k) => leadData[k]);
-    const aiSummary = await generateLeadSummary(leadData, config.industry);
-    const projectDetails = generateProjectDetails(config.industry, leadData);
+    const industryData = {
+      ...leadData,
+      name: leadData.name || leadData.fullName || null,
+      fullName: leadData.fullName || leadData.name || null,
+      email: leadData.email || null,
+      serviceNeed: leadData.serviceNeed || null,
+      location: leadData.location || null,
+      companyName: leadData.companyName || leadData.company_name || leadData.churchName || null,
+      company_name: leadData.companyName || leadData.company_name || leadData.churchName || null,
+      churchName: leadData.churchName || leadData.companyName || leadData.company_name || null
+    };
+    const normalizedLead = { ...leadData, ...industryData };
+    const capturedFields = Object.keys(normalizedLead).filter((k) => normalizedLead[k]);
+    const aiSummary = await generateLeadSummary(normalizedLead, config.industry);
+    const projectDetails = generateProjectDetails(config.industry, normalizedLead);
 
     const existingByEmail = leadData.email
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND email=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.email])).rows[0]
@@ -101,8 +113,8 @@ async function saveLead(config, sessionId, leadData, namespace) {
       : null;
     const hasConflictWithSession = existingBySession && (
       (leadData.email && existingBySession.email && leadData.email !== existingBySession.email) ||
-      (leadData.company_name && existingBySession.company_name && leadData.company_name !== existingBySession.company_name) ||
-      (leadData.name && existingBySession.full_name && leadData.name !== existingBySession.full_name)
+      (normalizedLead.companyName && existingBySession.company_name && normalizedLead.companyName !== existingBySession.company_name) ||
+      (normalizedLead.name && existingBySession.full_name && normalizedLead.name !== existingBySession.full_name)
     );
     const existingLead = hasConflictWithSession ? null : (existingByEmail || existingByPhone || existingBySession || null);
 
@@ -137,17 +149,17 @@ async function saveLead(config, sessionId, leadData, namespace) {
       RETURNING *
     `, [
       config.business_id, sessionId,
-      leadData.name || null, leadData.phone || null, leadData.email || null, leadData.company_name || leadData.churchName || null,
-      leadData.lead_score || 'warm', leadData.score_reasons || [],
+      normalizedLead.name || null, normalizedLead.phone || null, normalizedLead.email || null, normalizedLead.companyName || null,
+      normalizedLead.lead_score || 'warm', normalizedLead.score_reasons || [],
       aiSummary, projectDetails,
       config.industry,
-      JSON.stringify({ ...leadData, namespace, botId: namespace }),
-      leadData.budget_range || null, leadData.is_decision_maker || null,
+      JSON.stringify({ ...industryData, namespace, botId: namespace }),
+      normalizedLead.budget_range || null, normalizedLead.is_decision_maker || null,
       Boolean(config.calendly_link || config.calendlyLink),
       false,
-      leadData.urgency_flag || false,
-      leadData.urgency_reason || null,
-      leadData.agents_used || []
+      normalizedLead.urgency_flag || false,
+      normalizedLead.urgency_reason || null,
+      normalizedLead.agents_used || []
     ]);
 
     let status = 'inserted';
@@ -166,14 +178,14 @@ async function saveLead(config, sessionId, leadData, namespace) {
           industry_data = industry_data || $9::jsonb,
           updated_at = NOW()
         WHERE id = $10
-      `,[leadData.name||null,leadData.phone||null,leadData.email||null,leadData.company_name||leadData.churchName||null,leadData.lead_score||'warm',leadData.score_reasons||[],aiSummary,projectDetails,JSON.stringify({ ...leadData, namespace, botId: namespace }),existingLead.id]);
+      `,[normalizedLead.name||null,normalizedLead.phone||null,normalizedLead.email||null,normalizedLead.companyName||null,normalizedLead.lead_score||'warm',normalizedLead.score_reasons||[],aiSummary,projectDetails,JSON.stringify({ ...industryData, namespace, botId: namespace }),existingLead.id]);
     }
 
     const savedLead = existingLead || upsertResult?.rows?.[0];
     if (savedLead?.id) {
       await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW() WHERE id=$2", [savedLead.id, sessionId]);
     }
-    sendLeadAlert(config, { ...savedLead, project_details: projectDetails, ai_summary: aiSummary, score_reasons: leadData.score_reasons || [] }).catch((err) => console.error('Email alert failed:', err.message));
+    sendLeadAlert(config, { ...savedLead, project_details: projectDetails, ai_summary: aiSummary, score_reasons: normalizedLead.score_reasons || [] }).catch((err) => console.error('Email alert failed:', err.message));
     return { status, capturedFields };
   } catch (error) {
     console.error('saveLead error:', error.message);

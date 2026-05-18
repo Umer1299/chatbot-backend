@@ -58,11 +58,20 @@ export function buildMasterPrompt(businessInfo = {}, selectedAgents = [], availa
 }
 
 export function generateProjectDetails(industry, leadData = {}) {
+  const fullName = leadData.full_name || leadData.fullName || leadData.name || leadData?.industry_data?.name || leadData?.industry_data?.fullName;
+  const serviceNeed = leadData.serviceNeed || leadData?.industry_data?.serviceNeed || leadData.needs || leadData.message || null;
+  const needText = String(serviceNeed || '').toLowerCase();
+  const projectTypes = [];
+  if (/\bredesign\b/.test(needText)) projectTypes.push('website redesign');
+  if (/\bhosting\b/.test(needText)) projectTypes.push('hosting');
+  if (/\bmonthly updates\b|\bmanagement\b/.test(needText)) projectTypes.push('management');
+  if (/\bnew website\b/.test(needText)) projectTypes.push('website design');
+
   const parts = [
     `Industry: ${industry || 'general'}`,
-    `Name: ${leadData.name || 'unknown'}`,
-    `Project Type: ${leadData.project_type || 'inquiry'}`,
-    `Needs: ${leadData.needs || leadData.message || 'not specified'}`,
+    `Name: ${fullName || 'unknown'}`,
+    `Project Type: ${leadData.project_type || projectTypes.join('/') || 'inquiry'}`,
+    `Needs: ${serviceNeed || 'not specified'}`,
     `Budget: ${leadData.budget_range || 'unknown'}`,
   ];
   return parts.join(' | ');

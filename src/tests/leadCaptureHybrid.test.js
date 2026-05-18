@@ -1,14 +1,20 @@
 import assert from 'assert';
 import { extractDeterministicLeadData, shouldRunLeadAgent } from '../services/leadDetection.js';
+import { generateProjectDetails } from '../agents/promptBuilder.js';
 
 const sarah = "Hi, I’m Sarah Williams from Hope Community Church in Birmingham. My email is sarah@hopechurchbirmingham.org. We already have a website, but it looks outdated and we need help with redesign, hosting, and monthly updates.";
 const s = extractDeterministicLeadData(sarah);
 assert.equal(s.extracted.fullName, 'Sarah Williams');
 assert.equal(s.extracted.email, 'sarah@hopechurchbirmingham.org');
 assert.equal(s.extracted.companyName, 'Hope Community Church');
+assert.equal(s.extracted.company_name, 'Hope Community Church');
 assert.equal(s.extracted.location, 'Birmingham');
 assert(/redesign, hosting, and monthly updates/i.test(s.extracted.serviceNeed));
 assert.equal(s.extracted.lead_score, 'warm');
+assert.equal(
+  generateProjectDetails('web_agency', { ...s.extracted, full_name: s.extracted.fullName }),
+  'Industry: web_agency | Name: Sarah Williams | Project Type: website redesign/hosting/management | Needs: redesign, hosting, and monthly updates | Budget: unknown'
+);
 
 const james = "My name is Pastor James, from Grace Church Leeds. My email is james@gracechurchleeds.org and we need a new website with hosting.";
 const j = extractDeterministicLeadData(james);
