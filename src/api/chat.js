@@ -12,6 +12,7 @@ import { domainRestriction } from '../middleware/domainRestriction.js';
 import { redisClient } from '../services/redis.js';
 import { estimateCost } from '../services/tokenCounter.js';
 import { getModelCreditCost } from '../services/modelPricing.js';
+import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -141,8 +142,16 @@ function checkIfUnanswered(aiReply, contextUsed) {
 router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const isStreaming = req.query.stream === 'true';
 
+  const requestId = req.requestId || getRequestId(req);
+  req.requestId = requestId;
+  const requestStart = performance.now();
+  const perf = createChatLogger({ event: 'chat_request_start', requestId, namespace: req.namespace || null, sessionId: req.body?.sessionId || null });
+  perf.log('chat_request_start', { stream: isStreaming });
+  const summary = { status: 'error', redisTokenCacheHit: null, botConfigCacheHit: null, ragCacheHit: null, ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null };
+
   // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
+  summary.botId = botId || null;
   if (!botId) return res.status(400).json({ error: 'botId required' });
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
   if (!message) return res.status(400).json({ error: 'message required' });
@@ -152,15 +161,23 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   // SECTION 2: Load config (Redis → DB)
   let config;
+  perf.startTimer('bot_config_lookup');
   const redisBotKey = `chatbot_config:${req.namespace}`;
-  try { const cached = await redisClient.get(redisBotKey); if (cached) config = JSON.parse(cached); } catch (e) { console.error('Redis cache miss error', e.message); }
+  try { const cached = await redisClient.get(redisBotKey); if (cached) config = JSON.parse(cached); summary.botConfigCacheHit = Boolean(cached); } catch (e) { perf.error('redis_error', e, { operation: 'bot_config_lookup', fallback: 'db_lookup' }); }
   if (!config) {
+    perf.startTimer('bot_config_db_lookup');
     const cfg = await pool.query(`SELECT bc.system_prompt, bc.selected_agents, bc.selected_model, bc.welcome_message, bc.starter_prompts, bc.is_draft, bc.detected_location, bc.detected_services, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.primary_color, b.calendly_link, b.availability_slots, b.bot_id, b.id as business_id, b.timezone, b.plan, b.is_disabled, b.disabled_reason FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1`, [botId]);
     if (!cfg.rows[0]) return res.status(404).json({ error: 'Bot not configured', message: 'Please complete onboarding first' });
     config = { ...cfg.rows[0], calendlyLink: cfg.rows[0].calendly_link, ownerPhone: cfg.rows[0].owner_phone };
+    const dbMs = perf.endTimer('bot_config_db_lookup', { event: 'bot_config_db_lookup' });
+    if (dbMs && dbMs > 500) perf.warn('slow_db_operation', { operation: 'bot_config_db_lookup', durationMs: dbMs });
     try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
   }
+  const cfgMs = perf.endTimer('bot_config_lookup', { botConfigCacheHit: summary.botConfigCacheHit });
+  if (cfgMs && cfgMs > 200) perf.warn('slow_redis_operation', { operation: 'bot_config_lookup', durationMs: cfgMs });
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
+  summary.businessId = config.business_id;
+  perf.with({ businessId: config.business_id, botId });
 
   // SECTION 3: is_disabled check
   if (config.is_disabled) {
@@ -168,6 +185,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       'This chatbot is temporarily unavailable. Please contact the business directly.';
 
     if (isStreaming) {
+      perf.startTimer('ai_call');
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -195,6 +213,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     ]);
     sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message));
     if (isStreaming) {
+      perf.startTimer('ai_call');
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -241,13 +260,19 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
   // SECTION 7: RAG context retrieval
   let chunks = [];
+  perf.startTimer('rag_search');
   try {
     chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5);
+    summary.ragChunksReturned = chunks.length;
   } catch (ragError) {
-    console.error('[chat] RAG retrieval failed; continuing without RAG context:', ragError.message);
+    perf.error('rag_retrieval_error', ragError, { fallback: 'continue_without_rag' });
     chunks = [];
   }
+  const ragMs = perf.endTimer('rag_search', { ragChunksReturned: chunks.length });
+  if (ragMs && ragMs > 800) perf.warn('slow_pgvector_search', { durationMs: ragMs });
   const contextText = chunks.length > 0 ? chunks.map((c) => c.content).join('\n\n') : '';
+  summary.ragChunksInjected = chunks.length;
+  perf.log('rag_context_stats', { ragChunksReturned: chunks.length, ragChunksInjected: chunks.length, ragContextChars: contextText.length });
 
   // SECTION 8: Build system prompt
   const businessInfo = {
@@ -262,6 +287,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
   const availability = config.availability_slots || {};
 
+  perf.startTimer('prompt_build');
   const { prompt: builtPrompt, usedAgents } = selectedAgents.length > 0
     ? buildMasterPrompt(businessInfo, selectedAgents, availability)
     : { prompt: '', usedAgents: [] };
@@ -273,6 +299,10 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   const phaseBlock = '\nCURRENT PHASE: ' + (session?.current_phase || 1) + '\n';
 
+  const promptMs = perf.endTimer('prompt_build', { selectedAgents: usedAgents, promptChars: (ragBlock + agentSystemPrompt + phaseBlock).length });
+  if (promptMs && promptMs > 300) perf.warn('slow_prompt_build', { durationMs: promptMs });
+  perf.log('prompt_features', { hasBusinessProfile: true, hasRagContext: Boolean(contextText), hasSelectedAgentInstructions: usedAgents.length > 0, hasLeadCaptureInstructions: /LEAD_DATA/.test(agentSystemPrompt), hasBookingDiscoveryInstructions: /book|discovery|appointment/i.test(agentSystemPrompt), selectedAgentsCount: usedAgents.length, selectedAgents: usedAgents });
+  summary.selectedAgents = usedAgents;
   const fullSystemPrompt = ragBlock + agentSystemPrompt + phaseBlock;
   const messagesArray = [...processedMessages, { role: 'user', content: message }];
 
@@ -283,6 +313,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     // Resolve model — enforces plan, reads from DB
     // resolvedModel is LOCAL to this function call
     const resolvedModel = await getSafeModel(requestedModel);
+    perf.log('model_resolved', { requestedModelId: requestedModel, modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, provider: resolvedModel.provider, wasDowngraded: resolvedModel.wasDowngraded });
+    summary.provider = resolvedModel.provider; summary.modelId = resolvedModel.modelId; summary.apiModelId = resolvedModel.apiModelId;
 
     console.log('[chat] Model resolved', {
       businessId: config.business_id,
@@ -495,9 +527,11 @@ function cleanAssistantResponse(text = '') {
     let fullResponse = ''; let calendlyUrl = null;
     let streamUsage = { input_tokens: 0, output_tokens: 0 };
     try {
+      perf.log('ai_call_start', { provider: summary.provider, modelId: summary.modelId, apiModelId: summary.apiModelId });
       const result = await callWithFallback(true, config, fullSystemPrompt, messagesArray);
       const stream = result.stream;
       // result.resolvedModel will be used later in the meta frame
+      let firstTokenSent = false;
       for await (const chunk of stream) {
         if (chunk?.type === 'message_start' && chunk?.message?.usage) {
           streamUsage.input_tokens = Number.isFinite(chunk.message.usage.input_tokens) ? chunk.message.usage.input_tokens : streamUsage.input_tokens;
@@ -509,6 +543,7 @@ function cleanAssistantResponse(text = '') {
         }
         if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
           const token = chunk.delta.text; fullResponse += token;
+          if (!firstTokenSent) { firstTokenSent = true; summary.timeToFirstTokenMs = Number((performance.now() - requestStart).toFixed(2)); perf.log('ai_first_token', { timeToFirstTokenMs: summary.timeToFirstTokenMs }); if (summary.timeToFirstTokenMs > 2500) perf.warn('slow_first_token', { timeToFirstTokenMs: summary.timeToFirstTokenMs }); }
           res.write(`data: ${JSON.stringify({ text: token, token })}\n\n`);
         }
       }
@@ -516,10 +551,13 @@ function cleanAssistantResponse(text = '') {
       const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/); if (calendlyMatch) calendlyUrl = calendlyMatch[1];
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
       const usage = buildUsageSummary(streamUsage, result.resolvedModel.modelId);
+      summary.inputTokens = usage.inputTokens; summary.outputTokens = usage.outputTokens; summary.totalTokens = usage.inputTokens + usage.outputTokens; summary.estimatedCostUsd = usage.estimatedCostUsd; summary.creditsUsed = usage.creditsUsed; summary.aiDurationMs = perf.endTimer('ai_call', { event: 'ai_call_done', provider: result.resolvedModel.provider, modelId: result.resolvedModel.modelId, apiModelId: result.resolvedModel.apiModelId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.inputTokens + usage.outputTokens, estimatedCostUsd: usage.estimatedCostUsd, creditsUsed: usage.creditsUsed, timeToFirstTokenMs: summary.timeToFirstTokenMs });
+      if (summary.aiDurationMs && summary.aiDurationMs > 4000) perf.warn('slow_ai_call', { durationMs: summary.aiDurationMs });
       const cleanResponse = cleanAssistantResponse(fullResponse);
       res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, agentsUsed: usedAgents, usage })}\n\n`);
       res.write('data: [DONE]\n\n'); res.end();
-      processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
+      processResponse(fullResponse, result).catch((e) => perf.error('process_response_error', e));
+      summary.status = 'success';
     } catch (streamError) {
       clearInterval(keepAlive); clearTimeout(timeout);
       res.write(`data: ${JSON.stringify({ type: 'error', message: 'Something went wrong. Please try again.' })}\n\n`); res.write('data: [DONE]\n\n'); res.end();
@@ -528,19 +566,30 @@ function cleanAssistantResponse(text = '') {
   }
 
   try {
+    perf.startTimer('ai_call');
+    perf.log('ai_call_start', { provider: summary.provider, modelId: summary.modelId, apiModelId: summary.apiModelId });
     const result = await callWithFallback(false, config, fullSystemPrompt, messagesArray);
     const fullResponse = result.reply;
     // result.resolvedModel will be used later
     const cleanResponse = cleanAssistantResponse(fullResponse);
+    summary.inputTokens = result.usage?.inputTokens || 0; summary.outputTokens = result.usage?.outputTokens || 0; summary.totalTokens = summary.inputTokens + summary.outputTokens; summary.estimatedCostUsd = result.usage?.estimatedCostUsd || 0; summary.creditsUsed = result.usage?.creditsUsed || 0;
+    summary.aiDurationMs = perf.endTimer('ai_call', { event: 'ai_call_done', provider: result.resolvedModel.provider, modelId: result.resolvedModel.modelId, apiModelId: result.resolvedModel.apiModelId, inputTokens: summary.inputTokens, outputTokens: summary.outputTokens, totalTokens: summary.totalTokens, estimatedCostUsd: summary.estimatedCostUsd, creditsUsed: summary.creditsUsed });
+    if (summary.aiDurationMs && summary.aiDurationMs > 4000) perf.warn('slow_ai_call', { durationMs: summary.aiDurationMs });
     res.json({
       reply: cleanResponse,
       resolvedModel: result.resolvedModel,
       agentsUsed: usedAgents,
       usage: result.usage || DEFAULT_USAGE
     });
-    processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
-  } catch {
+    processResponse(fullResponse, result).catch((e) => perf.error('process_response_error', e));
+    summary.status = 'success';
+  } catch (error) {
+    perf.error('chat_request_error', error);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  } finally {
+    const totalDurationMs = Number((performance.now() - requestStart).toFixed(2));
+    if (totalDurationMs > 5000) perf.warn('slow_chat_request', { totalDurationMs });
+    perf.log('chat_request_summary', { ...summary, totalDurationMs }, true);
   }
 });
 

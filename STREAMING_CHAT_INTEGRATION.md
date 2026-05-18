@@ -111,3 +111,20 @@ while (true) {
 - The backend sends keep-alive comments (`:\n\n`) every 15s.
 - Reverse-proxy buffering should be disabled for this route (backend already sends `X-Accel-Buffering: no`).
 - If `stream=true` is omitted, endpoint falls back to JSON response mode.
+
+## Chat performance logs (production-safe)
+
+Set `CHAT_PERF_LOGS=true` to enable detailed per-step timing logs. If unset, detailed logs are enabled in non-production and disabled in production (`NODE_ENV=production`).
+
+Example summary event:
+
+```json
+{"event":"chat_request_summary","requestId":"...","status":"success","botConfigCacheHit":true,"ragChunksReturned":4,"ragChunksInjected":4,"provider":"anthropic","modelId":"claude-sonnet-4-5","apiModelId":"claude-sonnet-4-5-20250929","inputTokens":1200,"outputTokens":210,"estimatedCostUsd":0.0042,"creditsUsed":1,"aiDurationMs":1320.44,"totalDurationMs":1884.11}
+```
+
+Interpretation quick guide:
+- Redis hit/miss: `redisTokenCacheHit`, `botConfigCacheHit`, and `ragCacheHit` indicate cache effectiveness.
+- pgvector slowness: `slow_pgvector_search` warns when vector retrieval exceeds threshold.
+- AI latency: `ai_call_done` + `slow_ai_call` show model-call latency and token/cost usage.
+- SSE first token latency: `ai_first_token` and `slow_first_token` show responsiveness under streaming.
+- Cost/Credits: use `inputTokens`, `outputTokens`, `estimatedCostUsd`, and `creditsUsed` from `ai_call_done` / summary logs.
