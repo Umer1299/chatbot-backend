@@ -267,11 +267,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   // SECTION 9: callWithFallback
   const callWithFallback = async (stream, config, systemPrompt, messages) => {
+    const requestedModel = config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini';
+
     // Resolve model — enforces plan, reads from DB
     // resolvedModel is LOCAL to this function call
-    const resolvedModel = await getSafeModel(
-      config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini'
-    );
+    const resolvedModel = await getSafeModel(requestedModel);
 
     console.log('[chat] Model resolved', {
       businessId: config.business_id,
@@ -287,6 +287,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       const anthropicModel = (typeof resolvedModel.apiModelId === 'string' && resolvedModel.apiModelId.startsWith('claude-'))
         ? resolvedModel.apiModelId
         : DEFAULT_ANTHROPIC_MODEL;
+
+      console.log('[debug model] resolvedModel:', resolvedModel);
+      console.log('[debug model] selectedModel:', config.selected_model);
+      console.log('[debug model] raw requested model:', requestedModel);
+      console.log('[debug model] anthropicModel before final call:', anthropicModel);
 
       if (anthropicModel !== resolvedModel.apiModelId) {
         console.warn('[chat] Invalid or missing Anthropic model, applying safe default', {
