@@ -149,7 +149,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const requestStart = performance.now();
   const perf = createChatLogger({ event: 'chat_request_start', requestId, namespace: req.namespace || null, sessionId: req.body?.sessionId || null });
   perf.log('chat_request_start', { stream: isStreaming });
-  const summary = { status: 'error', redisTokenCacheHit: null, botConfigCacheHit: null, ragCacheHit: null, ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null };
+  const summary = { status: 'error', redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null };
 
   // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
@@ -165,7 +165,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   let config;
   perf.startTimer('bot_config_lookup');
   const redisBotKey = `chatbot_config:${req.namespace}`;
-  try { const cached = await redisClient.get(redisBotKey); if (cached) config = JSON.parse(cached); summary.botConfigCacheHit = Boolean(cached); } catch (e) { perf.error('redis_error', e, { operation: 'bot_config_lookup', fallback: 'db_lookup' }); }
+  try { const cached = await redisClient.get(redisBotKey); if (cached) config = JSON.parse(cached); summary.botConfigCacheHit = Boolean(cached); perf.log('bot_config_cache_lookup', { cacheKey: 'chatbot_config:<namespace>', botConfigCacheHit: summary.botConfigCacheHit }); } catch (e) { summary.botConfigCacheHit = 'error_fallback'; perf.error('redis_error', e, { operation: 'bot_config_lookup', fallback: 'db_lookup' }); }
   if (!config) {
     perf.startTimer('bot_config_db_lookup');
     const cfg = await pool.query(`SELECT bc.system_prompt, bc.selected_agents, bc.selected_model, bc.welcome_message, bc.starter_prompts, bc.is_draft, bc.detected_location, bc.detected_services, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.primary_color, b.calendly_link, b.availability_slots, b.bot_id, b.id as business_id, b.timezone, b.plan, b.is_disabled, b.disabled_reason FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1`, [botId]);
@@ -176,7 +176,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
   }
   const cfgMs = perf.endTimer('bot_config_lookup', { botConfigCacheHit: summary.botConfigCacheHit });
-  if (cfgMs && cfgMs > 200) perf.warn('slow_redis_operation', { operation: 'bot_config_lookup', durationMs: cfgMs });
+  if (cfgMs && cfgMs > 300) perf.warn('slow_bot_config_fetch', { durationMs: cfgMs });
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
   summary.businessId = config.business_id;
   perf.with({ businessId: config.business_id, botId });
@@ -262,13 +262,22 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
   // SECTION 7: RAG context retrieval
   let chunks = [];
+  const ragEligible = message.trim().length > 2;
   perf.startTimer('rag_search');
   try {
-    chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5);
-    summary.ragChunksReturned = chunks.length;
+    if (ragEligible) {
+      chunks = await getRelevantChunks(config.business_id, message, req.namespace, 5, {
+        onCacheStatus: (status) => { summary.ragCacheHit = status; }
+      });
+      if (summary.ragCacheHit === 'not_applicable') summary.ragCacheHit = false;
+      summary.ragChunksReturned = chunks.length;
+    } else {
+      summary.ragCacheHit = 'not_applicable';
+    }
   } catch (ragError) {
     perf.error('rag_retrieval_error', ragError, { fallback: 'continue_without_rag' });
     chunks = [];
+    if (summary.ragCacheHit === 'not_applicable') summary.ragCacheHit = 'error_fallback';
   }
   const ragMs = perf.endTimer('rag_search', { ragChunksReturned: chunks.length });
   if (ragMs && ragMs > 800) perf.warn('slow_pgvector_search', { durationMs: ragMs });
@@ -612,6 +621,7 @@ function cleanAssistantResponse(text = '') {
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   } finally {
     const totalDurationMs = Number((performance.now() - requestStart).toFixed(2));
+    if (totalDurationMs > 1000) perf.warn('slow_backend_non_ai', { totalDurationMs });
     if (totalDurationMs > 5000) perf.warn('slow_chat_request', { totalDurationMs });
     perf.log('chat_request_summary', { ...summary, totalDurationMs }, true);
   }
