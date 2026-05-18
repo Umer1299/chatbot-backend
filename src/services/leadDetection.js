@@ -33,7 +33,9 @@ export function shouldRunLeadAgent(message = '', deterministicResult = null) {
   if (NON_LEAD_SHORT_PATTERNS.some((p) => p.test(text))) return false;
   const hasSignal = LEAD_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
   if (!hasSignal) return false;
-  return !deterministicResult?.isConfident;
+  const extracted = deterministicResult?.extracted || {};
+  const missingImportantField = !extracted.fullName || !extracted.budgetRange || !extracted.timeline || !extracted.companyName || !extracted.location || !extracted.serviceNeed;
+  return !deterministicResult?.isConfident || missingImportantField;
 }
 
 export function extractDeterministicLeadData(message = '') {
@@ -42,7 +44,8 @@ export function extractDeterministicLeadData(message = '') {
 
   const email = (text.match(EMAIL_REGEX) || [null])[0];
   const phone = (text.match(PHONE_REGEX) || [null])[0];
-  const nameMatch = text.match(/\b(?:my name is|i am|i['’]m)\s+([A-Za-z][A-Za-z\s'.-]{1,60}?)(?=,|\.|\band\b|\bfrom\b|$)/i);
+  const nameMatch = text.match(/\b(?:my name is|i am|i['’]m|this is|[A-Za-z][A-Za-z'.-]+\s+[A-Za-z][A-Za-z'.-]+\s+here\s+from)\s+([A-Za-z][A-Za-z\s'.-]{1,60}?)(?=,|\.|\band\b|\bfrom\b|$)/i)
+    || text.match(/\b([A-Za-z][A-Za-z'.-]+\s+[A-Za-z][A-Za-z'.-]+)\s+here\s+from\b/i);
   const fromOrgMatch = text.match(/\bfrom\s+([A-Za-z0-9&'\-.\s]{2,80}?)(?=,|\.|\bmy\s+email\s+is\b|\bwe\b|$)/i);
 
   let organizationRaw = fromOrgMatch?.[1]?.trim() || null;
@@ -66,8 +69,11 @@ export function extractDeterministicLeadData(message = '') {
   let serviceNeed = null;
   const needPhrase = text.match(/\b(?:we need|need|looking for|want)\s+(.*?)(?:\.|$)/i);
   if (needPhrase?.[1]) serviceNeed = needPhrase[1].trim().replace(/^help with\s+/i, '');
+  const budgetMatch = text.match(/(?:budget\s*(?:is|around|of)?\s*)?([£$€]\s?\d[\d,]*(?:\s?[–-]\s?[£$€]?\s?\d[\d,]*)?)/i);
+  const timelineMatch = text.match(/\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|asap|immediately|urgent)\b/i);
 
   const churchName = organizationRaw;
+  const shouldHotScore = Boolean((email || phone) && (serviceNeed || timelineMatch?.[1] || budgetMatch?.[1]));
   const extracted = {
     name: nameMatch?.[1]?.trim() || null,
     fullName: nameMatch?.[1]?.trim() || null,
@@ -78,8 +84,10 @@ export function extractDeterministicLeadData(message = '') {
     companyName: churchName,
     location: location || null,
     serviceNeed: serviceNeed || null,
+    budgetRange: budgetMatch?.[1]?.replace(/\s+/g, ' ').trim() || null,
+    timeline: timelineMatch?.[1] || null,
     score_reasons: ['deterministic_extraction'],
-    lead_score: /(urgent|asap|immediately)/i.test(text) ? 'hot' : 'warm'
+    lead_score: shouldHotScore || /(urgent|asap|immediately)/i.test(text) ? 'hot' : 'warm'
   };
 
   const leadSignals = LEAD_SIGNAL_PATTERNS.filter((p) => p.test(text)).map((p) => p.toString());
