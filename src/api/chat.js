@@ -13,6 +13,7 @@ import { redisClient } from '../services/redis.js';
 import { estimateCost } from '../services/tokenCounter.js';
 import { getModelCreditCost } from '../services/modelPricing.js';
 import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
+import { buildAnthropicPayload } from '../services/anthropicMessageFormatter.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -27,6 +28,7 @@ function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
   const creditsUsed = getModelCreditCost(modelId);
   return { inputTokens, outputTokens, estimatedCostUsd, creditsUsed };
 }
+
 
 async function generateLeadSummary(leadData, industry) {
   const prompt = `Write a 2-sentence lead summary for a busy ${industry} business owner. Include: name, what they need, budget if known, and why this is a ${leadData?.lead_score} lead. Be direct. Max 40 words total. Lead: ${JSON.stringify(leadData)} Return: {"summary":"string"}`;
@@ -347,12 +349,21 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       if (stream) {
         const anthropic = getAnthropicClient();
         if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
+        const anthropicPayload = buildAnthropicPayload(systemPrompt, messages);
+        console.log('[chat] provider_call_debug', {
+          provider: resolvedModel.provider,
+          apiModelId: anthropicModel,
+          hasSystem: Boolean(anthropicPayload.system),
+          systemChars: anthropicPayload.system.length,
+          messagesCount: anthropicPayload.messages.length,
+          messageRoles: anthropicPayload.messages.map((m) => m.role)
+        });
         console.log('[anthropic] final model sent:', anthropicModel);
         const anthropicStream = await anthropic.messages.stream({
           model: anthropicModel,
           max_tokens: 1000,
-          system: systemPrompt,
-          messages
+          system: anthropicPayload.system,
+          messages: anthropicPayload.messages
         });
         return { stream: anthropicStream, resolvedModel };
       }
@@ -361,12 +372,21 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       try {
         const anthropic = getAnthropicClient();
         if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY');
+        const anthropicPayload = buildAnthropicPayload(systemPrompt, messages);
+        console.log('[chat] provider_call_debug', {
+          provider: resolvedModel.provider,
+          apiModelId: anthropicModel,
+          hasSystem: Boolean(anthropicPayload.system),
+          systemChars: anthropicPayload.system.length,
+          messagesCount: anthropicPayload.messages.length,
+          messageRoles: anthropicPayload.messages.map((m) => m.role)
+        });
         console.log('[anthropic] final model sent:', anthropicModel);
         const response = await anthropic.messages.create({
           model: anthropicModel,
           max_tokens: 1000,
-          system: systemPrompt,
-          messages
+          system: anthropicPayload.system,
+          messages: anthropicPayload.messages
         });
         return {
           reply: response.content[0].text,
@@ -374,7 +394,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
           usage: buildUsageSummary(response.usage, resolvedModel.modelId)
         };
       } catch (anthropicErr) {
-        console.error('[chat] Anthropic request failed:', anthropicErr.message);
+        console.error('[chat] Anthropic request failed:', {
+          message: anthropicErr?.message || 'unknown_error',
+          status: anthropicErr?.status,
+          type: anthropicErr?.error?.type
+        });
         const openai = getOpenAIClient();
         if (!openai) throw anthropicErr;
         try {
