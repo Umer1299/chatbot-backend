@@ -62,6 +62,37 @@ function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
   return { inputTokens, outputTokens, estimatedCostUsd, creditsUsed };
 }
 
+function isBetterTextField(existing, candidate) {
+  if (!candidate || typeof candidate !== 'string') return false;
+  if (!existing) return true;
+  return candidate.trim().length > String(existing).trim().length;
+}
+
+function mergeLeadData(detLead = {}, aiLead = {}) {
+  const merged = { ...detLead };
+  const map = {
+    fullName: ['fullName', 'name'],
+    email: ['email'],
+    phone: ['phone'],
+    companyName: ['companyName', 'company_name', 'churchName'],
+    location: ['location'],
+    serviceNeed: ['serviceNeed'],
+    budgetRange: ['budgetRange', 'budget_range'],
+    timeline: ['timeline']
+  };
+  Object.entries(map).forEach(([key, aliases]) => {
+    const existing = aliases.map((k) => merged[k]).find(Boolean) || null;
+    const incoming = aliases.map((k) => aiLead[k]).find(Boolean) || null;
+    if ((key === 'email' || key === 'phone') && !incoming) return;
+    if (incoming && (isBetterTextField(existing, incoming) || !existing)) aliases.forEach((k) => { merged[k] = incoming; });
+  });
+  const scoreReasons = Array.from(new Set([...(merged.score_reasons || []), ...(aiLead.scoreReasons || []), 'ai_extractor']));
+  merged.score_reasons = scoreReasons;
+  if ((merged.email || merged.phone) && (merged.serviceNeed || merged.timeline || merged.budgetRange)) merged.lead_score = 'hot';
+  else merged.lead_score = aiLead.leadScore || merged.lead_score || 'warm';
+  return merged;
+}
+
 
 async function generateLeadSummary(leadData, industry) {
   const prompt = `Write a 2-sentence lead summary for a busy ${industry} business owner. Include: name, what they need, budget if known, and why this is a ${leadData?.lead_score} lead. Be direct. Max 40 words total. Lead: ${JSON.stringify(leadData)} Return: {"summary":"string"}`;
@@ -95,7 +126,10 @@ async function saveLead(config, sessionId, leadData, namespace) {
       location: leadData.location || null,
       companyName: leadData.companyName || leadData.company_name || leadData.churchName || null,
       company_name: leadData.companyName || leadData.company_name || leadData.churchName || null,
-      churchName: leadData.churchName || leadData.companyName || leadData.company_name || null
+      churchName: leadData.churchName || leadData.companyName || leadData.company_name || null,
+      budgetRange: leadData.budgetRange || leadData.budget_range || null,
+      budget_range: leadData.budgetRange || leadData.budget_range || null,
+      timeline: leadData.timeline || null
     };
     const normalizedLead = { ...leadData, ...industryData };
     const capturedFields = Object.keys(normalizedLead).filter((k) => normalizedLead[k]);
@@ -154,7 +188,7 @@ async function saveLead(config, sessionId, leadData, namespace) {
       aiSummary, projectDetails,
       config.industry,
       JSON.stringify({ ...industryData, namespace, botId: namespace }),
-      normalizedLead.budget_range || null, normalizedLead.is_decision_maker || null,
+      normalizedLead.budget_range || normalizedLead.budgetRange || null, normalizedLead.is_decision_maker || null,
       Boolean(config.calendly_link || config.calendlyLink),
       false,
       normalizedLead.urgency_flag || false,
@@ -268,14 +302,15 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   summary.leadExtractorInputTokens = 0;
   summary.leadExtractorOutputTokens = 0;
   summary.leadExtractorCostUsd = 0;
+  summary.leadExtractorFilledFields = [];
   summary.leadDedupStrategy = 'none';
   summary.leadDataDetected = Boolean(deterministicLead?.extracted);
   let leadToSave = deterministicLead?.extracted || null;
-  if (deterministicLead?.isConfident && leadToSave) {
+  if (deterministicLead?.isConfident && !shouldRunLeadAgent(message, deterministicLead) && leadToSave) {
     const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
     summary.leadCaptureStatus = leadResult.status;
     summary.leadDedupStrategy = leadResult.status;
-    summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','email','phone','churchName','company_name','serviceNeed','location'].includes(field));
+    summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','fullName','email','phone','churchName','company_name','serviceNeed','location','budgetRange','timeline'].includes(field));
   } else if (shouldRunLeadAgent(message, deterministicLead)) {
     const normalizedMessage = normalizeMessageForCache(message);
     const cacheKey = `lead-extract:${config.business_id}:${sessionId}:${Buffer.from(normalizedMessage).toString('base64')}`;
@@ -303,13 +338,24 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       }
     }
     if (aiLead?.isLead) {
-      leadToSave = { ...leadToSave, name: aiLead.fullName || leadToSave?.name || null, email: aiLead.email || leadToSave?.email || null, phone: aiLead.phone || leadToSave?.phone || null, churchName: aiLead.companyName || leadToSave?.churchName || null, company_name: aiLead.companyName || leadToSave?.company_name || null, location: aiLead.location || leadToSave?.location || null, serviceNeed: aiLead.serviceNeed || leadToSave?.serviceNeed || null, lead_score: aiLead.leadScore || leadToSave?.lead_score || 'warm', score_reasons: aiLead.scoreReasons || leadToSave?.score_reasons || ['ai_extractor'] };
+      const before = leadToSave || {};
+      leadToSave = mergeLeadData(leadToSave || {}, aiLead || {});
+      leadToSave.name = leadToSave.fullName || leadToSave.name || null;
+      leadToSave.churchName = leadToSave.companyName || leadToSave.company_name || leadToSave.churchName || null;
+      leadToSave.company_name = leadToSave.companyName || leadToSave.company_name || leadToSave.churchName || null;
+      summary.leadExtractorFilledFields = ['fullName', 'budgetRange', 'timeline', 'companyName', 'location', 'serviceNeed'].filter((f) => !before[f] && leadToSave[f]);
       const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
       summary.leadDataDetected = true;
       summary.leadCaptureStatus = leadResult.status;
       summary.leadDedupStrategy = leadResult.status;
-      summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','email','phone','churchName','company_name','serviceNeed','location'].includes(field));
+      summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','fullName','email','phone','churchName','company_name','serviceNeed','location','budgetRange','timeline'].includes(field));
     }
+  } else if (leadToSave) {
+    if ((leadToSave.email || leadToSave.phone) && (leadToSave.serviceNeed || leadToSave.timeline || leadToSave.budgetRange)) leadToSave.lead_score = 'hot';
+    const leadResult = await saveLead(config, sessionId, leadToSave, req.namespace);
+    summary.leadCaptureStatus = leadResult.status;
+    summary.leadDedupStrategy = leadResult.status;
+    summary.capturedFields = leadResult.capturedFields.filter((field) => ['name','fullName','email','phone','churchName','company_name','serviceNeed','location','budgetRange','timeline'].includes(field));
   }
 
   // SECTION 3: is_disabled check
