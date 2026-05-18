@@ -20,6 +20,36 @@ const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({
 const getOpenAIClient = () => process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_USAGE = { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, creditsUsed: 1 };
+const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0 };
+
+function normalizeMessageForCache(input = '') {
+  return String(input).toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function detectSimpleIntent(message = '') {
+  const normalized = normalizeMessageForCache(message);
+  if (!normalized) return null;
+  if (/\b(hello|hi|hey|salam|assalamualaikum|good morning|good afternoon|good evening)\b/.test(normalized)) return 'greeting';
+  if (/\b(thanks|thank you|jazakallah)\b/.test(normalized)) return 'thanks';
+  if (/\b(ok|okay|yes|sure)\b/.test(normalized)) return 'acknowledgement';
+  if (/\b(bye|goodbye)\b/.test(normalized)) return 'goodbye';
+  if (/\b(book a call|schedule a call|arrange a call)\b/.test(normalized)) return 'booking_intent';
+  return null;
+}
+
+function buildSimpleReply(intent, config = {}) {
+  const businessName = config.business_name ? ` at ${config.business_name}` : '';
+  const services = Array.isArray(config.detected_services) && config.detected_services.length > 0
+    ? ` We offer ${config.detected_services.slice(0, 3).join(', ')}.`
+    : '';
+  const bookingLink = config.calendly_link || config.calendlyLink;
+  if (intent === 'greeting') return `${config.welcome_message || `Hi! Welcome${businessName}.`}${services}`.trim();
+  if (intent === 'thanks') return `You’re very welcome${businessName}! Happy to help anytime.`;
+  if (intent === 'acknowledgement') return `Great — sounds good. I’m here whenever you’re ready for the next step.`;
+  if (intent === 'goodbye') return `Thanks for chatting${businessName}. Have a blessed day!`;
+  if (intent === 'booking_intent') return bookingLink ? `Great — you can book a call here: ${bookingLink}` : `Great idea. Share your preferred day/time and we’ll help arrange the call.`;
+  return null;
+}
 
 function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
   const inputTokens = Number.isFinite(rawUsage?.input_tokens) ? rawUsage.input_tokens : 0;
@@ -149,7 +179,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const requestStart = performance.now();
   const perf = createChatLogger({ event: 'chat_request_start', requestId, namespace: req.namespace || null, sessionId: req.body?.sessionId || null });
   perf.log('chat_request_start', { stream: isStreaming });
-  const summary = { status: 'error', redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {} };
+  const summary = { status: 'error', redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {}, simpleIntent: null, replySource: null, aiSkipped: false, aiSkipReason: null, replyCacheHit: 'not_applicable', ragSkipped: false, ragSkipReason: null };
 
   // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
@@ -264,9 +294,40 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       break; // drop older messages
     }
   }
+  const simpleIntent = detectSimpleIntent(message);
+  summary.simpleIntent = simpleIntent;
+  const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
+  summary.selectedAgents = selectedAgents;
+  if (simpleIntent) {
+    const quickReply = buildSimpleReply(simpleIntent, config) || 'Hi! How can I help today?';
+    summary.replySource = 'saved_simple_reply';
+    summary.aiSkipped = true;
+    summary.aiSkipReason = 'saved_simple_reply';
+    summary.ragSkipped = true;
+    summary.ragSkipReason = 'simple_intent';
+    summary.ragChunksReturned = 0;
+    summary.ragChunksInjected = 0;
+    summary.stepTimingsMs.ragSearch = 0;
+    summary.status = 'success';
+    const resolvedModel = { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' };
+    const usage = { ...ZERO_USAGE };
+    return res.json({ reply: quickReply, source: 'saved_simple_reply', resolvedModel, agentsUsed: selectedAgents, usage });
+  }
+
   // SECTION 7: RAG context retrieval
   let chunks = [];
-  const ragEligible = message.trim().length > 2;
+  const normalizedMessage = normalizeMessageForCache(message);
+  const commonIntent = detectIntentCategory(normalizedMessage);
+  const commonConfigAnswerable = ['services', 'booking', 'location'].includes(commonIntent);
+  const embeddingsUnavailable = await redisClient.get('embeddings:provider_unavailable').catch(() => null);
+  const ragEligible = message.trim().length > 2 && !commonConfigAnswerable && !embeddingsUnavailable;
+  if (!ragEligible) {
+    summary.ragSkipped = true;
+    summary.ragSkipReason = commonConfigAnswerable ? 'common_intent_config_answerable' : (embeddingsUnavailable ? 'embedding_provider_unavailable_cached' : 'message_too_short');
+    summary.ragCacheHit = 'not_applicable';
+    summary.ragChunksReturned = 0;
+    summary.ragChunksInjected = 0;
+  }
   perf.startTimer('rag_search');
   try {
     if (ragEligible) {
@@ -284,7 +345,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     if (summary.ragCacheHit === 'not_applicable') summary.ragCacheHit = 'error_fallback';
   }
   const ragMs = perf.endTimer('rag_search', { ragChunksReturned: chunks.length });
-  if (ragMs != null) summary.stepTimingsMs.ragSearch = ragMs;
+  if (ragMs != null && !summary.ragSkipped) summary.stepTimingsMs.ragSearch = ragMs;
+  if (summary.ragSkipped) summary.stepTimingsMs.ragSearch = 0;
   if (ragMs && ragMs > 800) perf.warn('slow_pgvector_search', { durationMs: ragMs });
   const contextText = chunks.length > 0 ? chunks.map((c) => c.content).join('\n\n') : '';
   summary.ragChunksInjected = chunks.length;
@@ -300,7 +362,6 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     calendlyLink: config.calendly_link || null
   };
 
-  const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
   const availability = config.availability_slots || {};
 
   perf.startTimer('prompt_build');
@@ -322,10 +383,26 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   summary.selectedAgents = usedAgents;
   const fullSystemPrompt = ragBlock + agentSystemPrompt + phaseBlock;
   const messagesArray = [...processedMessages, { role: 'user', content: message }];
+  const brevityPrompt = '\nRESPONSE STYLE:\nKeep responses concise and natural. Target 80-140 words (40-90 for simple asks). Ask at most 1-2 questions. Avoid repeating long service lists. Use minimal emojis. Suggest booking only for buying/pricing/complex intent.\n';
+  const finalSystemPrompt = fullSystemPrompt + brevityPrompt;
+
+  const shouldCacheAiReply = (() => {
+    if (!['services', 'pricing', 'support', 'booking'].includes(commonIntent)) return false;
+    if (normalizedMessage.length > 180) return false;
+    if (/\b(email|phone|my name is|i am |budget|\$|\d{3}[-.\s]?\d{3}[-.\s]?\d{4}|@)\b/i.test(message)) return false;
+    if (/\b(ignore previous|system prompt|jailbreak|override|emergency|medical|legal)\b/i.test(message)) return false;
+    return true;
+  })();
+  const botConfigVersion = String(config.updated_at || config.business_id || 'v1');
+  const cacheHash = Buffer.from(normalizedMessage).toString('base64url').slice(0, 24);
+  const aiCacheKey = `chat:reply-cache:${config.business_id}:${commonIntent}:${cacheHash}:${botConfigVersion}`;
 
   // SECTION 9: callWithFallback
   const callWithFallback = async (stream, config, systemPrompt, messages) => {
     const requestedModel = config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini';
+    const latestUserMessage = messages?.[messages.length - 1]?.content || '';
+    const isComplexAsk = latestUserMessage.length > 320 || /\b(compare|comparison|detailed|step by step|proposal|plan|requirements)\b/i.test(latestUserMessage);
+    const maxTokens = isComplexAsk ? 500 : 320;
 
     // Resolve model — enforces plan, reads from DB
     // resolvedModel is LOCAL to this function call
@@ -376,7 +453,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         console.log('[anthropic] final model sent:', anthropicModel);
         const anthropicStream = await anthropic.messages.stream({
           model: anthropicModel,
-          max_tokens: 1000,
+          max_tokens: maxTokens,
           system: anthropicPayload.system,
           messages: anthropicPayload.messages
         });
@@ -399,7 +476,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         console.log('[anthropic] final model sent:', anthropicModel);
         const response = await anthropic.messages.create({
           model: anthropicModel,
-          max_tokens: 1000,
+          max_tokens: maxTokens,
           system: anthropicPayload.system,
           messages: anthropicPayload.messages
         });
@@ -419,7 +496,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         try {
           const fb = await openai.chat.completions.create({
           model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini',
-          max_tokens: 1000,
+          max_tokens: maxTokens,
           messages: [
             { role: 'system', content: systemPrompt },
             ...messages
@@ -449,7 +526,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         if (!openai) throw new Error('Missing OPENAI_API_KEY');
         const openaiStream = await openai.chat.completions.create({
           model: resolvedModel.apiModelId,
-          max_tokens: 1000,
+          max_tokens: maxTokens,
           stream: true,
           messages: openaiMessages
         });
@@ -475,7 +552,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       if (!openai) throw new Error('Missing OPENAI_API_KEY');
       const response = await openai.chat.completions.create({
         model: resolvedModel.apiModelId,
-        max_tokens: 1000,
+        max_tokens: maxTokens,
         messages: openaiMessages
       });
       return {
@@ -567,7 +644,7 @@ function cleanAssistantResponse(text = '') {
     let streamUsage = { input_tokens: 0, output_tokens: 0 };
     try {
       perf.log('ai_call_start', { provider: summary.provider, modelId: summary.modelId, apiModelId: summary.apiModelId });
-      const result = await callWithFallback(true, config, fullSystemPrompt, messagesArray);
+      const result = await callWithFallback(true, config, finalSystemPrompt, messagesArray);
       const stream = result.stream;
       // result.resolvedModel will be used later in the meta frame
       let firstTokenSent = false;
@@ -608,7 +685,19 @@ function cleanAssistantResponse(text = '') {
   try {
     perf.startTimer('ai_call');
     perf.log('ai_call_start', { provider: summary.provider, modelId: summary.modelId, apiModelId: summary.apiModelId });
-    const result = await callWithFallback(false, config, fullSystemPrompt, messagesArray);
+    if (shouldCacheAiReply) {
+      const cachedReply = await redisClient.get(aiCacheKey).catch(() => null);
+      if (cachedReply) {
+        summary.replyCacheHit = true;
+        summary.replySource = 'redis_cached_ai_reply';
+        summary.aiSkipped = true;
+        summary.aiSkipReason = 'redis_cached_ai_reply';
+        summary.status = 'success';
+        return res.json({ reply: cachedReply, source: 'redis_cached_ai_reply', resolvedModel: { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' }, agentsUsed: usedAgents, usage: { ...ZERO_USAGE } });
+      }
+      summary.replyCacheHit = false;
+    }
+    const result = await callWithFallback(false, config, finalSystemPrompt, messagesArray);
     const fullResponse = result.reply;
     // result.resolvedModel will be used later
     const cleanResponse = cleanAssistantResponse(fullResponse);
@@ -622,6 +711,12 @@ function cleanAssistantResponse(text = '') {
       agentsUsed: usedAgents,
       usage: result.usage || DEFAULT_USAGE
     });
+    if (shouldCacheAiReply && cleanResponse) {
+      await redisClient.setex(aiCacheKey, 86400, cleanResponse).catch(() => null);
+      summary.replySource = 'ai_generated_cached';
+    } else {
+      summary.replySource = 'ai_generated';
+    }
     processResponse(fullResponse, result).catch((e) => perf.error('process_response_error', e));
     summary.status = 'success';
   } catch (error) {
