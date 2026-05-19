@@ -44,4 +44,28 @@ assert.equal(dx.extracted.lead_score, 'hot');
 assert.equal(shouldRunLeadAgent('Hello', null), false);
 const weak = extractDeterministicLeadData('we need website redesign');
 assert.equal(shouldRunLeadAgent('we need website redesign', weak), true);
+
+
+const daniel = "Hi, I’m Daniel Brooks, the youth pastor at New Life Church in Sheffield. Our church website is very outdated, and we need a new modern site that volunteers can easily update. We also want secure hosting, sermon audio uploads, a youth events calendar, online giving, and monthly support. We’d like to launch in the next 6 weeks, and our budget is around £2,200. You can email me at daniel@newlifechurchsheffield.org.uk or call 07845 222 918.";
+const dl = extractDeterministicLeadData(daniel);
+assert.equal(dl.extracted.fullName, 'Daniel Brooks');
+assert.equal(dl.extracted.phone, '07845 222 918');
+assert.equal(dl.extracted.email, 'daniel@newlifechurchsheffield.org.uk');
+assert.equal(dl.extracted.companyName, 'New Life Church');
+assert.equal(dl.extracted.location, 'Sheffield');
+assert.equal(dl.extracted.timeline, 'in the next 6 weeks');
+assert(/new modern site that volunteers can easily update/i.test(dl.extracted.serviceNeed));
+assert(/secure hosting, sermon audio uploads, a youth events calendar, online giving, and monthly support/i.test(dl.extracted.serviceNeed));
+assert.equal(
+  generateProjectDetails('web_agency', { ...dl.extracted, full_name: dl.extracted.fullName }).includes(`Needs: ${dl.extracted.serviceNeed}`),
+  true
+);
+
+assert.equal(extractDeterministicLeadData('We need a site and want to launch next 6 weeks').extracted.timeline, 'next 6 weeks');
+assert.equal(extractDeterministicLeadData('We need a site and want to launch in the next 6 weeks').extracted.timeline, 'in the next 6 weeks');
+assert.equal(extractDeterministicLeadData('We need a site and want to launch within 6 weeks').extracted.timeline, 'within 6 weeks');
+assert.equal(extractDeterministicLeadData('We need a site and want to launch within 2 months').extracted.timeline, 'within 2 months');
+assert.equal(extractDeterministicLeadData('We need a site and want to launch before Christmas').extracted.timeline.toLowerCase(), 'before christmas');
+assert.equal(extractDeterministicLeadData('We need a site as soon as possible').extracted.timeline.toLowerCase(), 'as soon as possible');
+
 console.log('leadCaptureHybrid test passed');

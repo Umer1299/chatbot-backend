@@ -60,6 +60,47 @@ function extractOrganizationAndLocation(text = '') {
   return { organizationRaw, location };
 }
 
+
+function extractTimeline(text = '') {
+  const patterns = [
+    /\b(in\s+the\s+next\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
+    /\b(next\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
+    /\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
+    /\b(in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
+    /\b(before\s+christmas)\b/i,
+    /\b(before\s+[A-Za-z]+)\b/i,
+    /\b(by\s+[A-Za-z]+)\b/i,
+    /\b(as\s+soon\s+as\s+possible|asap|immediately|urgent)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1].replace(/\s+/g, ' ').trim();
+  }
+  return null;
+}
+
+function extractServiceNeed(text = '') {
+  const collected = [];
+  const patterns = [
+    /\bwe\s+need\s+([^.!?]+)/gi,
+    /\bwe\s+also\s+want\s+([^.!?]+)/gi,
+    /\bwe\s+want\s+([^.!?]+)/gi,
+    /\blooking\s+for\s+([^.!?]+)/gi,
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const phrase = String(match[1] || '').trim().replace(/^help with\s+/i, '').replace(/\s+/g, ' ');
+      if (!phrase || /^help because\b/i.test(phrase)) continue;
+      if (!collected.some((c) => c.toLowerCase() === phrase.toLowerCase())) collected.push(phrase);
+    }
+  }
+
+  if (!collected.length) return null;
+  return collected.join('; ');
+}
+
 export function shouldRunLeadAgent(message = '', deterministicResult = null) {
   const text = String(message || '').trim();
   if (!text) return false;
@@ -69,8 +110,10 @@ export function shouldRunLeadAgent(message = '', deterministicResult = null) {
   const hasSignal = LEAD_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
   if (!hasSignal) return false;
   const extracted = deterministicResult?.extracted || {};
+  const hasContact = Boolean(extracted.email || extracted.phone);
   const missingImportantField = !extracted.fullName || !extracted.budgetRange || !extracted.timeline || !extracted.companyName || !extracted.location || !extracted.serviceNeed;
-  return !deterministicResult?.isConfident || missingImportantField;
+  const needsEnrichment = hasContact && (!extracted.timeline || !extracted.serviceNeed);
+  return !deterministicResult?.isConfident || missingImportantField || needsEnrichment;
 }
 
 export function extractDeterministicLeadData(message = '') {
@@ -83,15 +126,12 @@ export function extractDeterministicLeadData(message = '') {
     || text.match(/\b([A-Za-z][A-Za-z'.-]+\s+[A-Za-z][A-Za-z'.-]+)\s+here\s+from\b/i);
   const { organizationRaw, location } = extractOrganizationAndLocation(text);
 
-  let serviceNeed = null;
-  const needPhrase = text.match(/\bwe need\s+(.*?)(?:\.|$)/i)
-    || text.match(/\b(?:need|looking for|want)\s+(.*?)(?:\.|$)/i);
-  if (needPhrase?.[1]) serviceNeed = needPhrase[1].trim().replace(/^help with\s+/i, '');
+  const serviceNeed = extractServiceNeed(text);
   const budgetMatch = text.match(/(?:budget\s*(?:is|around|of)?\s*)?([£$€]\s?\d[\d,]*(?:\s?[–-]\s?[£$€]?\s?\d[\d,]*)?)/i);
-  const timelineMatch = text.match(/\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|before\s+[A-Za-z]+|by\s+[A-Za-z]+|asap|immediately|urgent)\b/i);
+  const timeline = extractTimeline(text);
 
   const churchName = organizationRaw;
-  const shouldHotScore = Boolean((email || phone) && (serviceNeed || timelineMatch?.[1] || budgetMatch?.[1]));
+  const shouldHotScore = Boolean((email || phone) && (serviceNeed || timeline || budgetMatch?.[1]));
   const extracted = {
     name: nameMatch?.[1]?.trim() || null,
     fullName: nameMatch?.[1]?.trim() || null,
@@ -103,7 +143,7 @@ export function extractDeterministicLeadData(message = '') {
     location: location || null,
     serviceNeed: serviceNeed || null,
     budgetRange: budgetMatch?.[1]?.replace(/\s+/g, ' ').trim() || null,
-    timeline: timelineMatch?.[1] || null,
+    timeline: timeline || null,
     score_reasons: ['deterministic_extraction'],
     lead_score: shouldHotScore || /(urgent|asap|immediately)/i.test(text) ? 'hot' : 'warm'
   };
