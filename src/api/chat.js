@@ -19,6 +19,7 @@ import { safeLeadExtractorErrorCode, withTimeout } from '../services/leadExtract
 import { normalizeEmail, shouldUseSessionDedupe, pickMostCompleteLead } from '../services/leadDedup.js';
 import { normalizePhone, determineLeadMatchStrategy, buildFinalLeadPayload, checkIndustryDataConsistency } from '../services/leadConsistency.js';
 import { buildBookingReply, detectBookingSignals } from '../services/bookingFlow.js';
+import { detectMessageIntent, buildSimpleReply } from '../services/intentDetection.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -42,31 +43,6 @@ function hasMinimumLeadDataForSave(lead = {}) {
 
 function normalizeMessageForCache(input = '') {
   return String(input).toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-
-function detectSimpleIntent(message = '') {
-  const normalized = normalizeMessageForCache(message);
-  if (!normalized) return null;
-  if (/\b(hello|hi|hey|salam|assalamualaikum|good morning|good afternoon|good evening)\b/.test(normalized)) return 'greeting';
-  if (/\b(thanks|thank you|jazakallah)\b/.test(normalized)) return 'thanks';
-  if (/\b(ok|okay|yes|sure)\b/.test(normalized)) return 'acknowledgement';
-  if (/\b(bye|goodbye)\b/.test(normalized)) return 'goodbye';
-  if (/\b(book a call|schedule a call|arrange a call)\b/.test(normalized)) return 'booking_intent';
-  return null;
-}
-
-function buildSimpleReply(intent, config = {}) {
-  const businessName = config.business_name ? ` at ${config.business_name}` : '';
-  const services = Array.isArray(config.detected_services) && config.detected_services.length > 0
-    ? ` We offer ${config.detected_services.slice(0, 3).join(', ')}.`
-    : '';
-  const bookingLink = config.calendly_link || config.calendlyLink;
-  if (intent === 'greeting') return `${config.welcome_message || `Hi! Welcome${businessName}.`}${services}`.trim();
-  if (intent === 'thanks') return `You’re very welcome${businessName}! Happy to help anytime.`;
-  if (intent === 'acknowledgement') return `Great — sounds good. I’m here whenever you’re ready for the next step.`;
-  if (intent === 'goodbye') return `Thanks for chatting${businessName}. Have a blessed day!`;
-  if (intent === 'booking_intent') return bookingLink ? `Great — you can book a call here: ${bookingLink}` : `Great idea. Share your preferred day/time and we’ll help arrange the call.`;
-  return null;
 }
 
 function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
@@ -547,10 +523,20 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     });
   }
 
-  const simpleIntent = detectSimpleIntent(message);
-  summary.simpleIntent = simpleIntent;
-  if (simpleIntent) {
-    const quickReply = buildSimpleReply(simpleIntent, config) || 'Hi! How can I help today?';
+  const intentDetection = detectMessageIntent(message, config.industry, config);
+  summary.simpleIntent = intentDetection.simpleIntent;
+  perf.log('intentDetectionDone', {
+    simpleIntent: intentDetection.simpleIntent,
+    bookingIntent: intentDetection.bookingIntent,
+    leadIntent: intentDetection.leadIntent,
+    projectIntent: intentDetection.projectIntent,
+    supportIntent: intentDetection.supportIntent,
+    shouldUseSimpleReply: intentDetection.shouldUseSimpleReply,
+    intentReasons: intentDetection.reasons
+  });
+
+  if (intentDetection.shouldUseSimpleReply) {
+    const quickReply = buildSimpleReply(intentDetection.simpleIntent, config) || 'Hi! How can I help today?';
     summary.replySource = 'saved_simple_reply';
     summary.aiSkipped = true;
     summary.aiSkipReason = 'saved_simple_reply';
@@ -562,6 +548,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     summary.status = 'success';
     const resolvedModel = { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' };
     const usage = { ...ZERO_USAGE };
+    perf.log('selectedRoute', { selectedRoute: 'saved_simple_reply' });
     return res.json({ reply: quickReply, source: 'saved_simple_reply', resolvedModel, agentsUsed: selectedAgents, usage });
   }
 
