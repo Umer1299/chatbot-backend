@@ -37,18 +37,18 @@ router.get('/', requireAuth, async (req, res) => {
 
   const [listResult, countResult] = await Promise.all([
     pool.query(
-      `SELECT l.*, ps.stage_label, ps.stage_color
+      `SELECT DISTINCT ON (l.id) l.*, ps.stage_label, ps.stage_color
        FROM leads l
        LEFT JOIN pipeline_stages ps
          ON ps.stage_key = l.status
          AND ps.industry = l.industry
          AND (ps.business_id = l.business_id OR ps.business_id IS NULL)
        WHERE ${where.join(' AND ')}
-       ORDER BY l.${sortBy} ${sortDir}
+       ORDER BY l.id, l.${sortBy} ${sortDir}
        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       listValues,
     ),
-    pool.query(`SELECT COUNT(*)::int AS total FROM leads WHERE ${countWhere.join(' AND ')}`, values),
+    pool.query(`SELECT COUNT(DISTINCT id)::int AS total FROM leads WHERE ${countWhere.join(' AND ')}`, values),
   ]);
 
   const total = countResult.rows[0]?.total || 0;

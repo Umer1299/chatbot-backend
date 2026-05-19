@@ -28,6 +28,38 @@ const LEAD_SIGNAL_PATTERNS = [
 
 const NON_LEAD_SHORT_PATTERNS = [/^\s*(hello|hi|hey|thanks|thank you|ok|okay|bye)\s*[!.?]*\s*$/i];
 
+function normalizeOrganizationName(value = '') {
+  return String(value || '').trim().replace(/^the\s+/i, '').replace(/\s+/g, ' ');
+}
+
+function extractOrganizationAndLocation(text = '') {
+  const patterns = [
+    /\b(?:i\s*(?:am|['’]m)\s+the\s+[A-Za-z][A-Za-z\s'-]{1,40}\s+at|i\s+work\s+at|from)\s+([A-Z][A-Za-z0-9&'’\-.\s]{2,90}?)(?=\s+in\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2}\b|,|\.|$)/i,
+    /\bat\s+([A-Z][A-Za-z0-9&'’\-.\s]{2,90}?)(?=\s+in\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2}\b|,|\.|$)/i,
+    /\bfrom\s+([A-Z][A-Za-z0-9&'’\-.\s]{2,90}?)(?=\s+in\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2}\b|,|\.|\bmy\s+email\s+is\b|\bwe\b|$)/i
+  ];
+
+  let organizationRaw = null;
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      organizationRaw = normalizeOrganizationName(match[1]);
+      break;
+    }
+  }
+
+  const inLocationMatch = text.match(/\bin\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})(?=,|\.|$|\s+we\b|\s+our\b)/);
+  let location = inLocationMatch?.[1]?.trim() || null;
+  if (!location && organizationRaw) {
+    const parts = organizationRaw.split(/\s+/);
+    if (parts.length > 1 && !/\b(church|company|inc|ltd|org|organization)\b/i.test(parts[parts.length - 1])) {
+      location = parts[parts.length - 1];
+    }
+  }
+
+  return { organizationRaw, location };
+}
+
 export function shouldRunLeadAgent(message = '', deterministicResult = null) {
   const text = String(message || '').trim();
   if (!text) return false;
@@ -49,28 +81,11 @@ export function extractDeterministicLeadData(message = '') {
   const phone = (text.match(PHONE_REGEX) || [null])[0];
   const nameMatch = text.match(/\b(?:my name is|i am|i['’]m|this is|[A-Za-z][A-Za-z'.-]+\s+[A-Za-z][A-Za-z'.-]+\s+here\s+from)\s+([A-Za-z][A-Za-z\s'.-]{1,60}?)(?=,|\.|\band\b|\bfrom\b|$)/i)
     || text.match(/\b([A-Za-z][A-Za-z'.-]+\s+[A-Za-z][A-Za-z'.-]+)\s+here\s+from\b/i);
-  const fromOrgMatch = text.match(/\bfrom\s+([A-Za-z0-9&'\-.\s]{2,80}?)(?=,|\.|\bmy\s+email\s+is\b|\bwe\b|$)/i);
-
-  let organizationRaw = fromOrgMatch?.[1]?.trim() || null;
-  let location = null;
-  if (organizationRaw) {
-    const inLoc = organizationRaw.match(/^(.*?)(?:\s+in\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})$/);
-    if (inLoc) {
-      organizationRaw = inLoc[1].trim();
-      location = inLoc[2].trim();
-    }
-  }
-  if (!location) {
-    const inLocationMatch = text.match(/\bin\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})(?=,|\.|$)/);
-    location = inLocationMatch?.[1] || null;
-  }
-  if (!location && organizationRaw) {
-    const parts = organizationRaw.trim().split(/\s+/);
-    if (parts.length > 1) location = parts[parts.length - 1];
-  }
+  const { organizationRaw, location } = extractOrganizationAndLocation(text);
 
   let serviceNeed = null;
-  const needPhrase = text.match(/\b(?:we need|need|looking for|want)\s+(.*?)(?:\.|$)/i);
+  const needPhrase = text.match(/\bwe need\s+(.*?)(?:\.|$)/i)
+    || text.match(/\b(?:need|looking for|want)\s+(.*?)(?:\.|$)/i);
   if (needPhrase?.[1]) serviceNeed = needPhrase[1].trim().replace(/^help with\s+/i, '');
   const budgetMatch = text.match(/(?:budget\s*(?:is|around|of)?\s*)?([£$€]\s?\d[\d,]*(?:\s?[–-]\s?[£$€]?\s?\d[\d,]*)?)/i);
   const timelineMatch = text.match(/\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years)|before\s+[A-Za-z]+|by\s+[A-Za-z]+|asap|immediately|urgent)\b/i);

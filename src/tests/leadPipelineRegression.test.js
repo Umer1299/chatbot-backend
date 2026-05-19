@@ -14,6 +14,10 @@ const sample = "Hello, I’m Rebecca Carter, the church administrator at St Mark
 const lead = extractDeterministicLeadData(sample);
 assert.equal(Boolean(lead.extracted.email), true);
 assert.equal(Boolean(lead.extracted.phone), true);
+assert.equal(lead.extracted.companyName, 'St Mark’s Church');
+assert.equal(lead.extracted.churchName, 'St Mark’s Church');
+assert.equal(lead.extracted.location, 'Bristol');
+assert.equal(lead.extracted.serviceNeed, 'a website redesign, hosting, sermon uploads, events calendar, and monthly website management');
 assert.equal(lead.extracted.timeline?.toLowerCase().includes('before christmas'), true);
 assert.equal(hasMinimumLeadDataForSave(lead.extracted), true);
 
