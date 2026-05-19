@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "worker": "node src/workers/fileWorker.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
@@ -53,6 +54,6 @@
     "nodemon": "^3.1.14"
   },
   "engines": {
-  "node": ">=18.0.0"
-}
+    "node": ">=18.0.0"
+  }
 }

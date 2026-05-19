@@ -18,6 +18,7 @@ import { extractDeterministicLeadData, shouldRunLeadAgent } from '../services/le
 import { safeLeadExtractorErrorCode, withTimeout } from '../services/leadExtractorSafety.js';
 import { normalizeEmail, shouldUseSessionDedupe, pickMostCompleteLead } from '../services/leadDedup.js';
 import { normalizePhone, determineLeadMatchStrategy, buildFinalLeadPayload, checkIndustryDataConsistency } from '../services/leadConsistency.js';
+import { buildBookingReply, detectBookingSignals } from '../services/bookingFlow.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -510,10 +511,44 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       break; // drop older messages
     }
   }
-  const simpleIntent = detectSimpleIntent(message);
-  summary.simpleIntent = simpleIntent;
   const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
   summary.selectedAgents = selectedAgents;
+
+  const bookingSignals = detectBookingSignals(message);
+  summary.bookingIntentDetected = bookingSignals.bookingIntentDetected;
+  summary.preferredTimeDetected = bookingSignals.preferredTimeDetected;
+  summary.callbackRequested = bookingSignals.callbackRequested;
+  summary.calendlyLinkShown = false;
+
+  if (bookingSignals.bookingIntentDetected) {
+    const bookingReply = buildBookingReply(message, config);
+    summary.replySource = bookingReply?.source || 'booking_flow';
+    summary.aiSkipped = true;
+    summary.aiSkipReason = 'deterministic_booking_flow';
+    summary.ragSkipped = true;
+    summary.ragSkipReason = 'booking_intent';
+    summary.calendlyLinkShown = Boolean(bookingReply?.calendlyLinkShown);
+    summary.ragChunksReturned = 0;
+    summary.ragChunksInjected = 0;
+    summary.stepTimingsMs.ragSearch = 0;
+    summary.status = 'success';
+    const resolvedModel = { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' };
+    const usage = { ...ZERO_USAGE };
+    return res.json({
+      reply: bookingReply?.reply || 'Absolutely — we would be happy to help arrange a call.',
+      source: bookingReply?.source || 'booking_flow',
+      bookingIntentDetected: true,
+      calendlyLinkShown: Boolean(bookingReply?.calendlyLinkShown),
+      preferredTimeDetected: Boolean(bookingReply?.preferredTimeDetected),
+      callbackRequested: Boolean(bookingReply?.callbackRequested),
+      resolvedModel,
+      agentsUsed: selectedAgents,
+      usage
+    });
+  }
+
+  const simpleIntent = detectSimpleIntent(message);
+  summary.simpleIntent = simpleIntent;
   if (simpleIntent) {
     const quickReply = buildSimpleReply(simpleIntent, config) || 'Hi! How can I help today?';
     summary.replySource = 'saved_simple_reply';
