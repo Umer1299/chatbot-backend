@@ -16,6 +16,7 @@ import { createChatLogger, getRequestId } from '../utils/chatPerfLogger.js';
 import { buildAnthropicPayload } from '../services/anthropicMessageFormatter.js';
 import { extractDeterministicLeadData, shouldRunLeadAgent } from '../services/leadDetection.js';
 import { safeLeadExtractorErrorCode, withTimeout } from '../services/leadExtractorSafety.js';
+import { normalizeEmail, shouldUseSessionDedupe, pickMostCompleteLead } from '../services/leadDedup.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -153,21 +154,29 @@ async function saveLead(config, sessionId, leadData, namespace) {
     const aiSummary = await generateLeadSummary(normalizedLead, config.industry);
     const projectDetails = generateProjectDetails(config.industry, normalizedLead);
 
-    const existingByEmail = leadData.email
-      ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND email=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.email])).rows[0]
-      : null;
+    const normalizedEmail = normalizeEmail(leadData.email);
+    const existingByEmailRows = normalizedEmail
+      ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND lower(email)=lower($2) ORDER BY updated_at DESC', [config.business_id, normalizedEmail])).rows
+      : [];
+    const existingByEmail = existingByEmailRows[0] || null;
+
+    if (existingByEmailRows.length > 1) {
+      const keepLead = pickMostCompleteLead(existingByEmailRows);
+      const duplicateIds = existingByEmailRows.filter((l) => l.id !== keepLead.id).map((l) => l.id);
+      if (duplicateIds.length) {
+        await pool.query('UPDATE sessions SET lead_id=$1 WHERE lead_id = ANY($2::uuid[])', [keepLead.id, duplicateIds]);
+        await pool.query('DELETE FROM leads WHERE id = ANY($1::uuid[])', [duplicateIds]);
+      }
+    }
+
     const existingByPhone = (!existingByEmail && leadData.phone)
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND phone=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.phone])).rows[0]
       : null;
-    const existingBySession = (!existingByEmail && !existingByPhone)
+    const existingBySession = (!existingByEmail && !existingByPhone && shouldUseSessionDedupe({ email: leadData.email, phone: leadData.phone }))
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND session_id=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, sessionId])).rows[0]
       : null;
-    const hasConflictWithSession = existingBySession && (
-      (leadData.email && existingBySession.email && leadData.email !== existingBySession.email) ||
-      (normalizedLead.companyName && existingBySession.company_name && normalizedLead.companyName !== existingBySession.company_name) ||
-      (normalizedLead.name && existingBySession.full_name && normalizedLead.name !== existingBySession.full_name)
-    );
-    const existingLead = hasConflictWithSession ? null : (existingByEmail || existingByPhone || existingBySession || null);
+
+    const existingLead = existingByEmail || existingByPhone || existingBySession || null;
 
     const upsertResult = await pool.query(`
       INSERT INTO leads (
