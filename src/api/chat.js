@@ -17,6 +17,7 @@ import { buildAnthropicPayload } from '../services/anthropicMessageFormatter.js'
 import { extractDeterministicLeadData, shouldRunLeadAgent } from '../services/leadDetection.js';
 import { safeLeadExtractorErrorCode, withTimeout } from '../services/leadExtractorSafety.js';
 import { normalizeEmail, shouldUseSessionDedupe, pickMostCompleteLead } from '../services/leadDedup.js';
+import { normalizePhone, determineLeadMatchStrategy, buildFinalLeadPayload, checkIndustryDataConsistency } from '../services/leadConsistency.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -155,6 +156,7 @@ async function saveLead(config, sessionId, leadData, namespace) {
     const projectDetails = generateProjectDetails(config.industry, normalizedLead);
 
     const normalizedEmail = normalizeEmail(leadData.email);
+    const normalizedPhone = normalizePhone(leadData.phone);
     const existingByEmailRows = normalizedEmail
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND lower(email)=lower($2) ORDER BY updated_at DESC', [config.business_id, normalizedEmail])).rows
       : [];
@@ -169,14 +171,22 @@ async function saveLead(config, sessionId, leadData, namespace) {
       }
     }
 
-    const existingByPhone = (!existingByEmail && leadData.phone)
-      ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND phone=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, leadData.phone])).rows[0]
+    const existingByPhone = (!existingByEmail && normalizedPhone)
+      ? (await pool.query("SELECT * FROM leads WHERE business_id=$1 AND regexp_replace(phone, '\\D', '', 'g')=$2 ORDER BY updated_at DESC LIMIT 1", [config.business_id, normalizedPhone])).rows[0]
       : null;
     const existingBySession = (!existingByEmail && !existingByPhone && shouldUseSessionDedupe({ email: leadData.email, phone: leadData.phone }))
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND session_id=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, sessionId])).rows[0]
       : null;
 
     const existingLead = existingByEmail || existingByPhone || existingBySession || null;
+    const leadDedupStrategy = determineLeadMatchStrategy({ hasEmail: Boolean(existingByEmail), hasPhone: Boolean(existingByPhone), hasSessionId: Boolean(existingBySession) });
+    const updateBlockedDueToEmailMismatch = Boolean(existingLead?.email && normalizedEmail && String(existingLead.email).toLowerCase() !== String(normalizedEmail).toLowerCase());
+
+    console.log('lead_match_decision', {
+      matchedLeadId: existingLead?.id || null,
+      leadDedupStrategy,
+      updateBlockedDueToEmailMismatch
+    });
 
     const upsertResult = await pool.query(`
       INSERT INTO leads (
@@ -223,25 +233,30 @@ async function saveLead(config, sessionId, leadData, namespace) {
     ]);
 
     let status = 'inserted';
-    if (existingLead) {
+    if (existingLead && !updateBlockedDueToEmailMismatch) {
       status = existingByEmail || existingByPhone ? 'deduped' : 'updated';
+      const finalLead = buildFinalLeadPayload(existingLead, { ...normalizedLead, ai_summary: aiSummary, project_details: projectDetails }, { ...industryData, namespace, botId: namespace });
       await pool.query(`
         UPDATE leads SET
-          full_name = COALESCE(full_name, $1),
-          phone = COALESCE(phone, $2),
-          email = COALESCE(email, $3),
-          company_name = COALESCE(company_name, $4),
-          lead_score = COALESCE(lead_score, $5),
-          score_reasons = CASE WHEN array_length(score_reasons,1) > 0 THEN score_reasons ELSE $6 END,
-          ai_summary = COALESCE(ai_summary, $7),
-          project_details = COALESCE(project_details, $8),
-          industry_data = industry_data || $9::jsonb,
+          full_name = $1,
+          phone = $2,
+          email = $3,
+          company_name = $4,
+          lead_score = $5,
+          score_reasons = $6,
+          ai_summary = $7,
+          project_details = $8,
+          industry_data = $9::jsonb,
           updated_at = NOW()
         WHERE id = $10
-      `,[normalizedLead.name||null,normalizedLead.phone||null,normalizedLead.email||null,normalizedLead.companyName||null,normalizedLead.lead_score||'warm',normalizedLead.score_reasons||[],aiSummary,projectDetails,JSON.stringify({ ...industryData, namespace, botId: namespace }),existingLead.id]);
+      `,[finalLead.full_name,finalLead.phone,finalLead.email,finalLead.company_name,finalLead.lead_score,finalLead.score_reasons,finalLead.ai_summary,finalLead.project_details,JSON.stringify(finalLead.industry_data),existingLead.id]);
+    } else if (existingLead && updateBlockedDueToEmailMismatch) {
+      status = 'inserted';
     }
 
-    const savedLead = existingLead || upsertResult?.rows?.[0];
+    const savedLead = (existingLead && !updateBlockedDueToEmailMismatch) ? (await pool.query('SELECT * FROM leads WHERE id=$1', [existingLead.id])).rows[0] : upsertResult?.rows?.[0];
+    const industryDataConsistencyCheck = checkIndustryDataConsistency(savedLead);
+    console.log('lead_industry_data_consistency', { industryDataConsistencyCheck: industryDataConsistencyCheck ? 'passed' : 'failed' });
     if (savedLead?.id) {
       await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW() WHERE id=$2", [savedLead.id, sessionId]);
     }
@@ -276,6 +291,7 @@ function checkIfUnanswered(aiReply, contextUsed) {
   if (short && noContext) return true;
   return false;
 }
+
 
 router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const isStreaming = req.query.stream === 'true';
@@ -922,3 +938,4 @@ function cleanAssistantResponse(text = '') {
 });
 
 export default router;
+
