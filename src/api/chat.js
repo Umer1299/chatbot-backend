@@ -98,7 +98,12 @@ function mergeLeadData(detLead = {}, aiLead = {}) {
     if ((key === 'email' || key === 'phone') && !incoming) return;
     if (incoming && (isBetterTextField(existing, incoming) || !existing)) aliases.forEach((k) => { merged[k] = incoming; });
   });
-  const scoreReasons = Array.from(new Set([...(merged.score_reasons || []), ...(aiLead.scoreReasons || []), 'ai_extractor']));
+  const filledByAi = ['fullName','budgetRange','timeline','companyName','location','serviceNeed'].some((f) => {
+    const existing = detLead?.[f] || detLead?.[({companyName:'company_name',budgetRange:'budget_range'}[f]||'')];
+    const incoming = aiLead?.[f] || aiLead?.[({companyName:'company_name',budgetRange:'budget_range'}[f]||'')];
+    return !existing && Boolean(incoming);
+  });
+  const scoreReasons = Array.from(new Set([...(merged.score_reasons || []), ...(aiLead.scoreReasons || []), ...(filledByAi ? ['ai_enriched_extraction'] : [])]));
   merged.score_reasons = scoreReasons;
   if ((merged.email || merged.phone) && (merged.serviceNeed || merged.timeline || merged.budgetRange)) merged.lead_score = 'hot';
   else merged.lead_score = aiLead.leadScore || merged.lead_score || 'warm';
