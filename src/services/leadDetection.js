@@ -62,20 +62,42 @@ function extractOrganizationAndLocation(text = '') {
 
 
 function extractTimeline(text = '') {
+  const captureBeforeOrByPhrase = (rawText, preposition) => {
+    const pattern = new RegExp(`\\b(${preposition}\\s+[^.,!?\\n]+)`, 'i');
+    const match = rawText.match(pattern);
+    if (!match?.[1]) return null;
+    let phrase = match[1].trim();
+    const stopTokens = ['budget', 'email', 'call', 'contact'];
+    for (const token of stopTokens) {
+      const tokenPattern = new RegExp(`\\b${token}\\b`, 'i');
+      const tokenMatch = phrase.match(tokenPattern);
+      if (tokenMatch?.index >= 0) {
+        phrase = phrase.slice(0, tokenMatch.index).trim();
+        break;
+      }
+    }
+    phrase = phrase.replace(/\s+(?:if\s+possible|please)\s*$/i, '').trim();
+    return phrase || null;
+  };
+
   const patterns = [
     /\b(in\s+the\s+next\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
     /\b(next\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
     /\b(within\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
     /\b(in\s+\d+\s+(?:day|days|week|weeks|month|months|year|years))\b/i,
-    /\b(before\s+christmas)\b/i,
-    /\b(before\s+[A-Za-z]+)\b/i,
-    /\b(by\s+[A-Za-z]+)\b/i,
     /\b(as\s+soon\s+as\s+possible|asap|immediately|urgent)\b/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match?.[1]) return match[1].replace(/\s+/g, ' ').trim();
   }
+
+  const beforePhrase = captureBeforeOrByPhrase(text, 'before');
+  if (beforePhrase) return beforePhrase.replace(/\s+/g, ' ').trim();
+
+  const byPhrase = captureBeforeOrByPhrase(text, 'by');
+  if (byPhrase) return byPhrase.replace(/\s+/g, ' ').trim();
+
   return null;
 }
 
