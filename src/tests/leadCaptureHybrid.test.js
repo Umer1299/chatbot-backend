@@ -66,6 +66,10 @@ assert.equal(extractDeterministicLeadData('We need a site and want to launch in 
 assert.equal(extractDeterministicLeadData('We need a site and want to launch within 6 weeks').extracted.timeline, 'within 6 weeks');
 assert.equal(extractDeterministicLeadData('We need a site and want to launch within 2 months').extracted.timeline, 'within 2 months');
 assert.equal(extractDeterministicLeadData('We need a site and want to launch before Christmas').extracted.timeline.toLowerCase(), 'before christmas');
+assert.equal(
+  extractDeterministicLeadData('We need a site and we’d like to launch before our September outreach event.').extracted.timeline,
+  'before our September outreach event'
+);
 assert.equal(extractDeterministicLeadData('We need a site as soon as possible').extracted.timeline.toLowerCase(), 'as soon as possible');
 
 console.log('leadCaptureHybrid test passed');
