@@ -174,7 +174,8 @@ async function saveLead(config, sessionId, leadData, namespace) {
     const existingByPhone = (!existingByEmail && normalizedPhone)
       ? (await pool.query("SELECT * FROM leads WHERE business_id=$1 AND regexp_replace(phone, '\\D', '', 'g')=$2 ORDER BY updated_at DESC LIMIT 1", [config.business_id, normalizedPhone])).rows[0]
       : null;
-    const existingBySession = (!existingByEmail && !existingByPhone && shouldUseSessionDedupe({ email: leadData.email, phone: leadData.phone }))
+    const canUseSessionDedupe = shouldUseSessionDedupe({ email: leadData.email, phone: leadData.phone });
+    const existingBySession = (!existingByEmail && !existingByPhone && canUseSessionDedupe)
       ? (await pool.query('SELECT * FROM leads WHERE business_id=$1 AND session_id=$2 ORDER BY updated_at DESC LIMIT 1', [config.business_id, sessionId])).rows[0]
       : null;
 
@@ -187,50 +188,6 @@ async function saveLead(config, sessionId, leadData, namespace) {
       leadDedupStrategy,
       updateBlockedDueToEmailMismatch
     });
-
-    const upsertResult = await pool.query(`
-      INSERT INTO leads (
-        business_id, session_id, full_name, phone, email, company_name,
-        lead_score, score_reasons, ai_summary, project_details,
-        industry, industry_data, budget_range, is_decision_maker,
-        calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason,
-        agents_used, source, status, created_at, updated_at
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-        $11,$12,$13,$14,$15,$16,$17,$18,
-        $19,'website_chatbot','new',NOW(),NOW()
-      )
-      ON CONFLICT (business_id, session_id)
-      WHERE session_id IS NOT NULL
-      DO UPDATE SET
-        full_name = COALESCE(leads.full_name, EXCLUDED.full_name),
-        phone = COALESCE(leads.phone, EXCLUDED.phone),
-        email = COALESCE(leads.email, EXCLUDED.email),
-        company_name = COALESCE(leads.company_name, EXCLUDED.company_name),
-        lead_score = COALESCE(EXCLUDED.lead_score, leads.lead_score),
-        score_reasons = CASE WHEN array_length(leads.score_reasons,1) > 0 THEN leads.score_reasons ELSE EXCLUDED.score_reasons END,
-        ai_summary = COALESCE(leads.ai_summary, EXCLUDED.ai_summary),
-        project_details = COALESCE(leads.project_details, EXCLUDED.project_details),
-        industry_data = leads.industry_data || EXCLUDED.industry_data,
-        urgency_flag = leads.urgency_flag OR EXCLUDED.urgency_flag,
-        urgency_reason = COALESCE(leads.urgency_reason, EXCLUDED.urgency_reason),
-        agents_used = CASE WHEN array_length(leads.agents_used,1) > 0 THEN leads.agents_used ELSE EXCLUDED.agents_used END,
-        updated_at = NOW()
-      RETURNING *
-    `, [
-      config.business_id, sessionId,
-      normalizedLead.name || null, normalizedLead.phone || null, normalizedLead.email || null, normalizedLead.companyName || null,
-      normalizedLead.lead_score || 'warm', normalizedLead.score_reasons || [],
-      aiSummary, projectDetails,
-      config.industry,
-      JSON.stringify({ ...industryData, namespace, botId: namespace }),
-      normalizedLead.budget_range || normalizedLead.budgetRange || null, normalizedLead.is_decision_maker || null,
-      Boolean(config.calendly_link || config.calendlyLink),
-      false,
-      normalizedLead.urgency_flag || false,
-      normalizedLead.urgency_reason || null,
-      normalizedLead.agents_used || []
-    ]);
 
     let status = 'inserted';
     if (existingLead && !updateBlockedDueToEmailMismatch) {
@@ -253,8 +210,67 @@ async function saveLead(config, sessionId, leadData, namespace) {
     } else if (existingLead && updateBlockedDueToEmailMismatch) {
       status = 'inserted';
     }
+    let insertedLead = null;
+    if (!existingLead || updateBlockedDueToEmailMismatch) {
+      const baseParams = [
+        config.business_id, sessionId,
+        normalizedLead.name || null, normalizedLead.phone || null, normalizedLead.email || null, normalizedLead.companyName || null,
+        normalizedLead.lead_score || 'warm', normalizedLead.score_reasons || [],
+        aiSummary, projectDetails,
+        config.industry,
+        JSON.stringify({ ...industryData, namespace, botId: namespace }),
+        normalizedLead.budget_range || normalizedLead.budgetRange || null, normalizedLead.is_decision_maker || null,
+        Boolean(config.calendly_link || config.calendlyLink),
+        false,
+        normalizedLead.urgency_flag || false,
+        normalizedLead.urgency_reason || null,
+        normalizedLead.agents_used || []
+      ];
+      const insertQuery = canUseSessionDedupe
+        ? `INSERT INTO leads (
+            business_id, session_id, full_name, phone, email, company_name,
+            lead_score, score_reasons, ai_summary, project_details,
+            industry, industry_data, budget_range, is_decision_maker,
+            calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason,
+            agents_used, source, status, created_at, updated_at
+          ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,$16,$17,$18,
+            $19,'website_chatbot','new',NOW(),NOW()
+          )
+          ON CONFLICT (business_id, session_id)
+          WHERE session_id IS NOT NULL
+          DO UPDATE SET
+            full_name = COALESCE(leads.full_name, EXCLUDED.full_name),
+            phone = COALESCE(leads.phone, EXCLUDED.phone),
+            email = COALESCE(leads.email, EXCLUDED.email),
+            company_name = COALESCE(leads.company_name, EXCLUDED.company_name),
+            lead_score = COALESCE(EXCLUDED.lead_score, leads.lead_score),
+            score_reasons = CASE WHEN array_length(leads.score_reasons,1) > 0 THEN leads.score_reasons ELSE EXCLUDED.score_reasons END,
+            ai_summary = COALESCE(leads.ai_summary, EXCLUDED.ai_summary),
+            project_details = COALESCE(leads.project_details, EXCLUDED.project_details),
+            industry_data = leads.industry_data || EXCLUDED.industry_data,
+            urgency_flag = leads.urgency_flag OR EXCLUDED.urgency_flag,
+            urgency_reason = COALESCE(leads.urgency_reason, EXCLUDED.urgency_reason),
+            agents_used = CASE WHEN array_length(leads.agents_used,1) > 0 THEN leads.agents_used ELSE EXCLUDED.agents_used END,
+            updated_at = NOW()
+          RETURNING *`
+        : `INSERT INTO leads (
+            business_id, session_id, full_name, phone, email, company_name,
+            lead_score, score_reasons, ai_summary, project_details,
+            industry, industry_data, budget_range, is_decision_maker,
+            calendly_link_shown, appointment_scheduled, urgency_flag, urgency_reason,
+            agents_used, source, status, created_at, updated_at
+          ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,$16,$17,$18,
+            $19,'website_chatbot','new',NOW(),NOW()
+          )
+          RETURNING *`;
+      insertedLead = (await pool.query(insertQuery, baseParams)).rows[0] || null;
+    }
 
-    const savedLead = (existingLead && !updateBlockedDueToEmailMismatch) ? (await pool.query('SELECT * FROM leads WHERE id=$1', [existingLead.id])).rows[0] : upsertResult?.rows?.[0];
+    const savedLead = (existingLead && !updateBlockedDueToEmailMismatch) ? (await pool.query('SELECT * FROM leads WHERE id=$1', [existingLead.id])).rows[0] : insertedLead;
     const industryDataConsistencyCheck = checkIndustryDataConsistency(savedLead);
     console.log('lead_industry_data_consistency', { industryDataConsistencyCheck: industryDataConsistencyCheck ? 'passed' : 'failed' });
     if (savedLead?.id) {
@@ -938,4 +954,3 @@ function cleanAssistantResponse(text = '') {
 });
 
 export default router;
-
