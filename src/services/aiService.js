@@ -13,6 +13,10 @@ const SCRAPE_ANTHROPIC_ALLOWLIST = new Set([
 
 const SCRAPE_OPENAI_ALLOWLIST = new Set(['gpt-5-mini']);
 
+function isGPT5Model(modelId) {
+  return String(modelId || '').toLowerCase().startsWith('gpt-5');
+}
+
 function getAnthropicClient() {
   if (anthropicClient) return anthropicClient;
   if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured');
@@ -61,6 +65,39 @@ export async function scrapeLLM(systemPrompt, messages, options = {}) {
   try {
     if (cfg.provider === 'openai') {
       const openai = getOpenAIClient();
+      const apiPath = isGPT5Model(cfg.model) ? 'responses' : 'chat_completions';
+      console.log('openai_api_path_debug', { modelId: cfg.model, apiModelId: cfg.model, apiPath });
+      if (isGPT5Model(cfg.model)) {
+        const response = await openai.responses.create({
+          model: cfg.model,
+          input: [
+            { role: 'system', content: systemPrompt },
+            ...messages.map((m) => ({ role: m.role, content: String(m.content || '') })),
+          ],
+          max_output_tokens: options.maxTokens || 1000,
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' }
+        });
+        const reply =
+          response.output_text ||
+          response.output
+            ?.flatMap((item) => item.content || [])
+            ?.map((content) => content.text || '')
+            ?.join('')
+            ?.trim();
+        if (!reply) {
+          console.warn('openai_empty_reply_debug', {
+            modelId: cfg.model,
+            apiModelId: cfg.model,
+            apiUsed: 'responses',
+            status: response.status,
+            outputLength: response.output?.length,
+            outputTypes: response.output?.map((o) => o.type),
+            usage: response.usage
+          });
+        }
+        return reply || 'I’m sorry, I couldn’t generate a response just now. Could you please try again?';
+      }
       const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(cfg.model, options.maxTokens || 1000);
       console.log('openai_token_param_debug', { modelId: cfg.model, apiModelId: cfg.model, tokenParamName });
       const response = await openai.chat.completions.create({
