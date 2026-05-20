@@ -2,7 +2,7 @@ import pool from '../db/pool.js';
 import { getEmbedding } from './aiService.js';
 import { normalizeQuestion } from '../utils/normalizeQuestion.js';
 
-const QUICK_ANSWER_THRESHOLD = Number(process.env.QUICK_ANSWER_THRESHOLD || 0.86);
+const QUICK_ANSWER_THRESHOLD = Number(process.env.QUICK_ANSWER_THRESHOLD || 0.78);
 const QUICK_ANSWER_MAX_WORDS = Number(process.env.QUICK_ANSWER_MAX_WORDS || 35);
 const QUICK_ANSWER_MAX_CHARS = Number(process.env.QUICK_ANSWER_MAX_CHARS || 220);
 const QUICK_ANSWER_ENABLED = String(process.env.QUICK_ANSWER_ENABLED || 'true').toLowerCase() === 'true';
@@ -150,7 +150,7 @@ export async function listQuickAnswers({ businessId }) {
 
 export async function tryQuickAnswer({ businessId, message }) {
   if (!businessId) return { matched: false, source: 'quick_answer_skipped', skipReason: 'missing_business_id' };
-  if (!QUICK_ANSWER_ENABLED) return { matched: false, source: 'quick_answer_skipped', skipReason: 'disabled' };
+  if (!QUICK_ANSWER_ENABLED) return { matched: false, source: 'quick_answer_skipped', skipReason: 'quick_answer_disabled' };
 
   const normalizedMessage = normalizeQuestion(message);
   if (!normalizedMessage) return { matched: false, source: 'quick_answer_skipped', skipReason: 'empty_message' };
@@ -171,12 +171,33 @@ export async function tryQuickAnswer({ businessId, message }) {
 
   const safe = String(message || '').trim();
   const wordCount = safe ? safe.split(/\s+/).filter(Boolean).length : 0;
-  if (safe.length > QUICK_ANSWER_MAX_CHARS) return { matched: false, source: 'quick_answer_skipped', skipReason: 'max_chars', maxChars: QUICK_ANSWER_MAX_CHARS, chars: safe.length };
-  if (wordCount > QUICK_ANSWER_MAX_WORDS) return { matched: false, source: 'quick_answer_skipped', skipReason: 'max_words', maxWords: QUICK_ANSWER_MAX_WORDS, words: wordCount };
-  if (isComplexMessage(message)) return { matched: false, source: 'quick_answer_miss', missReason: 'complex_message' };
+  if (safe.length > QUICK_ANSWER_MAX_CHARS) return { matched: false, source: 'quick_answer_skipped', skipReason: 'message_too_long', maxChars: QUICK_ANSWER_MAX_CHARS, chars: safe.length };
+  if (wordCount > QUICK_ANSWER_MAX_WORDS) return { matched: false, source: 'quick_answer_skipped', skipReason: 'too_many_words', maxWords: QUICK_ANSWER_MAX_WORDS, words: wordCount };
 
+  const { rows: countRows } = await pool.query(
+    `SELECT
+      COUNT(*) AS total,
+      COUNT(*) FILTER (WHERE is_active = TRUE) AS active,
+      COUNT(*) FILTER (WHERE is_active = TRUE AND embedding IS NOT NULL) AS active_with_embeddings
+     FROM quick_answers
+     WHERE business_id = $1`,
+    [businessId],
+  );
+  const counts = countRows[0] || {};
+  const total = Number(counts.total || 0);
+  const active = Number(counts.active || 0);
+  const activeWithEmbeddings = Number(counts.active_with_embeddings || 0);
+  console.log('quick_answer_counts', { businessId, total, active, activeWithEmbeddings });
+  if (active === 0) {
+    return { matched: false, source: 'quick_answer_skipped', skipReason: 'no_active_quick_answers', debug: { total, active, activeWithEmbeddings } };
+  }
+  if (activeWithEmbeddings === 0) {
+    return { matched: false, source: 'quick_answer_miss', skippedReason: 'no_active_embeddings', debug: { total, active, activeWithEmbeddings }, missReason: 'no_active_embeddings' };
+  }
+
+  console.log('quick_answer_semantic_search_started', { businessId });
   const queryEmbedding = await getEmbedding(message);
-  if (!queryEmbedding) return { matched: false, source: 'quick_answer_miss', missReason: 'embedding_unavailable' };
+  if (!queryEmbedding) return { matched: false, source: 'quick_answer_skipped', skipReason: 'embedding_generation_failed', debug: { total, active, activeWithEmbeddings } };
 
   const semantic = await pool.query(
     `SELECT id, question, answer, category, priority,
@@ -190,11 +211,25 @@ export async function tryQuickAnswer({ businessId, message }) {
     [businessId, JSON.stringify(queryEmbedding)],
   );
 
+  const candidates = semantic.rows.map((row) => ({
+    id: row.id,
+    question: row.question,
+    similarity: Number(row.similarity),
+    category: row.category,
+    priority: row.priority,
+  }));
   const top = semantic.rows[0];
-  if (!top || Number(top.similarity) < QUICK_ANSWER_THRESHOLD) {
-    return { matched: false, source: 'quick_answer_miss', topScore: top ? Number(top.similarity) : null, threshold: QUICK_ANSWER_THRESHOLD };
+  const topScore = top ? Number(top.similarity) : null;
+  const topQuestion = top?.question || null;
+  const topQuickAnswerId = top?.id || null;
+  const matched = Boolean(top && topScore >= QUICK_ANSWER_THRESHOLD);
+  console.log('quick_answer_semantic_result', { businessId, topScore, topQuestion, threshold: QUICK_ANSWER_THRESHOLD, matched, candidates });
+  if (!matched) {
+    const missReason = top ? 'below_threshold' : 'no_candidates';
+    console.log('quick_answer_miss', { businessId, reason: missReason, topScore, topQuestion, threshold: QUICK_ANSWER_THRESHOLD });
+    return { matched: false, source: 'quick_answer_miss', score: topScore, topScore, topQuestion, topQuickAnswerId, threshold: QUICK_ANSWER_THRESHOLD, candidates, missReason, debug: { total, active, activeWithEmbeddings, semanticChecked: true, candidates, topScore, topQuestion, threshold: QUICK_ANSWER_THRESHOLD } };
   }
 
   await recordMatch(top.id);
-  return { matched: true, source: 'quick_answer_semantic', answer: top.answer, quickAnswerId: top.id, score: Number(top.similarity) };
+  return { matched: true, source: 'quick_answer_semantic', answer: top.answer, quickAnswerId: top.id, score: topScore, topQuestion, topQuickAnswerId, threshold: QUICK_ANSWER_THRESHOLD, candidates, debug: { total, active, activeWithEmbeddings, semanticChecked: true, candidates, topScore, topQuestion, threshold: QUICK_ANSWER_THRESHOLD } };
 }
