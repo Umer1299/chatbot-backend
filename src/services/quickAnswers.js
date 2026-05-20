@@ -6,6 +6,46 @@ const QUICK_ANSWER_THRESHOLD = Number(process.env.QUICK_ANSWER_THRESHOLD || 0.86
 const QUICK_ANSWER_MAX_WORDS = Number(process.env.QUICK_ANSWER_MAX_WORDS || 35);
 const QUICK_ANSWER_MAX_CHARS = Number(process.env.QUICK_ANSWER_MAX_CHARS || 220);
 const QUICK_ANSWER_ENABLED = String(process.env.QUICK_ANSWER_ENABLED || 'true').toLowerCase() === 'true';
+const QUICK_ANSWER_ALLOW_NULL_EMBEDDING = String(process.env.QUICK_ANSWER_ALLOW_NULL_EMBEDDING || 'false').toLowerCase() === 'true';
+const QUICK_ANSWER_EMBEDDING_DIMENSION = 1536;
+
+export class QuickAnswerEmbeddingError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'QuickAnswerEmbeddingError';
+    this.statusCode = 422;
+  }
+}
+
+function getSafeErrorMessage(error) {
+  return error?.message ? String(error.message) : 'Unknown embedding error';
+}
+
+async function generateQuickAnswerEmbedding(question, context = {}) {
+  console.log('quick_answer_embedding_generation_started', context);
+  try {
+    const embedding = await getEmbedding(question);
+    if (!embedding) {
+      throw new QuickAnswerEmbeddingError('Embedding provider returned no embedding.');
+    }
+    if (!Array.isArray(embedding) || embedding.length !== QUICK_ANSWER_EMBEDDING_DIMENSION) {
+      throw new QuickAnswerEmbeddingError(`Embedding dimension mismatch. Expected ${QUICK_ANSWER_EMBEDDING_DIMENSION}, received ${Array.isArray(embedding) ? embedding.length : 'invalid'}.`);
+    }
+    console.log('quick_answer_embedding_generation_success', {
+      ...context,
+      dimension: embedding.length,
+    });
+    return embedding;
+  } catch (error) {
+    console.error('quick_answer_embedding_generation_failed', {
+      ...context,
+      error: getSafeErrorMessage(error),
+    });
+    if (QUICK_ANSWER_ALLOW_NULL_EMBEDDING) return null;
+    if (error instanceof QuickAnswerEmbeddingError) throw error;
+    throw new QuickAnswerEmbeddingError('Failed to generate embedding for quick answer question.');
+  }
+}
 
 function isComplexMessage(message = '') {
   const safe = String(message || '').trim();
@@ -33,7 +73,7 @@ async function recordMatch(id) {
 
 export async function createQuickAnswer({ businessId, question, answer, category = 'general', priority = 0 }) {
   const normalizedQuestion = normalizeQuestion(question);
-  const embedding = await getEmbedding(question);
+  const embedding = await generateQuickAnswerEmbedding(question, { businessId, action: 'create' });
 
   const { rows } = await pool.query(
     `INSERT INTO quick_answers
@@ -42,6 +82,12 @@ export async function createQuickAnswer({ businessId, question, answer, category
      RETURNING *`,
     [businessId, question, normalizedQuestion, answer, category, priority, embedding ? JSON.stringify(embedding) : null],
   );
+
+  console.log('quick_answer_created_with_embedding', {
+    businessId,
+    quickAnswerId: rows[0]?.id || null,
+    hasEmbedding: Boolean(embedding),
+  });
 
   return rows[0] || null;
 }
@@ -54,8 +100,9 @@ export async function updateQuickAnswer({ businessId, id, question, answer, cate
   const updates = [nextQuestion, normalizeQuestion(nextQuestion), answer ?? current.rows[0].answer, category ?? current.rows[0].category, priority ?? current.rows[0].priority, isActive ?? current.rows[0].is_active, id, businessId];
 
   let embedding = current.rows[0].embedding;
-  if (typeof question === 'string' && question.trim()) {
-    embedding = await getEmbedding(question);
+  const hasQuestionChanged = typeof question === 'string' && question.trim() && question.trim() !== current.rows[0].question;
+  if (hasQuestionChanged) {
+    embedding = await generateQuickAnswerEmbedding(question, { businessId, action: 'update', quickAnswerId: id });
   }
 
   const { rows } = await pool.query(

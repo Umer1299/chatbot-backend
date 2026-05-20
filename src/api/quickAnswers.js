@@ -5,6 +5,7 @@ import {
   updateQuickAnswer,
   deleteQuickAnswer,
   listQuickAnswers,
+  QuickAnswerEmbeddingError,
 } from '../services/quickAnswers.js';
 
 const router = Router();
@@ -27,6 +28,9 @@ router.post('/', requireAuth, async (req, res) => {
     res.status(201).json({ quickAnswer });
   } catch (error) {
     console.error('quick_answer_create_failed', { businessId: req.business.businessId, error: error.message });
+    if (error instanceof QuickAnswerEmbeddingError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     res.status(500).json({ error: 'Failed to create quick answer' });
   }
 });
@@ -38,6 +42,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
     res.json({ quickAnswer });
   } catch (error) {
     console.error('quick_answer_update_failed', { businessId: req.business.businessId, quickAnswerId: req.params.id, error: error.message });
+    if (error instanceof QuickAnswerEmbeddingError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     res.status(500).json({ error: 'Failed to update quick answer' });
   }
 });
