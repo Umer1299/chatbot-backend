@@ -525,7 +525,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
 
 
+  let quickAnswerMissed = false;
   try {
+    perf.log('quick_answer_check_started', { businessId: config.business_id });
     const quick = await tryQuickAnswer({ businessId: config.business_id, message });
     if (quick.matched) {
       summary.replySource = quick.source;
@@ -538,9 +540,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       summary.stepTimingsMs.ragSearch = 0;
       summary.status = 'success';
       if (quick.source === 'quick_answer_exact') {
-        perf.log('quick_answer_exact_match', { businessId: config.business_id, quickAnswerId: quick.quickAnswerId });
+        perf.log('quick_answer_exact_hit', { businessId: config.business_id, quickAnswerId: quick.quickAnswerId });
       } else {
-        perf.log('quick_answer_semantic_match', { businessId: config.business_id, quickAnswerId: quick.quickAnswerId, score: quick.score });
+        perf.log('quick_answer_semantic_hit', { businessId: config.business_id, quickAnswerId: quick.quickAnswerId, score: quick.score });
       }
 
       const payload = {
@@ -568,7 +570,12 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       }
       return;
     }
-    perf.log('quick_answer_miss', { businessId: config.business_id });
+    if (quick.source === 'quick_answer_skipped') {
+      perf.log('quick_answer_skipped_reason', { businessId: config.business_id, reason: quick.skipReason, maxWords: quick.maxWords, words: quick.words, maxChars: quick.maxChars, chars: quick.chars });
+    } else {
+      perf.log('quick_answer_miss', { businessId: config.business_id, topScore: quick.topScore ?? null, threshold: quick.threshold ?? null, missReason: quick.missReason || null });
+    }
+    quickAnswerMissed = true;
   } catch (quickAnswerError) {
     perf.error('quick_answer_error', quickAnswerError, { fallback: 'continue_normal_flow' });
   }
@@ -977,6 +984,7 @@ function cleanAssistantResponse(text = '') {
     perf.startTimer('ai_call');
     perf.log('ai_call_start', { provider: summary.provider, modelId: summary.modelId, apiModelId: summary.apiModelId });
     if (shouldCacheAiReply) {
+      if (quickAnswerMissed) perf.log('ai_cache_checked', { businessId: config.business_id });
       const cachedReply = await redisClient.get(aiCacheKey).catch(() => null);
       if (cachedReply) {
         summary.replyCacheHit = true;

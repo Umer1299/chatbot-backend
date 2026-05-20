@@ -102,10 +102,11 @@ export async function listQuickAnswers({ businessId }) {
 }
 
 export async function tryQuickAnswer({ businessId, message }) {
-  if (!QUICK_ANSWER_ENABLED) return { matched: false, source: 'quick_answer_disabled' };
+  if (!businessId) return { matched: false, source: 'quick_answer_skipped', skipReason: 'missing_business_id' };
+  if (!QUICK_ANSWER_ENABLED) return { matched: false, source: 'quick_answer_skipped', skipReason: 'disabled' };
 
   const normalizedMessage = normalizeQuestion(message);
-  if (!normalizedMessage) return { matched: false, source: 'quick_answer_empty' };
+  if (!normalizedMessage) return { matched: false, source: 'quick_answer_skipped', skipReason: 'empty_message' };
 
   const exact = await pool.query(
     `SELECT *
@@ -121,10 +122,14 @@ export async function tryQuickAnswer({ businessId, message }) {
     return { matched: true, source: 'quick_answer_exact', answer: exact.rows[0].answer, quickAnswerId: exact.rows[0].id, score: 1 };
   }
 
-  if (isComplexMessage(message)) return { matched: false, source: 'quick_answer_miss' };
+  const safe = String(message || '').trim();
+  const wordCount = safe ? safe.split(/\s+/).filter(Boolean).length : 0;
+  if (safe.length > QUICK_ANSWER_MAX_CHARS) return { matched: false, source: 'quick_answer_skipped', skipReason: 'max_chars', maxChars: QUICK_ANSWER_MAX_CHARS, chars: safe.length };
+  if (wordCount > QUICK_ANSWER_MAX_WORDS) return { matched: false, source: 'quick_answer_skipped', skipReason: 'max_words', maxWords: QUICK_ANSWER_MAX_WORDS, words: wordCount };
+  if (isComplexMessage(message)) return { matched: false, source: 'quick_answer_miss', missReason: 'complex_message' };
 
   const queryEmbedding = await getEmbedding(message);
-  if (!queryEmbedding) return { matched: false, source: 'quick_answer_miss' };
+  if (!queryEmbedding) return { matched: false, source: 'quick_answer_miss', missReason: 'embedding_unavailable' };
 
   const semantic = await pool.query(
     `SELECT id, question, answer, category, priority,
@@ -140,7 +145,7 @@ export async function tryQuickAnswer({ businessId, message }) {
 
   const top = semantic.rows[0];
   if (!top || Number(top.similarity) < QUICK_ANSWER_THRESHOLD) {
-    return { matched: false, source: 'quick_answer_miss' };
+    return { matched: false, source: 'quick_answer_miss', topScore: top ? Number(top.similarity) : null, threshold: QUICK_ANSWER_THRESHOLD };
   }
 
   await recordMatch(top.id);
