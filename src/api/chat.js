@@ -48,15 +48,46 @@ function normalizeMessageForCache(input = '') {
 }
 
 function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
-  const inputTokens = Number.isFinite(rawUsage?.input_tokens) ? rawUsage.input_tokens : 0;
-  const outputTokens = Number.isFinite(rawUsage?.output_tokens) ? rawUsage.output_tokens : 0;
+  const inputTokens = rawUsage?.input_tokens || 0;
+  const outputTokens = rawUsage?.output_tokens || 0;
+  const totalTokens = rawUsage?.total_tokens || (inputTokens + outputTokens);
   const estimatedCostUsd = estimateCost(modelId, inputTokens, outputTokens);
   const creditsUsed = getModelCreditCost(modelId);
-  return { inputTokens, outputTokens, estimatedCostUsd, creditsUsed };
+  return { inputTokens, outputTokens, totalTokens, estimatedCostUsd, creditsUsed };
 }
 
 function isGPT5Model(modelId) {
   return String(modelId || '').toLowerCase().startsWith('gpt-5');
+}
+
+
+function extractResponsesText(response) {
+  const direct = typeof response?.output_text === 'string' ? response.output_text.trim() : '';
+  if (direct) return direct;
+
+  const parts = [];
+  for (const item of response?.output || []) {
+    for (const content of item?.content || []) {
+      if (typeof content?.text === 'string') parts.push(content.text);
+      if (typeof content?.output_text === 'string') parts.push(content.output_text);
+      if (content?.type === 'output_text' && typeof content?.text === 'string') parts.push(content.text);
+    }
+  }
+
+  return parts.join('').trim();
+}
+
+function logOpenAIResponsesDebug(response, meta = {}) {
+  if (process.env.NODE_ENV === 'production') return;
+  console.log('openai_response_shape_debug', {
+    ...meta,
+    status: response?.status,
+    outputLength: response?.output?.length,
+    outputTypes: response?.output?.map((o) => o?.type),
+    contentTypes: response?.output?.flatMap((o) => (o?.content || []).map((c) => c?.type)),
+    outputTextLength: response?.output_text?.length,
+    usage: response?.usage
+  });
 }
 
 function isBetterTextField(existing, candidate) {
@@ -722,7 +753,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   summary.selectedAgents = usedAgents;
   const fullSystemPrompt = ragBlock + agentSystemPrompt + phaseBlock;
   const messagesArray = [...processedMessages, { role: 'user', content: message }];
-  const brevityPrompt = '\nRESPONSE STYLE:\nKeep responses concise and natural. Target 80-140 words (40-90 for simple asks). Ask at most 1-2 questions. Avoid repeating long service lists. Use minimal emojis. Suggest booking only for buying/pricing/complex intent.\n';
+  const brevityPrompt = '\nRESPONSE STYLE:\nKeep the response helpful but concise, around 80-140 words unless the user asks for detail. Ask at most 1-2 questions. Avoid repeating long service lists. Use minimal emojis. Suggest booking only for buying/pricing/complex intent.\n';
   const finalSystemPrompt = fullSystemPrompt + brevityPrompt;
 
   const shouldCacheAiReply = (() => {
@@ -741,11 +772,13 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const requestedModel = config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini';
     const latestUserMessage = messages?.[messages.length - 1]?.content || '';
     const isComplexAsk = latestUserMessage.length > 320 || /\b(compare|comparison|detailed|step by step|proposal|plan|requirements)\b/i.test(latestUserMessage);
-    const maxTokens = isComplexAsk ? 500 : 320;
+    const maxTokens = isComplexAsk ? 700 : 320;
 
     // Resolve model — enforces plan, reads from DB
     // resolvedModel is LOCAL to this function call
     const resolvedModel = await getSafeModel(requestedModel);
+    const isGpt5Mini = String(resolvedModel.apiModelId || '').toLowerCase() === 'gpt-5-mini';
+    const effectiveMaxTokens = isGpt5Mini ? 700 : maxTokens;
     perf.log('model_resolved', { requestedModelId: requestedModel, modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, provider: resolvedModel.provider, wasDowngraded: resolvedModel.wasDowngraded });
     summary.provider = resolvedModel.provider; summary.modelId = resolvedModel.modelId; summary.apiModelId = resolvedModel.apiModelId;
 
@@ -792,7 +825,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         console.log('[anthropic] final model sent:', anthropicModel);
         const anthropicStream = await anthropic.messages.stream({
           model: anthropicModel,
-          max_tokens: maxTokens,
+          max_tokens: effectiveMaxTokens,
           system: anthropicPayload.system,
           messages: anthropicPayload.messages
         });
@@ -815,7 +848,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         console.log('[anthropic] final model sent:', anthropicModel);
         const response = await anthropic.messages.create({
           model: anthropicModel,
-          max_tokens: maxTokens,
+          max_tokens: effectiveMaxTokens,
           system: anthropicPayload.system,
           messages: anthropicPayload.messages
         });
@@ -834,7 +867,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         if (!openai) throw anthropicErr;
         try {
           const fallbackModel = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
-          const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(fallbackModel, maxTokens);
+          const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(fallbackModel, effectiveMaxTokens);
           console.log('openai_token_param_debug', { modelId: fallbackModel, apiModelId: fallbackModel, tokenParamName });
           const fb = await openai.chat.completions.create({
           model: fallbackModel,
@@ -872,7 +905,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       if (stream) {
         const openai = getOpenAIClient();
         if (!openai) throw new Error('Missing OPENAI_API_KEY');
-        const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, maxTokens);
+        const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, effectiveMaxTokens);
         console.log('openai_token_param_debug', { modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, tokenParamName });
         const openaiStream = await openai.chat.completions.create({
           model: resolvedModel.apiModelId,
@@ -910,17 +943,24 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
               content: String(m.content || '')
             }))
           ],
-          max_output_tokens: maxTokens,
+          max_output_tokens: effectiveMaxTokens,
           reasoning: { effort: 'low' },
           text: { verbosity: 'low' }
         });
-        const reply =
-          response.output_text ||
-          response.output
-            ?.flatMap((item) => item.content || [])
-            ?.map((content) => content.text || '')
-            ?.join('')
-            ?.trim();
+        logOpenAIResponsesDebug(response, { modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, apiPath: 'responses' });
+        if (response?.status === 'incomplete') {
+          console.warn('openai_response_incomplete', { reason: response?.incomplete_details?.reason });
+        }
+        const reply = extractResponsesText(response);
+        const usage = buildUsageSummary(response.usage, resolvedModel.modelId);
+        if (reply.length < 30 && usage.outputTokens > 120) {
+          console.warn('openai_reply_extraction_suspicious', {
+            replyLength: reply.length,
+            outputTokens: usage.outputTokens,
+            outputTextLength: response?.output_text?.length,
+            outputLength: response?.output?.length
+          });
+        }
         if (!reply) {
           console.warn('openai_empty_reply_debug', {
             modelId: resolvedModel.modelId,
@@ -935,11 +975,13 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         return {
           reply: reply || 'I’m sorry, I couldn’t generate a response just now. Could you please try again?',
           resolvedModel,
-          usage: buildUsageSummary(response.usage, resolvedModel.modelId)
+          usage,
+          isIncomplete: response?.status === 'incomplete',
+          incompleteReason: response?.incomplete_details?.reason
         };
       }
 
-      const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, maxTokens);
+      const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, effectiveMaxTokens);
       console.log('openai_token_param_debug', { modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, tokenParamName });
       const response = await openai.chat.completions.create({
         model: resolvedModel.apiModelId,
@@ -1111,7 +1153,7 @@ function cleanAssistantResponse(text = '') {
     };
     if (debugQuickAnswer) aiPayload.quickAnswerDebug = quickAnswerDebugPayload;
     res.json(aiPayload);
-    if (shouldCacheAiReply && cleanResponse) {
+    if (shouldCacheAiReply && cleanResponse && cleanResponse.length > 30 && !result?.isIncomplete) {
       await redisClient.setex(aiCacheKey, 86400, cleanResponse).catch(() => null);
       summary.replySource = 'ai_generated_cached';
     } else {

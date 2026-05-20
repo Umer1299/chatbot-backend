@@ -17,6 +17,36 @@ function isGPT5Model(modelId) {
   return String(modelId || '').toLowerCase().startsWith('gpt-5');
 }
 
+
+function extractResponsesText(response) {
+  const direct = typeof response?.output_text === 'string' ? response.output_text.trim() : '';
+  if (direct) return direct;
+
+  const parts = [];
+  for (const item of response?.output || []) {
+    for (const content of item?.content || []) {
+      if (typeof content?.text === 'string') parts.push(content.text);
+      if (typeof content?.output_text === 'string') parts.push(content.output_text);
+      if (content?.type === 'output_text' && typeof content?.text === 'string') parts.push(content.text);
+    }
+  }
+
+  return parts.join('').trim();
+}
+
+function logOpenAIResponsesDebug(response, meta = {}) {
+  if (process.env.NODE_ENV === 'production') return;
+  console.log('openai_response_shape_debug', {
+    ...meta,
+    status: response?.status,
+    outputLength: response?.output?.length,
+    outputTypes: response?.output?.map((o) => o?.type),
+    contentTypes: response?.output?.flatMap((o) => (o?.content || []).map((c) => c?.type)),
+    outputTextLength: response?.output_text?.length,
+    usage: response?.usage
+  });
+}
+
 function getAnthropicClient() {
   if (anthropicClient) return anthropicClient;
   if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured');
@@ -74,17 +104,15 @@ export async function scrapeLLM(systemPrompt, messages, options = {}) {
             { role: 'system', content: systemPrompt },
             ...messages.map((m) => ({ role: m.role, content: String(m.content || '') })),
           ],
-          max_output_tokens: options.maxTokens || 1000,
+          max_output_tokens: Math.max(options.maxTokens || 1000, 700),
           reasoning: { effort: 'low' },
           text: { verbosity: 'low' }
         });
-        const reply =
-          response.output_text ||
-          response.output
-            ?.flatMap((item) => item.content || [])
-            ?.map((content) => content.text || '')
-            ?.join('')
-            ?.trim();
+        logOpenAIResponsesDebug(response, { modelId: cfg.model, apiModelId: cfg.model, apiPath: 'responses' });
+        if (response?.status === 'incomplete') {
+          console.warn('openai_response_incomplete', { reason: response?.incomplete_details?.reason });
+        }
+        const reply = extractResponsesText(response);
         if (!reply) {
           console.warn('openai_empty_reply_debug', {
             modelId: cfg.model,
