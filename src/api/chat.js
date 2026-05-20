@@ -295,7 +295,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const requestStart = performance.now();
   const perf = createChatLogger({ event: 'chat_request_start', requestId, namespace: req.namespace || null, sessionId: req.body?.sessionId || null });
   perf.log('chat_request_start', { stream: isStreaming });
-  const summary = { status: 'error', quickAnswerChecked: false, quickAnswerMatched: false, quickAnswerSource: null, quickAnswerScore: null, quickAnswerSkippedReason: null, quickAnswerDurationMs: null, leadExtractionAttempted: false, leadDataDetected: false, leadCaptureStatus: 'skipped', capturedFields: [], redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {}, simpleIntent: null, replySource: null, aiSkipped: false, aiSkipReason: null, replyCacheHit: 'not_applicable', ragSkipped: false, ragSkipReason: null };
+  const summary = { status: 'error', quickAnswerChecked: false, quickAnswerMatched: false, quickAnswerSource: null, quickAnswerScore: null, quickAnswerTopQuestion: null, quickAnswerTopQuickAnswerId: null, quickAnswerThreshold: null, quickAnswerSkippedReason: null, quickAnswerTotal: null, quickAnswerActive: null, quickAnswerActiveWithEmbeddings: null, quickAnswerDurationMs: null, leadExtractionAttempted: false, leadDataDetected: false, leadCaptureStatus: 'skipped', capturedFields: [], redisTokenCacheHit: req.redisTokenCacheHit ?? false, botConfigCacheHit: false, ragCacheHit: 'not_applicable', ragChunksReturned: 0, ragChunksInjected: 0, selectedAgents: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0, creditsUsed: 0, aiDurationMs: null, timeToFirstTokenMs: null, provider: null, modelId: null, apiModelId: null, businessId: null, botId: null, sessionId: req.body?.sessionId || null, stepTimingsMs: {}, simpleIntent: null, replySource: null, aiSkipped: false, aiSkipReason: null, replyCacheHit: 'not_applicable', ragSkipped: false, ragSkipReason: null };
 
   // SECTION 1: Input validation
   let { botId, sessionId, message } = req.body;
@@ -529,7 +529,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   }
 
 
+  const debugQuickAnswer = String(req.query?.debugQuickAnswer || '').toLowerCase() === 'true';
   let quickAnswerMissed = false;
+  let quickAnswerDebugPayload = null;
   perf.log('quick_answer_route_before_call', { businessId: config.business_id });
   const quickAnswerStart = performance.now();
   try {
@@ -539,9 +541,26 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     summary.quickAnswerMatched = Boolean(quick?.matched);
     summary.quickAnswerSource = quick?.source || null;
     summary.quickAnswerScore = quick?.score ?? null;
-    summary.quickAnswerSkippedReason = quick?.skipReason || null;
+    summary.quickAnswerSkippedReason = quick?.skipReason || quick?.skippedReason || null;
+    summary.quickAnswerTopQuestion = quick?.topQuestion || null;
+    summary.quickAnswerTopQuickAnswerId = quick?.topQuickAnswerId || null;
+    summary.quickAnswerThreshold = quick?.threshold ?? null;
+    summary.quickAnswerTotal = quick?.debug?.total ?? null;
+    summary.quickAnswerActive = quick?.debug?.active ?? null;
+    summary.quickAnswerActiveWithEmbeddings = quick?.debug?.activeWithEmbeddings ?? null;
+    quickAnswerDebugPayload = {
+      total: quick?.debug?.total ?? summary.quickAnswerTotal,
+      active: quick?.debug?.active ?? summary.quickAnswerActive,
+      activeWithEmbeddings: quick?.debug?.activeWithEmbeddings ?? summary.quickAnswerActiveWithEmbeddings,
+      semanticChecked: Boolean(quick?.debug?.semanticChecked),
+      candidates: quick?.candidates || quick?.debug?.candidates || [],
+      topScore: quick?.topScore ?? quick?.score ?? null,
+      topQuestion: quick?.topQuestion || null,
+      threshold: quick?.threshold ?? null,
+      skippedReason: quick?.skipReason || quick?.skippedReason || null
+    };
     summary.quickAnswerDurationMs = Number((performance.now() - quickAnswerStart).toFixed(2));
-    perf.log('quick_answer_route_after_call', { matched: Boolean(quick?.matched), source: quick?.source || null, score: quick?.score ?? null, skippedReason: quick?.skipReason || null });
+    perf.log('quick_answer_route_after_call', { matched: Boolean(quick?.matched), source: quick?.source || null, score: quick?.score ?? null, skippedReason: quick?.skipReason || quick?.skippedReason || null });
     if (quick.matched) {
       summary.replySource = quick.source;
       summary.aiSkipped = true;
@@ -567,6 +586,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         agentsUsed: [],
         usage: { ...ZERO_USAGE }
       };
+      if (debugQuickAnswer) payload.quickAnswerDebug = quickAnswerDebugPayload;
 
       if (isStreaming) {
         res.setHeader('Content-Type', 'text/event-stream');
@@ -587,13 +607,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       if (quick.skipReason === 'quick_answer_disabled') perf.log('quick_answer_skipped_reason', { quick_answer_skipped_reason: 'quick_answer_disabled' });
       perf.log('quick_answer_skipped_reason', { businessId: config.business_id, reason: quick.skipReason, maxWords: quick.maxWords, words: quick.words, maxChars: quick.maxChars, chars: quick.chars });
     } else {
-      perf.log('quick_answer_miss', { businessId: config.business_id, topScore: quick.topScore ?? null, threshold: quick.threshold ?? null, missReason: quick.missReason || null });
+      perf.log('quick_answer_miss', { businessId: config.business_id, topScore: quick.topScore ?? quick.score ?? null, topQuestion: quick.topQuestion ?? null, topQuickAnswerId: quick.topQuickAnswerId ?? null, threshold: quick.threshold ?? null, missReason: quick.missReason || quick.skippedReason || null });
     }
     quickAnswerMissed = true;
-    await runLeadPipeline();
   } catch (quickAnswerError) {
     perf.error('quick_answer_error', quickAnswerError, { fallback: 'continue_normal_flow' });
-    await runLeadPipeline();
   }
 
   const intentDetection = detectMessageIntent(message, config.industry, config);
@@ -1008,10 +1026,13 @@ function cleanAssistantResponse(text = '') {
         summary.aiSkipped = true;
         summary.aiSkipReason = 'redis_cached_ai_reply';
         summary.status = 'success';
-        return res.json({ reply: cachedReply, source: 'redis_cached_ai_reply', resolvedModel: { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' }, agentsUsed: usedAgents, usage: { ...ZERO_USAGE } });
+        const cachedPayload = { reply: cachedReply, source: 'redis_cached_ai_reply', resolvedModel: { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' }, agentsUsed: usedAgents, usage: { ...ZERO_USAGE } };
+        if (debugQuickAnswer) cachedPayload.quickAnswerDebug = quickAnswerDebugPayload;
+        return res.json(cachedPayload);
       }
       summary.replyCacheHit = false;
     }
+    if (quickAnswerMissed) await runLeadPipeline();
     const result = await callWithFallback(false, config, finalSystemPrompt, messagesArray);
     const fullResponse = result.reply;
     // result.resolvedModel will be used later
@@ -1020,12 +1041,14 @@ function cleanAssistantResponse(text = '') {
     summary.aiDurationMs = perf.endTimer('ai_call', { event: 'ai_call_done', provider: result.resolvedModel.provider, modelId: result.resolvedModel.modelId, apiModelId: result.resolvedModel.apiModelId, inputTokens: summary.inputTokens, outputTokens: summary.outputTokens, totalTokens: summary.totalTokens, estimatedCostUsd: summary.estimatedCostUsd, creditsUsed: summary.creditsUsed });
     if (summary.aiDurationMs != null) summary.stepTimingsMs.aiCall = summary.aiDurationMs;
     if (summary.aiDurationMs && summary.aiDurationMs > 4000) perf.warn('slow_ai_call', { durationMs: summary.aiDurationMs });
-    res.json({
+    const aiPayload = {
       reply: cleanResponse,
       resolvedModel: result.resolvedModel,
       agentsUsed: usedAgents,
       usage: result.usage || DEFAULT_USAGE
-    });
+    };
+    if (debugQuickAnswer) aiPayload.quickAnswerDebug = quickAnswerDebugPayload;
+    res.json(aiPayload);
     if (shouldCacheAiReply && cleanResponse) {
       await redisClient.setex(aiCacheKey, 86400, cleanResponse).catch(() => null);
       summary.replySource = 'ai_generated_cached';
