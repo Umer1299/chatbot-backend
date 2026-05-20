@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { redisClient } from './redis.js';
+import { getOpenAITokenLimitParam } from './openaiTokenLimitParam.js';
 
 let anthropicClient = null;
 let openAIClient = null;
@@ -60,9 +61,11 @@ export async function scrapeLLM(systemPrompt, messages, options = {}) {
   try {
     if (cfg.provider === 'openai') {
       const openai = getOpenAIClient();
+      const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(cfg.model, options.maxTokens || 1000);
+      console.log('openai_token_param_debug', { modelId: cfg.model, apiModelId: cfg.model, tokenParamName });
       const response = await openai.chat.completions.create({
         model: cfg.model,
-        max_tokens: options.maxTokens || 1000,
+        ...tokenParam,
         messages: [
           { role: 'system', content: systemPrompt },
           ...messages,
