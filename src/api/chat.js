@@ -21,6 +21,7 @@ import { normalizePhone, determineLeadMatchStrategy, buildFinalLeadPayload, chec
 import { buildBookingReply, detectBookingSignals } from '../services/bookingFlow.js';
 import { detectMessageIntent, buildSimpleReply } from '../services/intentDetection.js';
 import { tryQuickAnswer } from '../services/quickAnswers.js';
+import { getOpenAITokenLimitParam } from '../services/openaiTokenLimitParam.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -102,7 +103,10 @@ async function generateLeadSummary(leadData, industry) {
     try {
       const openai = getOpenAIClient();
       if (!openai) throw new Error('Missing OPENAI_API_KEY');
-      const response = await openai.chat.completions.create({ model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini', max_tokens: 150, messages: [{ role: 'system', content: 'Return JSON only.' }, { role: 'user', content: prompt }] });
+      const fallbackModel = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
+      const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(fallbackModel, 150);
+      console.log('openai_token_param_debug', { modelId: fallbackModel, apiModelId: fallbackModel, tokenParamName });
+      const response = await openai.chat.completions.create({ model: fallbackModel, ...tokenParam, messages: [{ role: 'system', content: 'Return JSON only.' }, { role: 'user', content: prompt }] });
       return JSON.parse(response.choices?.[0]?.message?.content || '{}').summary;
     } catch {
       const score = (leadData?.lead_score || 'unknown').toUpperCase();
@@ -374,7 +378,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
             const openai = getOpenAIClient();
             if (!openai) throw new Error('lead_extractor_not_configured');
             const prompt = `Return strict JSON object only with fields: isLead, fullName, name, email, phone, companyName, company_name, churchName, location, serviceNeed, budgetRange, budget_range, timeline, leadScore, scoreReasons. Extract only from this message: ${message}`;
-            const rsp = await withTimeout((signal) => openai.chat.completions.create({ model: LEAD_EXTRACTOR_MODEL, max_tokens: LEAD_EXTRACTOR_MAX_TOKENS, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'You are a lead extraction agent. Output strict JSON only. No prose.' }, { role: 'user', content: prompt }] }), LEAD_EXTRACTOR_TIMEOUT_MS);
+            const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(LEAD_EXTRACTOR_MODEL, LEAD_EXTRACTOR_MAX_TOKENS);
+            console.log('openai_token_param_debug', { modelId: LEAD_EXTRACTOR_MODEL, apiModelId: LEAD_EXTRACTOR_MODEL, tokenParamName });
+            const rsp = await withTimeout((signal) => openai.chat.completions.create({ model: LEAD_EXTRACTOR_MODEL, ...tokenParam, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'You are a lead extraction agent. Output strict JSON only. No prose.' }, { role: 'user', content: prompt }] }), LEAD_EXTRACTOR_TIMEOUT_MS);
             aiLead = JSON.parse(rsp.choices?.[0]?.message?.content || '{}');
             summary.leadExtractorInputTokens = rsp?.usage?.prompt_tokens || 0;
             summary.leadExtractorOutputTokens = rsp?.usage?.completion_tokens || 0;
@@ -823,9 +829,12 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         const openai = getOpenAIClient();
         if (!openai) throw anthropicErr;
         try {
+          const fallbackModel = process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini';
+          const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(fallbackModel, maxTokens);
+          console.log('openai_token_param_debug', { modelId: fallbackModel, apiModelId: fallbackModel, tokenParamName });
           const fb = await openai.chat.completions.create({
-          model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini',
-          max_tokens: maxTokens,
+          model: fallbackModel,
+          ...tokenParam,
           messages: [
             { role: 'system', content: systemPrompt },
             ...messages
@@ -853,9 +862,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       if (stream) {
         const openai = getOpenAIClient();
         if (!openai) throw new Error('Missing OPENAI_API_KEY');
+        const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, maxTokens);
+        console.log('openai_token_param_debug', { modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, tokenParamName });
         const openaiStream = await openai.chat.completions.create({
           model: resolvedModel.apiModelId,
-          max_tokens: maxTokens,
+          ...tokenParam,
           stream: true,
           messages: openaiMessages
         });
@@ -879,9 +890,11 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
       const openai = getOpenAIClient();
       if (!openai) throw new Error('Missing OPENAI_API_KEY');
+      const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, maxTokens);
+      console.log('openai_token_param_debug', { modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, tokenParamName });
       const response = await openai.chat.completions.create({
         model: resolvedModel.apiModelId,
-        max_tokens: maxTokens,
+        ...tokenParam,
         messages: openaiMessages
       });
       return {
