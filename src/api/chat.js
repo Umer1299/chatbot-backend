@@ -20,6 +20,7 @@ import { normalizeEmail, shouldUseSessionDedupe, pickMostCompleteLead } from '..
 import { normalizePhone, determineLeadMatchStrategy, buildFinalLeadPayload, checkIndustryDataConsistency } from '../services/leadConsistency.js';
 import { buildBookingReply, detectBookingSignals } from '../services/bookingFlow.js';
 import { detectMessageIntent, buildSimpleReply } from '../services/intentDetection.js';
+import { tryQuickAnswer } from '../services/quickAnswers.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -521,6 +522,55 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       agentsUsed: selectedAgents,
       usage
     });
+  }
+
+
+  try {
+    const quick = await tryQuickAnswer({ businessId: config.business_id, message });
+    if (quick.matched) {
+      summary.replySource = quick.source;
+      summary.aiSkipped = true;
+      summary.aiSkipReason = quick.source;
+      summary.ragSkipped = true;
+      summary.ragSkipReason = quick.source;
+      summary.ragChunksReturned = 0;
+      summary.ragChunksInjected = 0;
+      summary.stepTimingsMs.ragSearch = 0;
+      summary.status = 'success';
+      if (quick.source === 'quick_answer_exact') {
+        perf.log('quick_answer_exact_match', { businessId: config.business_id, quickAnswerId: quick.quickAnswerId });
+      } else {
+        perf.log('quick_answer_semantic_match', { businessId: config.business_id, quickAnswerId: quick.quickAnswerId, score: quick.score });
+      }
+
+      const payload = {
+        reply: quick.answer,
+        source: quick.source,
+        quickAnswerId: quick.quickAnswerId,
+        quickAnswerScore: quick.score,
+        resolvedModel: null,
+        agentsUsed: [],
+        usage: { ...ZERO_USAGE }
+      };
+
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.write('data: {"type":"ready"}\n\n');
+        res.write('data: ' + JSON.stringify({ text: quick.answer, token: quick.answer }) + '\n\n');
+        res.write('data: ' + JSON.stringify({ type: 'meta', ...payload }) + '\n\n');
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } else {
+        res.json(payload);
+      }
+      return;
+    }
+    perf.log('quick_answer_miss', { businessId: config.business_id });
+  } catch (quickAnswerError) {
+    perf.error('quick_answer_error', quickAnswerError, { fallback: 'continue_normal_flow' });
   }
 
   const intentDetection = detectMessageIntent(message, config.industry, config);
