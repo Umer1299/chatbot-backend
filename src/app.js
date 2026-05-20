@@ -13,6 +13,7 @@ import authRoutes from './api/auth.js';
 import scrapeRoutes from './api/scrape.js';
 import leadsRoutes from './api/leads.js';
 import businessRoutes from './api/business.js';
+import quickAnswersRoutes from './api/quickAnswers.js';
 import { redisClient } from './services/redis.js';
 import { globalErrorHandler } from './middleware/errorHandler.js';
 
@@ -85,6 +86,7 @@ app.use('/api/chat', widgetLimiter);
 app.use('/api/upsert', widgetLimiter);
 app.use('/api/leads', dashboardLimiter);
 app.use('/api/business', dashboardLimiter);
+app.use('/api/quick-answers', dashboardLimiter);
 app.use('/api/scrape', dashboardLimiter);
 app.use('/api/auth', dashboardLimiter);
 app.use('/api/moderate', widgetLimiter);
@@ -98,6 +100,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/scrape', scrapeRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/business', businessRoutes);
+app.use('/api/quick-answers', quickAnswersRoutes);
 
 app.use(globalErrorHandler);
 
