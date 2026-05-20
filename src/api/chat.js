@@ -55,6 +55,10 @@ function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
   return { inputTokens, outputTokens, estimatedCostUsd, creditsUsed };
 }
 
+function isGPT5Model(modelId) {
+  return String(modelId || '').toLowerCase().startsWith('gpt-5');
+}
+
 function isBetterTextField(existing, candidate) {
   if (!candidate || typeof candidate !== 'string') return false;
   if (!existing) return true;
@@ -858,6 +862,12 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
         { role: 'system', content: systemPrompt },
         ...messages
       ];
+      const apiPath = isGPT5Model(resolvedModel.apiModelId) ? 'responses' : 'chat_completions';
+      console.log('openai_api_path_debug', {
+        modelId: resolvedModel.modelId,
+        apiModelId: resolvedModel.apiModelId,
+        apiPath
+      });
 
       if (stream) {
         const openai = getOpenAIClient();
@@ -890,6 +900,45 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
       const openai = getOpenAIClient();
       if (!openai) throw new Error('Missing OPENAI_API_KEY');
+      if (isGPT5Model(resolvedModel.apiModelId)) {
+        const response = await openai.responses.create({
+          model: resolvedModel.apiModelId,
+          input: [
+            { role: 'system', content: systemPrompt },
+            ...messages.map((m) => ({
+              role: m.role,
+              content: String(m.content || '')
+            }))
+          ],
+          max_output_tokens: maxTokens,
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' }
+        });
+        const reply =
+          response.output_text ||
+          response.output
+            ?.flatMap((item) => item.content || [])
+            ?.map((content) => content.text || '')
+            ?.join('')
+            ?.trim();
+        if (!reply) {
+          console.warn('openai_empty_reply_debug', {
+            modelId: resolvedModel.modelId,
+            apiModelId: resolvedModel.apiModelId,
+            apiUsed: 'responses',
+            status: response.status,
+            outputLength: response.output?.length,
+            outputTypes: response.output?.map((o) => o.type),
+            usage: response.usage
+          });
+        }
+        return {
+          reply: reply || 'I’m sorry, I couldn’t generate a response just now. Could you please try again?',
+          resolvedModel,
+          usage: buildUsageSummary(response.usage, resolvedModel.modelId)
+        };
+      }
+
       const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(resolvedModel.modelId || resolvedModel.apiModelId, maxTokens);
       console.log('openai_token_param_debug', { modelId: resolvedModel.modelId, apiModelId: resolvedModel.apiModelId, tokenParamName });
       const response = await openai.chat.completions.create({
