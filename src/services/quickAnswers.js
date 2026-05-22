@@ -76,19 +76,29 @@ export async function createQuickAnswer({ businessId, question, answer, category
   const embedding = await generateQuickAnswerEmbedding(question, { businessId, action: 'create' });
 
   const { rows } = await pool.query(
-    `INSERT INTO quick_answers
-      (business_id, question, normalized_question, answer, category, priority, embedding, is_active)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::vector, TRUE)
-     ON CONFLICT (business_id, normalized_question)
-     DO UPDATE SET
-       question = EXCLUDED.question,
-       answer = EXCLUDED.answer,
-       category = EXCLUDED.category,
-       priority = EXCLUDED.priority,
-       embedding = EXCLUDED.embedding,
-       is_active = TRUE,
-       updated_at = NOW()
-     RETURNING *, (xmax = 0) AS inserted`,
+    `WITH updated AS (
+      UPDATE quick_answers
+      SET question = $2,
+          answer = $4,
+          category = $5,
+          priority = $6,
+          embedding = $7::vector,
+          is_active = TRUE,
+          updated_at = NOW()
+      WHERE business_id = $1
+        AND normalized_question = $3
+      RETURNING *, FALSE AS inserted
+    ), inserted AS (
+      INSERT INTO quick_answers
+        (business_id, question, normalized_question, answer, category, priority, embedding, is_active)
+      SELECT $1, $2, $3, $4, $5, $6, $7::vector, TRUE
+      WHERE NOT EXISTS (SELECT 1 FROM updated)
+      RETURNING *, TRUE AS inserted
+    )
+    SELECT * FROM updated
+    UNION ALL
+    SELECT * FROM inserted
+    LIMIT 1`,
     [businessId, question, normalizedQuestion, answer, category, priority, embedding ? JSON.stringify(embedding) : null],
   );
 
