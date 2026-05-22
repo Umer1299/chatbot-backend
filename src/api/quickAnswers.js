@@ -25,7 +25,8 @@ router.post('/', requireAuth, async (req, res) => {
     const { question, answer, category, priority } = req.body;
     if (!question || !answer) return res.status(400).json({ error: 'question and answer are required' });
     const quickAnswer = await createQuickAnswer({ businessId: req.business.businessId, question, answer, category, priority });
-    res.status(201).json({ quickAnswer });
+    const status = quickAnswer?.inserted ? 201 : 200;
+    res.status(status).json({ quickAnswer });
   } catch (error) {
     console.error('quick_answer_create_failed', { businessId: req.business.businessId, error: error.message });
     if (error instanceof QuickAnswerEmbeddingError) {
