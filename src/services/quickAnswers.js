@@ -77,9 +77,18 @@ export async function createQuickAnswer({ businessId, question, answer, category
 
   const { rows } = await pool.query(
     `INSERT INTO quick_answers
-      (business_id, question, normalized_question, answer, category, priority, embedding)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
-     RETURNING *`,
+      (business_id, question, normalized_question, answer, category, priority, embedding, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::vector, TRUE)
+     ON CONFLICT (business_id, normalized_question)
+     DO UPDATE SET
+       question = EXCLUDED.question,
+       answer = EXCLUDED.answer,
+       category = EXCLUDED.category,
+       priority = EXCLUDED.priority,
+       embedding = EXCLUDED.embedding,
+       is_active = TRUE,
+       updated_at = NOW()
+     RETURNING *, (xmax = 0) AS inserted`,
     [businessId, question, normalizedQuestion, answer, category, priority, embedding ? JSON.stringify(embedding) : null],
   );
 
@@ -87,6 +96,7 @@ export async function createQuickAnswer({ businessId, question, answer, category
     businessId,
     quickAnswerId: rows[0]?.id || null,
     hasEmbedding: Boolean(embedding),
+    inserted: Boolean(rows[0]?.inserted),
   });
 
   return rows[0] || null;
