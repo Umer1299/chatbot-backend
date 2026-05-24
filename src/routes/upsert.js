@@ -45,7 +45,9 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
         return res.status(400).json({ error: 'Text too short or low quality' });
       }
 
-      const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload');
+      const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload', {
+        sourceUrl: 'manual-upload',
+      });
       return res.json({
         success: true,
         chunksUpserted: result.inserted,
