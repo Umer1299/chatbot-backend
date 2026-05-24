@@ -10,6 +10,10 @@ import fs from 'fs/promises';
 
 const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '2');
 
+async function setJobStatus(jobId, payload) {
+  await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify(payload));
+}
+
 const worker = new Worker('file-processing', async (job) => {
   const { namespace, filePath, originalName, mimeType, jobId } = job.data;
   console.log(`Processing file ${originalName} for namespace ${namespace}, job ${jobId}`);
@@ -29,7 +33,7 @@ const worker = new Worker('file-processing', async (job) => {
     }
 
     if (newDocs.length === 0) {
-      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'completed', skipped: true }));
+      await setJobStatus(jobId, { status: 'completed', skipped: true, namespace });
       await fs.unlink(filePath).catch(() => {});
       return { skipped: true, message: 'All duplicates' };
     }
@@ -49,14 +53,14 @@ const worker = new Worker('file-processing', async (job) => {
 
     const fakePages = [{
       content: extractedText,
-      url: 'file-upload:' + (job.data.filename || 'unknown'),
-      title: job.data.filename || 'Uploaded file'
+      url: 'file-upload:' + (originalName || 'unknown'),
+      title: originalName || 'Uploaded file'
     }];
     const chunks = cleanAndChunkContent(fakePages).filter(shouldEmbedChunk);
     const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload');
 
     await job.updateProgress(100);
-    await redisClient.hset('job:' + jobId, {
+    await setJobStatus(jobId, {
       status: 'completed',
       chunksAdded: result.inserted,
       namespace
@@ -67,7 +71,11 @@ const worker = new Worker('file-processing', async (job) => {
     return { success: true, chunksUpserted: result.inserted };
   } catch (err) {
     console.error(`File worker error: ${err.message}`);
-    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: 'File processing failed. Please try again.' }));
+    await setJobStatus(jobId, {
+      status: 'failed',
+      error: 'File processing failed. Please try again.',
+      namespace
+    });
     await fs.unlink(filePath).catch(() => {});
     throw err;
   }
