@@ -33,6 +33,13 @@ app.listen(PORT, () => {
       startScrapeWorker();
       console.log('Scrape worker running');
 
+      if (process.env.DISABLE_FILE_WORKER !== 'true') {
+        await import('./workers/fileWorker.js');
+        console.log('File worker running');
+      } else {
+        console.log('File worker disabled via DISABLE_FILE_WORKER=true');
+      }
+
       startReminderJobs();
       console.log('Reminder jobs scheduled');
 
