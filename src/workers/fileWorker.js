@@ -57,7 +57,9 @@ const worker = new Worker('file-processing', async (job) => {
       title: originalName || 'Uploaded file'
     }];
     const chunks = cleanAndChunkContent(fakePages).filter(shouldEmbedChunk);
-    const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload');
+    const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload', {
+      sourceUrl: `file-upload:${originalName || 'unknown'}`,
+    });
 
     await job.updateProgress(100);
     await setJobStatus(jobId, {

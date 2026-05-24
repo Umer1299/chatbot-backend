@@ -19,7 +19,8 @@ async function clearRagCache(pattern, logLabel) {
   }
 }
 
-async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) {
+async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0, options = {}) {
+  const { sourceUrl = null } = options;
   let inserted = 0;
   let skipped = 0;
   const totalBatches = Math.ceil(chunks.length / BATCH_SIZE);
@@ -41,11 +42,11 @@ async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) 
 
       const result = await pool.query(
         `INSERT INTO knowledge_chunks
-          (business_id, content, embedding, content_hash, source_type, chunk_index, word_count)
-         VALUES ($1, $2, $3::vector, md5($2), $4, $5, $6)
+          (business_id, content, embedding, content_hash, source_url, source_type, chunk_index, word_count)
+         VALUES ($1, $2, $3::vector, md5($2), $4, $5, $6, $7)
          ON CONFLICT (business_id, content_hash) DO NOTHING
          RETURNING id`,
-        [businessId, chunk, JSON.stringify(embedding), sourceType, chunkIndex, wordCount],
+        [businessId, chunk, JSON.stringify(embedding), sourceUrl, sourceType, chunkIndex, wordCount],
       );
 
       if (result.rowCount > 0) {
@@ -125,7 +126,7 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
   }
 }
 
-export async function upsertSupplementalChunks(businessId, chunks, sourceType = 'owner_upload') {
+export async function upsertSupplementalChunks(businessId, chunks, sourceType = 'owner_upload', options = {}) {
   try {
     const existing = await pool.query(
       'SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1',
@@ -133,7 +134,7 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
     );
     const startIndex = existing.rows[0]?.total || 0;
 
-    const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, startIndex);
+    const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, startIndex, options);
     await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
 
     return { inserted, skipped };
