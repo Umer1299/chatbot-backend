@@ -7,6 +7,25 @@ const FALLBACK_PROMPTS = [
   'What are your business hours?',
 ];
 
+function normalizePromptItem(item) {
+  if (typeof item === 'string') return item.trim();
+  if (item && typeof item === 'object') {
+    const candidate = item.prompt || item.text || item.question || item.label || item.title;
+    return typeof candidate === 'string' ? candidate.trim() : '';
+  }
+  return '';
+}
+
+export function parseStarterPromptsResponse(parsed) {
+  if (!Array.isArray(parsed)) return FALLBACK_PROMPTS;
+  const prompts = parsed
+    .map(normalizePromptItem)
+    .filter(Boolean)
+    .slice(0, 3);
+
+  return prompts.length >= 3 ? prompts : FALLBACK_PROMPTS;
+}
+
 function buildBusinessSummary(businessInfo = {}, validation = {}) {
   return {
     industry: businessInfo.industry || 'unknown',
@@ -56,14 +75,7 @@ export async function generateStarterPrompts(businessInfo = {}, validation = {})
     const cleaned = String(response || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
-    if (!Array.isArray(parsed)) return FALLBACK_PROMPTS;
-
-    const prompts = parsed
-      .map((item) => String(item || '').trim())
-      .filter(Boolean)
-      .slice(0, 3);
-
-    return prompts.length ? prompts : FALLBACK_PROMPTS;
+    return parseStarterPromptsResponse(parsed);
   } catch (error) {
     console.error('STARTER_PROMPTS_GENERATION_ERROR:', error);
     return FALLBACK_PROMPTS;

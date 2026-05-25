@@ -9,16 +9,11 @@ import { detectIndustry } from '../agents/industryDetector.js';
 import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
 import { suggestAgents } from '../agents/agentSelector.js';
+import { extractBusinessNameFromPages } from './scrapeMetadata.js';
 
 function safePrimaryColorFromContent(text = '') {
   const match = text.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/);
   return match ? match[0] : '#1F6FEB';
-}
-
-function extractBusinessNameFromPages(pages = [], fallback = '') {
-  const title = pages.find((p) => p?.title)?.title || '';
-  const candidate = title.split('|')[0].split('-')[0].trim();
-  return candidate || fallback || 'Your Business';
 }
 
 function extractContactInfo(text = '') {
@@ -252,7 +247,11 @@ async function processScrapeJob(job) {
     );
     console.log(`[scrape:${traceJobId}] Chatbot content generation completed`);
     const contactInfo = extractContactInfo(combinedText);
-    const extractedBusinessName = extractBusinessNameFromPages(result.pages, businessInfo.businessName);
+    const extractedBusinessName = extractBusinessNameFromPages(result.pages, {
+      existingBusinessName: businessRow.business_name,
+      fallback: businessInfo.businessName,
+      domain: job.url,
+    });
     const brandExtracted = extractBrandData(result.pages, job.url);
     const logoUrl =
       result.pages.find((p) => /logo/i.test(p.url || ''))?.url ||
