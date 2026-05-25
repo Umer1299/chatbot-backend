@@ -10,24 +10,18 @@ import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 import {
-  deriveNameFromDomain,
-  extractBusinessNameFromPages,
-  isLikelySameBusinessName,
-} from './scrapeMetadata.js';
+  resolveBusinessName,
+  resolveLogo,
+  sanitizeContactInfo,
+  normalizeIndustry,
+  applyFinalConsistency,
+} from './metadataResolver.js';
 import { extractBrandData, normalizeIndustryFallback } from './scrapeHeuristics.js';
 
 function safePrimaryColorFromContent(text = '') {
   const match = text.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/);
   return match ? match[0] : '#1F6FEB';
 }
-
-function extractContactInfo(text = '') {
-  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
-  const phone = text.match(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?){2}\d{4}/)?.[0] || null;
-  return { email, phone };
-}
-
-
 
 export async function addScrapeJob(businessId, url, options = {}) {
   const isRefresh = Boolean(options.isRefresh);
@@ -188,12 +182,18 @@ async function processScrapeJob(job) {
       hasCriticalGaps: validation.hasCriticalGaps,
     });
 
+    const finalIndustry = normalizeIndustry({
+      detectedIndustry: analysisResult.industry,
+      confidence: analysisResult.confidence,
+      services: analysisResult.primaryServices || [],
+      text: modelInputText,
+    });
     const suggestedAgents = suggestAgents(
-      analysisResult.industry,
-      analysisResult,
+      finalIndustry,
+      { ...analysisResult, industry: finalIndustry },
       modelInputText,
     );
-    const defaultAgentIds = (suggestedAgents?.suggestedAgentIds?.length ? suggestedAgents.suggestedAgentIds : (analysisResult.industry === 'web_agency' ? ['discovery', 'budget_qualification', 'discovery_call', 'retainer_qualification'] : []));
+    const defaultAgentIds = (suggestedAgents?.suggestedAgentIds?.length ? suggestedAgents.suggestedAgentIds : (finalIndustry === 'web_agency' ? ['discovery', 'budget_qualification', 'discovery_call', 'retainer_qualification'] : []));
 
     await updateJobProgress(job.id, 'Generating chatbot content', 85, {
       status: 'generating',
@@ -209,7 +209,7 @@ async function processScrapeJob(job) {
     const businessRow = businessRows[0] || {};
 
     const businessInfo = {
-      industry: analysisResult.industry,
+      industry: finalIndustry,
       businessName: analysisResult.businessName || businessRow.business_name,
       primaryServices: analysisResult.primaryServices,
       location: analysisResult.location,
@@ -224,38 +224,29 @@ async function processScrapeJob(job) {
       validation,
     );
     console.log(`[scrape:${traceJobId}] Chatbot content generation completed`);
-    const contactInfo = extractContactInfo(combinedText);
-    const domainDerivedName = deriveNameFromDomain(job.url);
-    const prelimScrapedName = extractBusinessNameFromPages(result.pages, {
-      fallback: businessInfo.businessName,
+    const extractedEmail = combinedText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
+    const extractedPhone = combinedText.match(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?){2}\d{4}/)?.[0] || null;
+    const contactSafety = sanitizeContactInfo({ extractedEmail, extractedPhone, domain: job.url });
+    const extractedBusinessName = resolveBusinessName({
+      pages: result.pages,
       domain: job.url,
-    });
-    const safeExistingBusinessName = isLikelySameBusinessName(
-      businessRow.business_name,
-      domainDerivedName,
-      prelimScrapedName,
-    )
-      ? businessRow.business_name
-      : '';
-    const extractedBusinessName = extractBusinessNameFromPages(result.pages, {
-      existingBusinessName: safeExistingBusinessName,
-      fallback: businessInfo.businessName,
-      domain: job.url,
+      existingBusinessName: businessRow.business_name,
+      aiBusinessName: businessInfo.businessName,
+      systemPromptDraft: generatedContent.systemPrompt,
+      welcomeMessage: generatedContent.welcomeMessage,
     });
     const brandExtracted = extractBrandData(result.pages, job.url);
-    const logoUrl =
-      result.pages.find((p) => /logo/i.test(p.url || ''))?.url ||
-      `${job.url.replace(/\/+$/, '')}/favicon.ico`;
+    const logoUrl = resolveLogo({ pages: result.pages, domain: job.url, businessName: extractedBusinessName });
     const primaryColor = safePrimaryColorFromContent(combinedText);
     const missingInfo = [...(validation?.missing?.critical || []), ...(validation?.missing?.important || [])];
-    const enrichedResult = {
+    const preliminaryResult = {
       ...analysisResult,
       businessName: extractedBusinessName,
       services: analysisResult.primaryServices || [],
       targetCustomers: analysisResult.targetCustomers || [],
       businessTone: analysisResult.tone || 'professional and helpful',
       businessSummary: analysisResult.summary || `${extractedBusinessName} provides ${(analysisResult.primaryServices || []).join(', ') || 'services'}.`,
-      suggestedChatbotPurpose: `Convert visitors into qualified ${analysisResult.industry || 'business'} leads.`,
+      suggestedChatbotPurpose: `Convert visitors into qualified ${finalIndustry || 'business'} leads.`,
       websiteGaps: missingInfo,
       suggestedAgents: defaultAgentIds,
       systemPromptDraft: generatedContent.systemPrompt,
@@ -268,8 +259,16 @@ async function processScrapeJob(job) {
         secondary_color: brandExtracted.secondaryColor,
         fonts: brandExtracted.fonts,
       },
-      contactInfo,
+      contactInfo: contactSafety.verified,
+      rejectedContactInfo: contactSafety.rejected,
     };
+    const enrichedResult = applyFinalConsistency({
+      result: preliminaryResult,
+      welcomeMessage: generatedContent.welcomeMessage,
+      systemPromptDraft: generatedContent.systemPrompt,
+      businessName: extractedBusinessName,
+      services: analysisResult.primaryServices || [],
+    });
 
     await pool.query(
       `UPDATE scrape_jobs
@@ -289,14 +288,14 @@ async function processScrapeJob(job) {
        WHERE id = $1`,
       [
         job.id,
-        analysisResult.industry,
+        finalIndustry,
         validation.score,
         JSON.stringify(validation.missing),
         JSON.stringify(validation.autoGenerated),
         validation.hasCriticalGaps,
-        generatedContent.welcomeMessage,
+        enrichedResult.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
-        generatedContent.systemPrompt,
+        enrichedResult.systemPromptDraft,
         JSON.stringify(enrichedResult),
       ],
     );
@@ -327,16 +326,16 @@ async function processScrapeJob(job) {
          updated_at = NOW()`,
       [
         job.business_id,
-        analysisResult.industry,
-        JSON.stringify(analysisResult.primaryServices || []),
+        finalIndustry,
+        JSON.stringify(enrichedResult.services || []),
         analysisResult.location || null,
         analysisResult.confidence || null,
         validation.score,
         JSON.stringify(validation.missing),
         JSON.stringify(validation.autoGenerated),
         defaultAgentIds,
-        generatedContent.systemPrompt,
-        generatedContent.welcomeMessage,
+        enrichedResult.systemPromptDraft,
+        enrichedResult.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
       ],
     );
