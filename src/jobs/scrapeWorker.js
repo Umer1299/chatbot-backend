@@ -9,7 +9,11 @@ import { detectIndustry } from '../agents/industryDetector.js';
 import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
 import { suggestAgents } from '../agents/agentSelector.js';
-import { extractBusinessNameFromPages } from './scrapeMetadata.js';
+import {
+  deriveNameFromDomain,
+  extractBusinessNameFromPages,
+  isLikelySameBusinessName,
+} from './scrapeMetadata.js';
 import { extractBrandData, normalizeIndustryFallback } from './scrapeHeuristics.js';
 
 function safePrimaryColorFromContent(text = '') {
@@ -221,8 +225,20 @@ async function processScrapeJob(job) {
     );
     console.log(`[scrape:${traceJobId}] Chatbot content generation completed`);
     const contactInfo = extractContactInfo(combinedText);
+    const domainDerivedName = deriveNameFromDomain(job.url);
+    const prelimScrapedName = extractBusinessNameFromPages(result.pages, {
+      fallback: businessInfo.businessName,
+      domain: job.url,
+    });
+    const safeExistingBusinessName = isLikelySameBusinessName(
+      businessRow.business_name,
+      domainDerivedName,
+      prelimScrapedName,
+    )
+      ? businessRow.business_name
+      : '';
     const extractedBusinessName = extractBusinessNameFromPages(result.pages, {
-      existingBusinessName: businessRow.business_name,
+      existingBusinessName: safeExistingBusinessName,
       fallback: businessInfo.businessName,
       domain: job.url,
     });

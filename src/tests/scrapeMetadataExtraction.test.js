@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { parseStarterPromptsResponse } from '../agents/contentGenerator.js';
-import { extractBusinessNameFromPages } from '../jobs/scrapeMetadata.js';
+import {
+  deriveNameFromDomain,
+  extractBusinessNameFromPages,
+  isLikelySameBusinessName,
+} from '../jobs/scrapeMetadata.js';
 import { extractBrandData, normalizeIndustryFallback } from '../jobs/scrapeHeuristics.js';
 
 test('parseStarterPromptsResponse supports object and nested object prompt shapes', () => {
@@ -50,6 +54,44 @@ test('extractBusinessNameFromPages ignores generic Our Designs and uses og:site_
   assert.equal(
     extractBusinessNameFromPages(pages, { fallback: 'Our Designs', domain: 'https://ukchurches.example' }),
     'UK Churches',
+  );
+});
+
+test('isLikelySameBusinessName rejects cross-domain stale name collisions', () => {
+  assert.equal(
+    isLikelySameBusinessName('UKChurches', 'Mobius Group', 'Mobius Group'),
+    false,
+  );
+});
+
+test('isLikelySameBusinessName accepts matching variants for same business', () => {
+  assert.equal(
+    isLikelySameBusinessName('UKChurches', 'UK Churches', 'UK Churches'),
+    true,
+  );
+});
+
+test('cross-domain scrape should prefer current URL name over stale DB name', () => {
+  const pages = [
+    { url: 'https://mobiusgroup.co.uk/', title: 'Mobius Group', content: '' },
+    { url: 'https://mobiusgroup.co.uk/contact', title: 'Contact', content: '' },
+  ];
+  const domainName = deriveNameFromDomain('https://mobiusgroup.co.uk');
+  const prelimScrapedName = extractBusinessNameFromPages(pages, {
+    fallback: '',
+    domain: 'https://mobiusgroup.co.uk',
+  });
+  const safeExistingName = isLikelySameBusinessName('UKChurches', domainName, prelimScrapedName)
+    ? 'UKChurches'
+    : '';
+
+  assert.equal(
+    extractBusinessNameFromPages(pages, {
+      existingBusinessName: safeExistingName,
+      fallback: '',
+      domain: 'https://mobiusgroup.co.uk',
+    }),
+    'Mobius Group',
   );
 });
 
