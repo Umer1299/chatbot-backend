@@ -4,9 +4,12 @@ import assert from 'node:assert/strict';
 import { parseStarterPromptsResponse } from '../agents/contentGenerator.js';
 import {
   deriveNameFromDomain,
-  extractBusinessNameFromPages,
-  isLikelySameBusinessName,
-} from '../jobs/scrapeMetadata.js';
+  resolveBusinessName,
+  resolveLogo,
+  sanitizeContactInfo,
+  normalizeIndustry,
+  applyFinalConsistency,
+} from '../jobs/metadataResolver.js';
 import { extractBrandData, normalizeIndustryFallback } from '../jobs/scrapeHeuristics.js';
 
 test('parseStarterPromptsResponse supports object and nested object prompt shapes', () => {
@@ -33,116 +36,79 @@ test('parseStarterPromptsResponse fills missing prompts with contextual fallback
   ]);
 });
 
-test('extractBusinessNameFromPages derives UK Churches from domain', () => {
+test('resolveBusinessName derives UK Churches from domain', () => {
   const pages = [
     { url: 'https://ukchurches.co.uk/', title: 'Our Designs', content: '' },
     { url: 'https://ukchurches.co.uk/contact', title: 'Contact', content: '' },
   ];
 
   assert.equal(
-    extractBusinessNameFromPages(pages, { fallback: 'Our Designs', domain: 'https://ukchurches.co.uk' }),
+    resolveBusinessName({ pages, aiBusinessName: 'Our Designs', domain: 'https://ukchurches.co.uk' }),
     'UK Churches',
   );
 });
 
-test('extractBusinessNameFromPages derives Mobius Group from domain', () => {
+test('resolveBusinessName derives Mobius Group from domain', () => {
   const pages = [
     { url: 'https://mobiusgroup.co.uk/', title: 'Building, Renovation & Construction Services', content: '' },
   ];
 
   assert.equal(
-    extractBusinessNameFromPages(pages, { fallback: '', domain: 'https://mobiusgroup.co.uk' }),
+    resolveBusinessName({ pages, aiBusinessName: '', domain: 'https://mobiusgroup.co.uk' }),
     'Mobius Group',
   );
 });
 
-test('extractBusinessNameFromPages rejects generic marketing title as business name', () => {
+test('service heading rejected as business name', () => {
   const pages = [
     { url: 'https://mobiusgroup.co.uk/', title: 'Building, Renovation & Construction Services', content: '' },
   ];
 
   assert.equal(
-    extractBusinessNameFromPages(pages, { fallback: '', domain: 'https://mobiusgroup.co.uk' }),
+    resolveBusinessName({ pages, domain: 'https://mobiusgroup.co.uk' }),
     'Mobius Group',
   );
 });
 
-test('extractBusinessNameFromPages ignores generic Our Designs and uses og:site_name', () => {
+test('resolveBusinessName ignores generic title and uses og:site_name', () => {
   const pages = [
     { url: 'https://ukchurches.example/', title: 'Our Designs', content: 'og:site_name: UK Churches' },
     { url: 'https://ukchurches.example/contact', title: 'Contact', content: '' },
   ];
 
   assert.equal(
-    extractBusinessNameFromPages(pages, { fallback: 'Our Designs', domain: 'https://ukchurches.example' }),
+    resolveBusinessName({ pages, aiBusinessName: 'Our Designs', domain: 'https://ukchurches.example' }),
     'UK Churches',
   );
 });
 
-test('isLikelySameBusinessName rejects cross-domain stale name collisions', () => {
-  assert.equal(
-    isLikelySameBusinessName('UKChurches', 'Mobius Group', 'Mobius Group'),
-    false,
-  );
-});
-
-test('isLikelySameBusinessName accepts matching variants for same business', () => {
-  assert.equal(
-    isLikelySameBusinessName('UKChurches', 'UK Churches', 'UK Churches'),
-    true,
-  );
-});
-
-test('cross-domain scrape should prefer current URL name over stale DB name', () => {
+test('stale existing business name rejected when domain/content mismatch', () => {
   const pages = [
     { url: 'https://mobiusgroup.co.uk/', title: 'Mobius Group', content: '' },
     { url: 'https://mobiusgroup.co.uk/contact', title: 'Contact', content: '' },
   ];
-  const domainName = deriveNameFromDomain('https://mobiusgroup.co.uk');
-  const prelimScrapedName = extractBusinessNameFromPages(pages, {
-    fallback: '',
-    domain: 'https://mobiusgroup.co.uk',
-  });
-  const safeExistingName = isLikelySameBusinessName('UKChurches', domainName, prelimScrapedName)
-    ? 'UKChurches'
-    : '';
-
   assert.equal(
-    extractBusinessNameFromPages(pages, {
-      existingBusinessName: safeExistingName,
-      fallback: '',
-      domain: 'https://mobiusgroup.co.uk',
-    }),
-    'Mobius Group',
-  );
-});
-
-test('stale UKChurches existing name is not used for mobiusgroup.co.uk', () => {
-  const pages = [
-    { url: 'https://mobiusgroup.co.uk/', title: 'Building, Renovation & Construction Services', content: '' },
-  ];
-
-  assert.equal(
-    extractBusinessNameFromPages(pages, {
+    resolveBusinessName({
+      pages,
       existingBusinessName: 'UKChurches',
-      fallback: 'Mobius Group',
+      aiBusinessName: 'Mobius Group',
       domain: 'https://mobiusgroup.co.uk',
     }),
     'Mobius Group',
   );
 });
 
-test('normalizeIndustryFallback maps unknown website design businesses to web_agency', () => {
-  const result = normalizeIndustryFallback(
-    { industry: 'unknown', confidence: 0.35, primaryServices: ['Church branding'] },
-    'We offer website design services, ministry website solutions, and hosting',
-  );
-
-  assert.equal(result.industry, 'web_agency');
-  assert.equal(result.confidence >= 0.72, true);
+test('unknown industry corrected from services/text', () => {
+  const industry = normalizeIndustry({
+    detectedIndustry: 'unknown',
+    confidence: 0.2,
+    services: ['Church branding'],
+    text: 'We offer website design services and hosting',
+  });
+  assert.equal(industry, 'web_agency');
 });
 
-test('extractBrandData ignores random content images and falls back to favicon', () => {
+test('random person/content image rejected as logo', () => {
   const pages = [
     {
       url: 'https://ukchurches.co.uk/',
@@ -150,8 +116,28 @@ test('extractBrandData ignores random content images and falls back to favicon',
       content: '![Aaron-1a](https://ukchurches.co.uk/images/Aaron-1a-359x1024.jpg "Aaron-1a")',
     },
   ];
+  assert.equal(resolveLogo({ pages, domain: 'https://ukchurches.co.uk' }), 'https://ukchurches.co.uk/favicon.ico');
+});
 
-  const brand = extractBrandData(pages, 'https://ukchurches.co.uk');
-  assert.equal(brand.logoUrl, null);
-  assert.equal(brand.faviconUrl, 'https://ukchurches.co.uk/favicon.ico');
+test('placeholder phone rejected', () => {
+  const contact = sanitizeContactInfo({ extractedPhone: '1234567890', extractedEmail: 'hello@mobiusgroup.co.uk', domain: 'https://mobiusgroup.co.uk' });
+  assert.equal(contact.verified.phone, null);
+});
+
+test('placeholder/example email rejected', () => {
+  const contact = sanitizeContactInfo({ extractedPhone: '+1 212 555 1212', extractedEmail: 'test@example.com', domain: 'https://mobiusgroup.co.uk' });
+  assert.equal(contact.verified.email, null);
+});
+
+test('final consistency rewrites summary/system/welcome to same name', () => {
+  const consistent = applyFinalConsistency({
+    result: { businessName: 'Buildover', businessSummary: 'Infotec provides services.' },
+    welcomeMessage: 'Welcome to Infotec',
+    systemPromptDraft: 'You are assistant for Infotec',
+    businessName: 'Buildover',
+    services: ['construction'],
+  });
+  assert.equal(consistent.businessName, 'Buildover');
+  assert.match(consistent.welcomeMessage, /Buildover/);
+  assert.match(consistent.systemPromptDraft, /Buildover/);
 });
