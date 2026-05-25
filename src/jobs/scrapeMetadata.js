@@ -17,28 +17,51 @@ const GENERIC_PAGE_TITLES = new Set([
   'features',
 ]);
 
+const GENERIC_TITLE_PATTERNS = [
+  /\bour services?\b/i,
+  /\bwhat we do\b/i,
+  /\bfacilities management\b/i,
+  /\bconstruction services?\b/i,
+  /\bbuilding services?\b/i,
+  /\brenovation services?\b/i,
+  /\bfit[\s-]?out services?\b/i,
+  /\bbuilding[,/&\s]+renovation[,/&\s]+(?:&\s*)?construction services?\b/i,
+];
+
 function sanitizeTitle(title = '') {
   return String(title).split('|')[0].split('-')[0].trim();
 }
 
 function isGenericPageTitle(title = '') {
-  return GENERIC_PAGE_TITLES.has(String(title).toLowerCase().trim());
+  const normalizedTitle = String(title).toLowerCase().trim();
+  if (!normalizedTitle) return true;
+  if (GENERIC_PAGE_TITLES.has(normalizedTitle)) return true;
+  return GENERIC_TITLE_PATTERNS.some((pattern) => pattern.test(normalizedTitle));
+}
+
+function splitCompositeRootToken(root = '') {
+  const knownSuffixes = ['group', 'services', 'construction', 'churches'];
+  for (const suffix of knownSuffixes) {
+    const suffixPattern = new RegExp(`^([a-z0-9]+)(${suffix})$`, 'i');
+    const match = root.match(suffixPattern);
+    if (match) return `${match[1]} ${match[2]}`;
+  }
+  return root;
 }
 
 function deriveNameFromDomain(url = '') {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.replace(/^www\./i, '');
-    const root = host.split('.')[0] || '';
+    const root = splitCompositeRootToken(host.split('.')[0] || '');
     if (!root) return '';
-
-    if (/^ukchurches$/i.test(root)) return 'UK Churches';
 
     return root
       .replace(/[-_]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-      .replace(/\b\w/g, (m) => m.toUpperCase());
+      .replace(/\b\w/g, (m) => m.toUpperCase())
+      .replace(/\bUk\b/g, 'UK');
   } catch {
     return '';
   }
@@ -105,15 +128,21 @@ export function extractBusinessNameFromPages(pages = [], options = {}) {
     .find((title) => title && !isGenericPageTitle(title));
   const ogSiteName = allText.match(/og:site_name[^\n:]*[:\s]+([^\n]+)/i)?.[1]?.trim() || '';
   const jsonLdOrgName = allText.match(/"@type"\s*:\s*"(?:Organization|LocalBusiness)"[\s\S]*?"name"\s*:\s*"([^"]+)"/i)?.[1]?.trim() || '';
+  const domainName = deriveNameFromDomain(domain || homePage?.url || '');
+  const fallbackName = !isGenericPageTitle(fallback) ? fallback : '';
+  const safeExistingName = !isGenericPageTitle(existingBusinessName)
+    && isLikelySameBusinessName(existingBusinessName, domainName, fallbackName || homePageTitle || firstValidTitle)
+    ? existingBusinessName
+    : '';
 
   const candidates = [
-    !isGenericPageTitle(existingBusinessName) ? existingBusinessName : '',
+    safeExistingName,
     ogSiteName,
     jsonLdOrgName,
+    domainName,
+    fallbackName,
     !isGenericPageTitle(homePageTitle) ? homePageTitle : '',
-    !isGenericPageTitle(fallback) ? fallback : '',
     firstValidTitle,
-    deriveNameFromDomain(domain || homePage?.url || ''),
   ].map((value) => String(value || '').trim()).filter(Boolean);
 
   return candidates[0] || 'Your Business';

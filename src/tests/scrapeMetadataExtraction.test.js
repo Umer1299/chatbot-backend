@@ -45,6 +45,28 @@ test('extractBusinessNameFromPages derives UK Churches from domain', () => {
   );
 });
 
+test('extractBusinessNameFromPages derives Mobius Group from domain', () => {
+  const pages = [
+    { url: 'https://mobiusgroup.co.uk/', title: 'Building, Renovation & Construction Services', content: '' },
+  ];
+
+  assert.equal(
+    extractBusinessNameFromPages(pages, { fallback: '', domain: 'https://mobiusgroup.co.uk' }),
+    'Mobius Group',
+  );
+});
+
+test('extractBusinessNameFromPages rejects generic marketing title as business name', () => {
+  const pages = [
+    { url: 'https://mobiusgroup.co.uk/', title: 'Building, Renovation & Construction Services', content: '' },
+  ];
+
+  assert.equal(
+    extractBusinessNameFromPages(pages, { fallback: '', domain: 'https://mobiusgroup.co.uk' }),
+    'Mobius Group',
+  );
+});
+
 test('extractBusinessNameFromPages ignores generic Our Designs and uses og:site_name', () => {
   const pages = [
     { url: 'https://ukchurches.example/', title: 'Our Designs', content: 'og:site_name: UK Churches' },
@@ -89,6 +111,21 @@ test('cross-domain scrape should prefer current URL name over stale DB name', ()
     extractBusinessNameFromPages(pages, {
       existingBusinessName: safeExistingName,
       fallback: '',
+      domain: 'https://mobiusgroup.co.uk',
+    }),
+    'Mobius Group',
+  );
+});
+
+test('stale UKChurches existing name is not used for mobiusgroup.co.uk', () => {
+  const pages = [
+    { url: 'https://mobiusgroup.co.uk/', title: 'Building, Renovation & Construction Services', content: '' },
+  ];
+
+  assert.equal(
+    extractBusinessNameFromPages(pages, {
+      existingBusinessName: 'UKChurches',
+      fallback: 'Mobius Group',
       domain: 'https://mobiusgroup.co.uk',
     }),
     'Mobius Group',
