@@ -10,6 +10,7 @@ import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 import { extractBusinessNameFromPages } from './scrapeMetadata.js';
+import { extractBrandData, normalizeIndustryFallback } from './scrapeHeuristics.js';
 
 function safePrimaryColorFromContent(text = '') {
   const match = text.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/);
@@ -23,36 +24,6 @@ function extractContactInfo(text = '') {
 }
 
 
-function extractBrandData(pages = [], baseUrl = '') {
-  const allText = pages.map((p) => `${p.title || ''}
-${p.content || ''}`).join('\n');
-  const firstPage = pages[0] || {};
-  const titleCandidate = (firstPage.title || '').split('|')[0].split('-')[0].trim();
-  const orgMatch = allText.match(/organization\"?\s*:\s*\"?([^\"\n]+)/i);
-  const ogSiteName = allText.match(/og:site_name[^\n:]*[:\s]+([^\n]+)/i);
-  const headerMatch = allText.match(/^#\s+(.{2,80})/m);
-  const businessName = titleCandidate || orgMatch?.[1]?.trim() || ogSiteName?.[1]?.trim() || headerMatch?.[1]?.trim() || 'Your Business';
-
-  const imageMatches = [...allText.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map((m) => m[1]);
-  const logoUrl = imageMatches.find((u) => /logo|brand|header/i.test(u)) || imageMatches[0] || null;
-  const normalizedBase = baseUrl.replace(/\/+$/, '');
-  const faviconUrl = `${normalizedBase}/favicon.ico`;
-
-  const colorMatches = [...new Set((allText.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/g) || []).map((c) => c.toUpperCase()))];
-  const primaryColor = colorMatches[0] || '#1F6FEB';
-  const secondaryColor = colorMatches[1] || '#111827';
-
-  const fontMatches = [...new Set((allText.match(/font-family\s*:\s*([^;\n]+)/gi) || []).map((f) => f.split(':')[1].trim().replace(/["']/g, '')))].slice(0, 5);
-
-  return {
-    businessName,
-    logoUrl,
-    faviconUrl,
-    primaryColor,
-    secondaryColor,
-    fonts: fontMatches,
-  };
-}
 
 export async function addScrapeJob(businessId, url, options = {}) {
   const isRefresh = Boolean(options.isRefresh);
@@ -122,6 +93,8 @@ async function updateJobProgress(jobId, step, percent, extras = {}) {
   }
 }
 
+
+
 async function processScrapeJob(job) {
   const traceJobId = `job-${job.id}`;
   try {
@@ -185,7 +158,8 @@ async function processScrapeJob(job) {
 
     const combinedText = filtered.join(' ');
     const modelInputText = combinedText.substring(0, 7000);
-    const analysisResult = await detectIndustry(modelInputText);
+    const detectedAnalysis = await detectIndustry(modelInputText);
+    const analysisResult = normalizeIndustryFallback(detectedAnalysis, modelInputText);
     console.log(`[scrape:${traceJobId}] Industry detection completed`, { industry: analysisResult.industry });
 
     await pool.query(
@@ -215,7 +189,7 @@ async function processScrapeJob(job) {
       analysisResult,
       modelInputText,
     );
-    const defaultAgentIds = suggestedAgents?.suggestedAgentIds || [];
+    const defaultAgentIds = (suggestedAgents?.suggestedAgentIds?.length ? suggestedAgents.suggestedAgentIds : (analysisResult.industry === 'web_agency' ? ['discovery', 'budget_qualification', 'discovery_call', 'retainer_qualification'] : []));
 
     await updateJobProgress(job.id, 'Generating chatbot content', 85, {
       status: 'generating',
@@ -272,7 +246,7 @@ async function processScrapeJob(job) {
       welcomeMessage: generatedContent.welcomeMessage,
       starterPrompts: generatedContent.starterPrompts,
       brand: {
-        logo_url: brandExtracted.logoUrl || logoUrl,
+        logo_url: brandExtracted.logoUrl || brandExtracted.faviconUrl || logoUrl,
         favicon_url: brandExtracted.faviconUrl,
         primary_color: brandExtracted.primaryColor || primaryColor,
         secondary_color: brandExtracted.secondaryColor,
