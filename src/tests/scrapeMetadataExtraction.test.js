@@ -7,6 +7,7 @@ import {
   resolveBusinessName,
   resolveLogo,
   sanitizeContactInfo,
+  validatePhoneCandidate,
   normalizeIndustry,
   applyFinalConsistency,
 } from '../jobs/metadataResolver.js';
@@ -119,9 +120,41 @@ test('random person/content image rejected as logo', () => {
   assert.equal(resolveLogo({ pages, domain: 'https://ukchurches.co.uk' }), 'https://ukchurches.co.uk/favicon.ico');
 });
 
+test('deborah full-length image rejected as logo and favicon used', () => {
+  const pages = [
+    {
+      url: 'https://ukchurches.co.uk/',
+      title: 'UK Churches',
+      content: '![Deborah full length](https://ukchurches.co.uk/images/Deborah-full-length-1-285x1024.jpeg "Team photo")',
+    },
+  ];
+  assert.equal(resolveLogo({ pages, domain: 'https://ukchurches.co.uk' }), 'https://ukchurches.co.uk/favicon.ico');
+});
+
 test('placeholder phone rejected', () => {
   const contact = sanitizeContactInfo({ extractedPhone: '1234567890', extractedEmail: 'hello@mobiusgroup.co.uk', domain: 'https://mobiusgroup.co.uk' });
   assert.equal(contact.verified.phone, null);
+  assert.equal(contact.rejected.phone, '1234567890');
+});
+
+test('mobius-style random number is not verified', () => {
+  const contact = sanitizeContactInfo({ extractedPhone: '5770906827', extractedEmail: 'hello@mobiusgroup.co.uk', domain: 'https://mobiusgroup.co.uk' });
+  assert.equal(contact.verified.phone, null);
+  assert.equal(contact.unverified.phone, '5770906827');
+});
+
+test('ukchurches number without strong context is not verified', () => {
+  const check = validatePhoneCandidate('17624449699', 'homepage body text', { isUkSite: true });
+  assert.equal(check.verified, false);
+});
+
+test('auto-generated UK placeholder numbers remain unverified', () => {
+  const c1 = sanitizeContactInfo({ extractedPhone: '+44 20 7946 0958', extractedEmail: 'hello@mobiusgroup.co.uk', domain: 'https://mobiusgroup.co.uk' });
+  const c2 = sanitizeContactInfo({ extractedPhone: '+44 (0)1234 567890', extractedEmail: 'hello@mobiusgroup.co.uk', domain: 'https://mobiusgroup.co.uk' });
+  assert.equal(c1.verified.phone, null);
+  assert.equal(c2.verified.phone, null);
+  assert.equal(c1.unverified.phone, '+44 20 7946 0958');
+  assert.equal(c2.rejected.phone, '+44 (0)1234 567890');
 });
 
 test('placeholder/example email rejected', () => {

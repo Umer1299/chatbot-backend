@@ -75,28 +75,61 @@ export function resolveBusinessName({ pages = [], domain = '', existingBusinessN
 
 export function resolveLogo({ pages = [], domain = '' }) {
   const text = pages.map((p) => p?.content || '').join('\n');
+  const allowIndicators = /(logo|brand|site-logo|header-logo|footer-logo|navbar-logo)/i;
+  const rejectIndicators = /(full-length|portrait|headshot|person|people|team|staff|profile|gallery|testimonial|img_|photo|jpeg|jpg)/i;
+  const isSafeLogo = (parts = '') => {
+    const full = String(parts || '').toLowerCase();
+    if (!allowIndicators.test(full)) return false;
+    return !rejectIndicators.test(full);
+  };
   const schemaLogo = text.match(/"logo"\s*:\s*"(https?:[^"\s]+)"/i)?.[1] || null;
-  if (schemaLogo) return schemaLogo;
+  if (schemaLogo && isSafeLogo(schemaLogo)) return schemaLogo;
   const mdImages = [...text.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)(?:\s+"([^"]*)")?\)/gi)];
   for (const m of mdImages) {
-    const url = m[1] || ''; const title = (m[2] || '').toLowerCase(); const full = `${url} ${title}`.toLowerCase();
-    if (/(logo|brand|navbar|header|footer)/i.test(full) && !/(gallery|hero|banner|portrait|person|team|staff|testimonial|img_|photo|full-length)/i.test(full)) return url;
+    const url = m[1] || '';
+    const alt = (m[0].match(/^!\[([^\]]*)\]/)?.[1] || '').toLowerCase();
+    const title = (m[2] || '').toLowerCase();
+    if (isSafeLogo(`${url} ${alt} ${title}`)) return url;
   }
   try { const origin = new URL(domain || pages[0]?.url || '').origin; return `${origin}/favicon.ico`; } catch { return null; }
 }
 
+export function validatePhoneCandidate(phone, contextText = '', { fromTelLink = false, isUkSite = true } = {}) {
+  const raw = String(phone || '').trim();
+  if (!raw) return { verified: false, reason: 'empty' };
+  const digits = raw.replace(/\D/g, '');
+  const normalized = raw.replace(/\s+/g, ' ');
+  const contactContext = /\b(contact|call|phone|telephone|tel|reach|speak|office|enquiries|enquiry|support|helpdesk|customer\s*service)\b/i.test(String(contextText || ''));
+  const inTelLink = fromTelLink || /\btel:/i.test(String(contextText || ''));
+
+  if (digits.length < 10 || digits.length > 13) return { verified: false, reason: 'length' };
+  if (/^(\d)\1{9,}$/.test(digits)) return { verified: false, reason: 'repeated' };
+  if (/0123456789|1234567890/.test(digits)) return { verified: false, reason: 'sequential' };
+  if (/\+44\s*\(0\)1234\s*567890/i.test(normalized)) return { verified: false, reason: 'placeholder' };
+
+  const ukFormat = /^(?:\+44\s?\d{9,10}|0(?:1\d{9}|2\d{9}|3\d{9}|7\d{9}|20\s?\d{4}\s?\d{4}))$/.test(normalized.replace(/[().-]/g, ''));
+  const suspiciousStart = !/^(?:\+44|0(?:1|2|3|7))/.test(digits);
+
+  if (isUkSite && !ukFormat) return { verified: false, reason: 'uk_format' };
+  if (suspiciousStart && !inTelLink) return { verified: false, reason: 'prefix' };
+  if (!contactContext && !inTelLink) return { verified: false, reason: 'no_context' };
+
+  return { verified: true, reason: null };
+}
+
 export function sanitizeContactInfo({ extractedEmail = null, extractedPhone = null, domain = '' }) {
   const rejected = { email: null, phone: null };
+  const unverified = { email: null, phone: null };
   let email = extractedEmail;
   let phone = extractedPhone;
   const placeholderEmail = /^(test|info|demo|sample|noreply)@(?:example\.com|yourchurch\.com)/i.test(email || '') || /(demo|sample|noreply)@/i.test(email || '');
   if (placeholderEmail) { rejected.email = email; email = null; }
-  const phoneDigits = String(phone || '').replace(/\D/g, '');
-  const badPhone = ['12345678910', '1234567890', '01234567890', '0000000000'].includes(phoneDigits)
-    || /^(\d)\1{9,}$/.test(phoneDigits)
-    || '0123456789'.includes(phoneDigits)
-    || /\+44\s*\(0\)1234\s*567890/.test(String(phone || ''));
-  if (badPhone) { rejected.phone = phone; phone = null; }
+  const phoneCheck = validatePhoneCandidate(phone, String(phone || ''), { isUkSite: /\.uk\b/i.test(domain) || /\+44/.test(String(phone || '')) });
+  if (!phoneCheck.verified && phone) {
+    if (['placeholder', 'repeated', 'sequential', 'length'].includes(phoneCheck.reason)) rejected.phone = phone;
+    else unverified.phone = phone;
+    phone = null;
+  }
 
   if (email) {
     try {
@@ -108,7 +141,7 @@ export function sanitizeContactInfo({ extractedEmail = null, extractedPhone = nu
       }
     } catch { /* ignore */ }
   }
-  return { verified: { email, phone }, rejected };
+  return { verified: { email, phone }, rejected, unverified };
 }
 
 export function normalizeIndustry({ detectedIndustry = 'unknown', confidence = 0, services = [], text = '' }) {
