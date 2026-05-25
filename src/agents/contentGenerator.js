@@ -7,23 +7,61 @@ const FALLBACK_PROMPTS = [
   'What are your business hours?',
 ];
 
-function normalizePromptItem(item) {
-  if (typeof item === 'string') return item.trim();
-  if (item && typeof item === 'object') {
-    const candidate = item.prompt || item.text || item.question || item.label || item.title;
-    return typeof candidate === 'string' ? candidate.trim() : '';
+const PROMPT_KEYS = ['prompt', 'text', 'question', 'label', 'title', 'content', 'value', 'message'];
+
+function contextualFallbackPrompts(businessInfo = {}) {
+  const services = Array.isArray(businessInfo.primaryServices)
+    ? businessInfo.primaryServices.filter(Boolean).map((value) => String(value).trim())
+    : [];
+  const industry = String(businessInfo.industry || '').toLowerCase();
+
+  const servicePrompt = services[0]
+    ? `Can you tell me more about your ${services[0]} services?`
+    : 'What services do you offer?';
+
+  if (industry === 'web_agency' || /website|web design|branding|hosting|digital/.test(services.join(' ').toLowerCase())) {
+    return [
+      servicePrompt,
+      'Do you build church websites or ministry-focused websites?',
+      'What are your website design package options and timelines?',
+    ];
   }
-  return '';
+
+  return [servicePrompt, ...FALLBACK_PROMPTS.slice(1)];
 }
 
-export function parseStarterPromptsResponse(parsed) {
-  if (!Array.isArray(parsed)) return FALLBACK_PROMPTS;
-  const prompts = parsed
-    .map(normalizePromptItem)
-    .filter(Boolean)
-    .slice(0, 3);
+function normalizePromptItem(item) {
+  if (typeof item === 'string') return [item.trim()];
+  if (Array.isArray(item)) return item.flatMap((entry) => normalizePromptItem(entry));
+  if (!item || typeof item !== 'object') return [];
 
-  return prompts.length >= 3 ? prompts : FALLBACK_PROMPTS;
+  for (const key of PROMPT_KEYS) {
+    const value = item[key];
+    if (typeof value === 'string') return [value.trim()];
+    if (Array.isArray(value)) return value.flatMap((entry) => normalizePromptItem(entry));
+    if (value && typeof value === 'object') return normalizePromptItem(value);
+  }
+
+  return [];
+}
+
+export function parseStarterPromptsResponse(parsed, businessInfo = {}) {
+  if (!Array.isArray(parsed)) return contextualFallbackPrompts(businessInfo);
+
+  const prompts = parsed
+    .flatMap((item) => normalizePromptItem(item))
+    .map((prompt) => String(prompt || '').trim())
+    .filter((prompt) => prompt && prompt !== '[object Object]');
+
+  const unique = [...new Set(prompts)];
+  const fallback = contextualFallbackPrompts(businessInfo);
+  while (unique.length < 3) {
+    const next = fallback.find((item) => !unique.includes(item));
+    if (!next) break;
+    unique.push(next);
+  }
+
+  return unique.slice(0, 3);
 }
 
 function buildBusinessSummary(businessInfo = {}, validation = {}) {
@@ -75,10 +113,10 @@ export async function generateStarterPrompts(businessInfo = {}, validation = {})
     const cleaned = String(response || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
-    return parseStarterPromptsResponse(parsed);
+    return parseStarterPromptsResponse(parsed, businessInfo);
   } catch (error) {
     console.error('STARTER_PROMPTS_GENERATION_ERROR:', error);
-    return FALLBACK_PROMPTS;
+    return contextualFallbackPrompts(businessInfo);
   }
 }
 
@@ -105,7 +143,7 @@ export async function generateChatbotContent(
     Array.isArray(selectedAgentIds) && selectedAgentIds.length
       ? `Enabled specialist agents: ${selectedAgentIds.join(', ')}.`
       : '',
-    availabilitySlots ? `Availability slots configured: yes.` : 'Availability slots configured: no.',
+    availabilitySlots ? 'Availability slots configured: yes.' : 'Availability slots configured: no.',
     'Be accurate, concise, and ask clarifying questions when needed.',
   ]
     .filter(Boolean)
