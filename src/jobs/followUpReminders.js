@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import pool from '../db/pool.js';
-import { sendFollowUpReminder, sendMonthlyReport } from '../services/emailService.js';
+import { sendFollowUpReminder, sendLeadAlert, sendMonthlyReport } from '../services/emailService.js';
 import { generateWeeklyReport } from '../services/reportService.js';
 import { redisClient } from '../services/redis.js';
 
@@ -32,14 +32,13 @@ export function startReminderJobs() {
   console.log('Reminder cron jobs started');
 
   cron.schedule('0 * * * *', () =>
-    withDistributedLock('hot-lead-reminder', 3500, async () => {
+    withDistributedLock('lead-reminder', 3500, async () => {
     try {
       const { rows: leads } = await pool.query(
         `SELECT l.*, b.escalation_email, b.owner_email, b.business_name
          FROM leads l
          JOIN businesses b ON l.business_id = b.id
-         WHERE l.lead_score = 'hot'
-           AND l.status = 'new'
+         WHERE l.status = 'new'
            AND l.created_at < NOW() - INTERVAL '2 hours'
            AND l.hot_lead_reminder_sent = false
            AND b.active = true`,
@@ -57,10 +56,10 @@ export function startReminderJobs() {
           [lead.id],
         );
 
-        console.log(`Hot lead reminder sent for lead ${lead.id}`);
+        console.log(`Lead reminder sent for ${lead.lead_score || 'unknown'} lead ${lead.id}`);
       }
     } catch (error) {
-      console.error('HOT_LEAD_REMINDER_ERROR:', error);
+      console.error('LEAD_REMINDER_ERROR:', error);
     }
     })
   );
@@ -123,13 +122,14 @@ export function startReminderJobs() {
 
         const partialData = session.collected_data || {};
         if (partialData.contact_name || partialData.phone || partialData.contact_phone || partialData.contact_email || partialData.email) {
-          await pool.query(
+          const { rows: insertedLeads } = await pool.query(
             `INSERT INTO leads
               (business_id, session_id, full_name, phone, email,
                lead_score, industry, industry_data, ai_summary,
                project_details, status, source)
              VALUES ($1, $2, $3, $4, $5, 'cold', $6, $7, $8, $9, 'new', 'abandoned_session')
-             ON CONFLICT DO NOTHING`,
+             ON CONFLICT DO NOTHING
+             RETURNING *`,
             [
               session.business_id,
               session.id,
@@ -142,6 +142,11 @@ export function startReminderJobs() {
               'Incomplete inquiry',
             ],
           );
+
+          const recoveredLead = insertedLeads[0];
+          if (recoveredLead) {
+            await sendLeadAlert(session, recoveredLead);
+          }
 
           console.log('Recovered partial lead from abandoned session');
         }
