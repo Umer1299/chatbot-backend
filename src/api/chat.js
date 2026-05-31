@@ -22,6 +22,7 @@ import { buildBookingReply, detectBookingSignals } from '../services/bookingFlow
 import { detectMessageIntent, buildSimpleReply } from '../services/intentDetection.js';
 import { tryQuickAnswer } from '../services/quickAnswers.js';
 import { getOpenAITokenLimitParam } from '../services/openaiTokenLimitParam.js';
+import { checkIfUnanswered, detectIntentCategory } from '../services/conversationAnalytics.js';
 
 const router = express.Router();
 const getAnthropicClient = () => process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
@@ -300,31 +301,6 @@ async function saveLead(config, sessionId, leadData, namespace) {
     return { status: 'failed', capturedFields: [] };
   }
 }
-
-// ── Analytics helpers ──
-function detectIntentCategory(text) {
-  const lower = text.toLowerCase();
-  if (lower.match(/\b(price|cost|how much|budget|quote|fee|discount)\b/)) return 'pricing';
-  if (lower.match(/\b(book|schedule|appointment|calendar|reserve|availability)\b/)) return 'booking';
-  if (lower.match(/\b(service|offer|provide|we do|can you|cabinet|floor|paint|install|repair|renovate)\b/)) return 'services';
-  if (lower.match(/\b(where|location|address|area|city|near|serve)\b/)) return 'location';
-  if (lower.match(/\b(help|support|problem|issue|not working|how to)\b/)) return 'support';
-  if (lower.match(/\b(angry|bad|terrible|refund|complain|unhappy|want to speak)\b/)) return 'complaint';
-  return 'unknown';
-}
-
-function checkIfUnanswered(aiReply, contextUsed) {
-  const lower = aiReply.toLowerCase();
-  const short = aiReply.length < 20;
-  const noContext = !contextUsed || contextUsed.length === 0;
-  if (lower.includes("i don't know") || lower.includes("i'm not sure") ||
-      lower.includes("i don't have that information") || lower.includes('please contact')) {
-    return true;
-  }
-  if (short && noContext) return true;
-  return false;
-}
-
 
 router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const isStreaming = req.query.stream === 'true';
