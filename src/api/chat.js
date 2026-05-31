@@ -536,6 +536,73 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const selectedAgents = Array.isArray(config.selected_agents) ? config.selected_agents : [];
   summary.selectedAgents = selectedAgents;
 
+  const saveConversationTurn = async (replyText, options = {}) => {
+    const {
+      modelUsed = null,
+      isUnanswered = false,
+      fallbackUsed = false,
+      updatePhase = false,
+      allowLeadParsing = false,
+    } = options;
+    const fullResponse = String(replyText || '');
+    const tasks = [];
+    const intentCategory = detectIntentCategory(message);
+    const userMsgLen = message.length;
+    const aiRespLen = fullResponse.length;
+
+    tasks.push(
+      pool.query(
+        `INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,intent_category,is_unanswered,fallback_used,user_message_length,ai_response_length,created_at)
+         VALUES ($1,$2,'user',$3,$4,null,$5,false,$6,$7,null,NOW())`,
+        [sessionId, config.business_id, message, session?.current_phase || 1, intentCategory, fallbackUsed, userMsgLen]
+      ),
+      pool.query(
+        `INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,intent_category,is_unanswered,fallback_used,user_message_length,ai_response_length,created_at)
+         VALUES ($1,$2,'assistant',$3,$4,$5,null,$6,$7,null,$8,NOW())`,
+        [sessionId, config.business_id, fullResponse, session?.current_phase || 1, modelUsed, isUnanswered, fallbackUsed, aiRespLen]
+      )
+    );
+
+    tasks.push((async () => {
+      if (updatePhase) {
+        const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/);
+        if (phaseMatch) {
+          await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]);
+          return;
+        }
+      }
+      await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]);
+    })());
+
+    if (updatePhase) {
+      tasks.push((async () => {
+        if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) {
+          await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]);
+          sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message));
+        }
+      })());
+    }
+
+    if (allowLeadParsing) {
+      tasks.push((async () => {
+        const parsedLead = parseLeadDataFromResponse(fullResponse);
+        const leadData = normalizeLeadData(parsedLead, message);
+        if (leadData && (leadData.email || leadData.phone || leadData.name)) {
+          const leadResult = await saveLead(config, sessionId, leadData, req.namespace);
+          summary.leadDataDetected = true;
+          summary.leadCaptureStatus = leadResult.status;
+          summary.capturedFields = Array.from(new Set([...(summary.capturedFields || []), ...leadResult.capturedFields]));
+        }
+      })());
+    }
+
+    await Promise.allSettled(tasks);
+  };
+
+  const persistConversationTurn = (replyText, options = {}) => {
+    saveConversationTurn(replyText, options).catch((e) => perf.error('process_response_error', e));
+  };
+
   const bookingSignals = detectBookingSignals(message);
   summary.bookingIntentDetected = bookingSignals.bookingIntentDetected;
   summary.preferredTimeDetected = bookingSignals.preferredTimeDetected;
@@ -556,8 +623,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     summary.status = 'success';
     const resolvedModel = { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' };
     const usage = { ...ZERO_USAGE };
-    return res.json({
-      reply: bookingReply?.reply || 'Absolutely — we would be happy to help arrange a call.',
+    const reply = bookingReply?.reply || 'Absolutely — we would be happy to help arrange a call.';
+    res.json({
+      reply,
       source: bookingReply?.source || 'booking_flow',
       bookingIntentDetected: true,
       calendlyLinkShown: Boolean(bookingReply?.calendlyLinkShown),
@@ -567,6 +635,8 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       agentsUsed: selectedAgents,
       usage
     });
+    persistConversationTurn(reply, { modelUsed: resolvedModel.modelId });
+    return;
   }
 
 
@@ -642,6 +712,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       } else {
         res.json(payload);
       }
+      persistConversationTurn(quick.answer);
       return;
     }
     if (quick.source === 'quick_answer_skipped') {
@@ -681,7 +752,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const resolvedModel = { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' };
     const usage = { ...ZERO_USAGE };
     perf.log('selectedRoute', { selectedRoute: 'saved_simple_reply' });
-    return res.json({ reply: quickReply, source: 'saved_simple_reply', resolvedModel, agentsUsed: selectedAgents, usage });
+    res.json({ reply: quickReply, source: 'saved_simple_reply', resolvedModel, agentsUsed: selectedAgents, usage });
+    persistConversationTurn(quickReply, { modelUsed: resolvedModel.modelId });
+    return;
   }
 
   // SECTION 7: RAG context retrieval
@@ -1041,30 +1114,17 @@ function cleanAssistantResponse(text = '') {
 
   // SECTION 11: Save async
   const processResponse = async (fullResponse, result) => {
-    const tasks = [];
-    // Analytics fields (lightweight, fire-and-forget)
-    const intentCategory = detectIntentCategory(message);
     const isUnanswered = checkIfUnanswered(fullResponse, contextText);
-    const fallbackUsed = result.resolvedModel.wasDowngraded || (selectedAgents.length === 0 && config.system_prompt);
-    const userMsgLen = message.length;
-    const aiRespLen = fullResponse.length;
+    const fallbackUsed = Boolean(result?.resolvedModel?.wasDowngraded || (selectedAgents.length === 0 && config.system_prompt));
+    const modelUsed = result?.resolvedModel?.apiModelId || result?.resolvedModel?.modelId || null;
 
-    tasks.push(
-      pool.query(
-        `INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,intent_category,is_unanswered,fallback_used,user_message_length,ai_response_length,created_at)
-         VALUES ($1,$2,'user',$3,$4,null,$5,false,$6,$7,null,NOW())`,
-        [sessionId, config.business_id, message, session?.current_phase || 1, intentCategory, fallbackUsed, userMsgLen]
-      ),
-      pool.query(
-        `INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,intent_category,is_unanswered,fallback_used,user_message_length,ai_response_length,created_at)
-         VALUES ($1,$2,'assistant',$3,$4,$5,null,$6,$7,null,$8,NOW())`,
-        [sessionId, config.business_id, fullResponse, session?.current_phase || 1, result.resolvedModel.apiModelId, isUnanswered, fallbackUsed, aiRespLen]
-      )
-    );
-    tasks.push((async () => { const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/); if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]); })());
-    tasks.push((async () => { if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); } })());
-    tasks.push((async () => { const parsedLead = parseLeadDataFromResponse(fullResponse); const leadData = normalizeLeadData(parsedLead, message); if (leadData && (leadData.email || leadData.phone || leadData.name)) { const leadResult = await saveLead(config, sessionId, leadData, req.namespace); summary.leadDataDetected = true; summary.leadCaptureStatus = leadResult.status; summary.capturedFields = Array.from(new Set([...(summary.capturedFields || []), ...leadResult.capturedFields])); } })());
-    await Promise.allSettled(tasks);
+    await saveConversationTurn(fullResponse, {
+      modelUsed,
+      isUnanswered,
+      fallbackUsed,
+      updatePhase: true,
+      allowLeadParsing: true,
+    });
   };
 
   // SECTION 10: Stream/send response
@@ -1132,7 +1192,9 @@ function cleanAssistantResponse(text = '') {
         summary.status = 'success';
         const cachedPayload = { reply: cachedReply, source: 'redis_cached_ai_reply', resolvedModel: { modelId: config.selected_model || process.env.DEFAULT_CHAT_MODEL || 'gpt-4o-mini' }, agentsUsed: usedAgents, usage: { ...ZERO_USAGE } };
         if (debugQuickAnswer) cachedPayload.quickAnswerDebug = quickAnswerDebugPayload;
-        return res.json(cachedPayload);
+        res.json(cachedPayload);
+        persistConversationTurn(cachedReply, { modelUsed: cachedPayload.resolvedModel.modelId, isUnanswered: checkIfUnanswered(cachedReply, contextText) });
+        return;
       }
       summary.replyCacheHit = false;
     }
