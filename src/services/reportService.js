@@ -7,7 +7,7 @@ export async function generateWeeklyReport(businessId) {
            COUNT(*) AS total_messages,
            AVG(ai_response_length) AS avg_response_length,
            COUNT(*) FILTER (WHERE role = 'user') AS user_messages,
-           COUNT(*) FILTER (WHERE is_unanswered = true OR fallback_used = true) AS failed_messages
+           COUNT(*) FILTER (WHERE role = 'assistant' AND is_unanswered = true) AS failed_messages
     FROM messages
     WHERE business_id = $1
       AND created_at > NOW() - INTERVAL '7 days'
@@ -40,17 +40,25 @@ export async function generateWeeklyReport(businessId) {
     return { text: words.slice(0, 8).join(' '), count: parseInt(q.cnt) };
   }).sort((a, b) => b.count - a.count).slice(0, 5);
 
-  // Failed questions (unanswered or fallback)
+  // Failed questions are user turns whose matching assistant reply was marked unanswered.
+  // Do not mark every question in a session as failed just because another turn failed.
   const { rows: failedQs } = await pool.query(
     `SELECT LOWER(REGEXP_REPLACE(m.content, '[[:punct:]]', '', 'g')) AS cleaned, COUNT(*) AS cnt
      FROM messages m
-     WHERE m.business_id = $1 AND m.role = 'user'
-       AND EXISTS (
-         SELECT 1 FROM messages a
-         WHERE a.session_id = m.session_id AND a.role = 'assistant'
-           AND (a.is_unanswered = true OR a.fallback_used = true)
-       )
+     JOIN LATERAL (
+       SELECT a.is_unanswered
+       FROM messages a
+       WHERE a.business_id = m.business_id
+         AND a.session_id = m.session_id
+         AND a.role = 'assistant'
+         AND a.created_at >= m.created_at
+       ORDER BY a.created_at ASC
+       LIMIT 1
+     ) a ON true
+     WHERE m.business_id = $1
+       AND m.role = 'user'
        AND m.created_at > NOW() - INTERVAL '7 days'
+       AND a.is_unanswered = true
      GROUP BY cleaned
      ORDER BY cnt DESC LIMIT 10`,
     [businessId]
