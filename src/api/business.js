@@ -6,6 +6,7 @@ import { suggestAgents } from '../agents/agentSelector.js';
 import { AGENT_TEMPLATES } from '../agents/templates.js';
 import { getAvailableModels, getLockedModels, resolveCanonicalModelId } from '../services/modelService.js';
 import { buildMasterPrompt, buildAgentPromptInstructions } from '../agents/promptBuilder.js';
+import { deleteChatbotDataForBusiness } from '../services/chatbotDeletion.js';
 
 const router = Router();
 
@@ -269,6 +270,21 @@ router.post('/enable', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[business/enable]', err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.delete('/chatbot', requireAuth, async (req, res) => {
+  try {
+    const result = await deleteChatbotDataForBusiness(req.business.businessId);
+
+    if (!result) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[business/chatbot/delete]', { businessId: req.business.businessId, error: error.message });
+    return res.status(500).json({ error: 'Failed to delete chatbot data' });
   }
 });
 
