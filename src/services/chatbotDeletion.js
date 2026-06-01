@@ -110,17 +110,3 @@ export async function deleteChatbotData(namespace) {
     deletedRedisKeys,
   };
 }
-
-export async function deleteChatbotDataForBusiness(businessId) {
-  const businessResult = await pool.query(
-    'SELECT bot_id FROM businesses WHERE id = $1 LIMIT 1',
-    [businessId],
-  );
-  const namespace = businessResult.rows[0]?.bot_id || null;
-
-  if (!namespace) {
-    return null;
-  }
-
-  return deleteChatbotData(namespace);
-}

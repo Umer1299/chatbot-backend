@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises';
 
 const routeSource = await readFile(new URL('../routes/chatbots.js', import.meta.url), 'utf8');
 const serviceSource = await readFile(new URL('../services/chatbotDeletion.js', import.meta.url), 'utf8');
-const businessSource = await readFile(new URL('../api/business.js', import.meta.url), 'utf8');
 
 test('chatbot delete route delegates full data cleanup', () => {
   assert.match(routeSource, /import \{ deleteChatbotData \} from '\.\.\/services\/chatbotDeletion\.js'/);
@@ -29,17 +28,4 @@ test('deleteChatbotData removes Redis keys related to the chatbot namespace', ()
   assert.match(serviceSource, /rag:\$\{businessId\}:\*/);
   assert.match(serviceSource, /lead-extract:\$\{businessId\}:\*/);
   assert.match(serviceSource, /getRedisJobKeysForNamespace\(namespace\)/);
-});
-
-test('business API exposes authenticated full chatbot delete endpoint', () => {
-  assert.match(businessSource, /import \{ deleteChatbotDataForBusiness \} from '\.\.\/services\/chatbotDeletion\.js'/);
-  assert.match(businessSource, /router\.delete\('\/chatbot', requireAuth/);
-  assert.match(businessSource, /deleteChatbotDataForBusiness\(req\.business\.businessId\)/);
-  assert.match(businessSource, /Failed to delete chatbot data/);
-});
-
-test('deleteChatbotDataForBusiness resolves the authenticated business bot namespace', () => {
-  assert.match(serviceSource, /export async function deleteChatbotDataForBusiness\(businessId\)/);
-  assert.match(serviceSource, /SELECT bot_id FROM businesses WHERE id = \$1 LIMIT 1/);
-  assert.match(serviceSource, /return deleteChatbotData\(namespace\)/);
 });
