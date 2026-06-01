@@ -155,6 +155,23 @@ export async function deleteQuickAnswer({ businessId, id }) {
   return rowCount > 0;
 }
 
+export async function deleteQuickAnswerByQuestion({ businessId, question }) {
+  const normalizedQuestion = normalizeQuestion(question);
+  if (!normalizedQuestion) return false;
+
+  const { rowCount } = await pool.query(
+    `UPDATE quick_answers
+     SET is_active = FALSE,
+         updated_at = NOW()
+     WHERE business_id = $1
+       AND normalized_question = $2
+       AND is_active = TRUE`,
+    [businessId, normalizedQuestion],
+  );
+
+  return rowCount > 0;
+}
+
 export async function listQuickAnswers({ businessId }) {
   const { rows } = await pool.query(
     `SELECT id, question, normalized_question, answer, category, priority, is_active,
