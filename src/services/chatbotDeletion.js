@@ -79,6 +79,18 @@ async function deleteChatbotRedisData({ namespace, businessId, token }) {
   return deleteRedisKeys([...directKeys, ...patternKeys]);
 }
 
+export async function deleteChatbotDataForBusiness(businessId) {
+  const businessResult = await pool.query(
+    'SELECT bot_id FROM businesses WHERE id = $1 LIMIT 1',
+    [businessId],
+  );
+  const namespace = businessResult.rows[0]?.bot_id || null;
+
+  if (!namespace) return null;
+
+  return deleteChatbotData(namespace);
+}
+
 export async function deleteChatbotData(namespace) {
   const businessResult = await pool.query(
     'SELECT id FROM businesses WHERE bot_id = $1 LIMIT 1',
