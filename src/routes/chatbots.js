@@ -2,8 +2,7 @@ import express from 'express';
 import { redisClient } from '../services/redis.js';
 import { requireAdminKey } from '../middleware/adminAuth.js';
 import { v4 as uuidv4 } from 'uuid';
-import { deleteBusinessChunks } from '../db/vectorStore.js';
-import pool from '../db/pool.js';
+import { deleteChatbotData } from '../services/chatbotDeletion.js';
 
 const router = express.Router();
 
@@ -43,22 +42,13 @@ router.get('/', async (req, res) => {
 });
 
 router.delete('/:namespace', async (req, res) => {
-  const { namespace } = req.params;
-  const token = await redisClient.get(`chatbot_namespace_token:${namespace}`);
-  if (token) await redisClient.del(`chatbot_token:${token}`);
-  await redisClient.del(`chatbot_namespace_token:${namespace}`);
-  await redisClient.del(`chatbot:${namespace}`);
-
-  // Remove knowledge base chunks from pgvector
-  const bizResult = await pool.query(
-    'SELECT id FROM businesses WHERE bot_id = $1',
-    [namespace]
-  );
-  if (bizResult.rows.length) {
-    await deleteBusinessChunks(bizResult.rows[0].id);
+  try {
+    const result = await deleteChatbotData(req.params.namespace);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('chatbot_delete_failed', { namespace: req.params.namespace, error: error.message });
+    res.status(500).json({ error: 'Failed to delete chatbot data' });
   }
-
-  res.json({ success: true });
 });
 
 export default router;
