@@ -20,7 +20,8 @@ async function clearRagCache(pattern, logLabel) {
 }
 
 async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0, options = {}) {
-  const { sourceUrl = null } = options;
+  const { sourceUrl = null, metadata = {} } = options;
+  const chunkMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
   let inserted = 0;
   let skipped = 0;
   const totalBatches = Math.ceil(chunks.length / BATCH_SIZE);
@@ -42,11 +43,11 @@ async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0, 
 
       const result = await pool.query(
         `INSERT INTO knowledge_chunks
-          (business_id, content, embedding, content_hash, source_url, source_type, chunk_index, word_count)
-         VALUES ($1, $2, $3::vector, md5($2), $4, $5, $6, $7)
+          (business_id, content, embedding, content_hash, source_url, source_type, chunk_index, word_count, metadata)
+         VALUES ($1, $2, $3::vector, md5($2), $4, $5, $6, $7, $8::jsonb)
          ON CONFLICT (business_id, content_hash) DO NOTHING
          RETURNING id`,
-        [businessId, chunk, JSON.stringify(embedding), sourceUrl, sourceType, chunkIndex, wordCount],
+        [businessId, chunk, JSON.stringify(embedding), sourceUrl, sourceType, chunkIndex, wordCount, JSON.stringify(chunkMetadata)],
       );
 
       if (result.rowCount > 0) {
@@ -76,6 +77,7 @@ export async function setupVectorTable() {
         content_hash TEXT,
         source_url TEXT,
         source_type TEXT DEFAULT 'website',
+        metadata JSONB DEFAULT '{}'::jsonb,
         chunk_index INTEGER,
         word_count INTEGER,
         created_at TIMESTAMPTZ DEFAULT NOW()
@@ -91,12 +93,20 @@ export async function setupVectorTable() {
       WHERE content_hash IS NULL
     `);
     await pool.query(`
+      ALTER TABLE knowledge_chunks
+      ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb
+    `);
+    await pool.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_business_content_hash
       ON knowledge_chunks(business_id, content_hash)
     `);
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_chunks_business
       ON knowledge_chunks(business_id)
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_chunks_business_file_id
+      ON knowledge_chunks(business_id, ((metadata->>'file_id')))
     `);
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_chunks_embedding
@@ -197,7 +207,7 @@ export async function getRelevantChunks(businessId, queryText, namespace, limit 
 }
 
 export async function deleteBusinessChunksByFilter(businessId, filters = {}, options = {}) {
-  const { sourceType, sourceUrl, contentHash } = filters;
+  const { sourceType, sourceUrl, contentHash, fileId } = filters;
   const { namespace = null } = options;
 
   const conditions = ['business_id = $1'];
@@ -216,6 +226,11 @@ export async function deleteBusinessChunksByFilter(businessId, filters = {}, opt
   if (contentHash) {
     values.push(contentHash);
     conditions.push(`content_hash = $${values.length}`);
+  }
+
+  if (fileId) {
+    values.push(fileId);
+    conditions.push(`metadata->>'file_id' = $${values.length}`);
   }
 
   if (conditions.length === 1) {
