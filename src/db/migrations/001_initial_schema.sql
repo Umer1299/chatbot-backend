@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
                             'website','owner_upload',
                             'manual_text'
                           )),
+  metadata              JSONB DEFAULT '{}'::jsonb,
   chunk_index           INTEGER,
   word_count            INTEGER,
   created_at            TIMESTAMPTZ DEFAULT NOW()
@@ -100,6 +101,9 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_business 
   ON knowledge_chunks(business_id);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_business_file_id
+  ON knowledge_chunks(business_id, ((metadata->>'file_id')));
 
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding 
   ON knowledge_chunks 

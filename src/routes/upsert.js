@@ -16,10 +16,64 @@ import os from 'os';
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 3 } });
 
+function parseMetadata(rawMetadata) {
+  if (!rawMetadata) return {};
+
+  if (typeof rawMetadata === 'object' && !Array.isArray(rawMetadata)) return rawMetadata;
+
+  if (typeof rawMetadata !== 'string') return {};
+
+  try {
+    const parsed = JSON.parse(rawMetadata);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+function normalizeFilterValue(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
+
+function buildUpsertMetadata(body = {}) {
+  const metadata = parseMetadata(body.metadata);
+  const fileId = normalizeFilterValue(body.file_id || body.fileId || metadata.file_id || metadata.fileId);
+
+  if (fileId) {
+    metadata.file_id = fileId;
+    delete metadata.fileId;
+  }
+
+  return metadata;
+}
+
+async function deleteChunksWithFilters(req, res, filters) {
+  if (!filters.sourceType && !filters.sourceUrl && !filters.contentHash && !filters.fileId) {
+    return res.status(400).json({
+      error: 'At least one delete filter is required: sourceType, sourceUrl, contentHash, or file_id',
+    });
+  }
+
+  try {
+    const deleted = await deleteBusinessChunksByFilter(req.businessId, filters, { namespace: req.namespace });
+
+    return res.json({
+      success: true,
+      deletedChunks: deleted,
+      filters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
+    });
+  } catch (err) {
+    console.error('[upsert]', req.method, req.path, err.message);
+    return res.status(500).json({ error: 'Failed to delete upserted chunks' });
+  }
+}
+
 router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (req, res) => {
   const namespace = req.namespace;
   const text = req.body.text;
   const files = req.files || [];
+  const metadata = buildUpsertMetadata(req.body);
 
   try {
     if (text && text.trim()) {
@@ -47,6 +101,7 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
 
       const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload', {
         sourceUrl: 'manual-upload',
+        metadata,
       });
       return res.json({
         success: true,
@@ -71,6 +126,7 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
         originalName: file.originalname,
         mimeType: file.mimetype,
         jobId,
+        metadata,
       });
       jobIds.push(jobId);
       await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace }));
@@ -111,31 +167,25 @@ router.delete('/chunks', tokenAuth, async (req, res) => {
   const sourceType = req.query.sourceType || req.body?.sourceType;
   const sourceUrl = req.query.sourceUrl || req.body?.sourceUrl;
   const contentHash = req.query.contentHash || req.body?.contentHash;
+  const requestMetadata = parseMetadata(req.query.metadata || req.body?.metadata);
+  const fileId = req.query.file_id || req.query.fileId || req.body?.file_id || req.body?.fileId || requestMetadata.file_id || requestMetadata.fileId;
 
   const filters = {
-    sourceType: typeof sourceType === 'string' ? sourceType.trim() : '',
-    sourceUrl: typeof sourceUrl === 'string' ? sourceUrl.trim() : '',
-    contentHash: typeof contentHash === 'string' ? contentHash.trim() : '',
+    sourceType: normalizeFilterValue(sourceType),
+    sourceUrl: normalizeFilterValue(sourceUrl),
+    contentHash: normalizeFilterValue(contentHash),
+    fileId: normalizeFilterValue(fileId),
   };
 
-  if (!filters.sourceType && !filters.sourceUrl && !filters.contentHash) {
-    return res.status(400).json({
-      error: 'At least one delete filter is required: sourceType, sourceUrl, or contentHash',
-    });
-  }
+  return deleteChunksWithFilters(req, res, filters);
+});
 
-  try {
-    const deleted = await deleteBusinessChunksByFilter(req.businessId, filters, { namespace: req.namespace });
+router.delete('/file/:fileId', tokenAuth, async (req, res) => {
+  const filters = {
+    fileId: normalizeFilterValue(req.params.fileId),
+  };
 
-    return res.json({
-      success: true,
-      deletedChunks: deleted,
-      filters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
-    });
-  } catch (err) {
-    console.error('[upsert]', req.method, req.path, err.message);
-    return res.status(500).json({ error: 'Failed to delete upserted chunks' });
-  }
+  return deleteChunksWithFilters(req, res, filters);
 });
 
 router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {
