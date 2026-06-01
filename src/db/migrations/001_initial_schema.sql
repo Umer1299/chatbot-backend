@@ -95,11 +95,15 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
                           )),
   chunk_index           INTEGER,
   word_count            INTEGER,
+  file_id               TEXT,
   created_at            TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_business 
   ON knowledge_chunks(business_id);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_business_file_id
+  ON knowledge_chunks(business_id, file_id);
 
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding 
   ON knowledge_chunks 

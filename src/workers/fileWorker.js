@@ -15,7 +15,7 @@ async function setJobStatus(jobId, payload) {
 }
 
 const worker = new Worker('file-processing', async (job) => {
-  const { namespace, filePath, originalName, mimeType, jobId } = job.data;
+  const { namespace, filePath, originalName, mimeType, jobId, fileId = null } = job.data;
   console.log(`Processing file ${originalName} for namespace ${namespace}, job ${jobId}`);
 
   try {
@@ -33,7 +33,7 @@ const worker = new Worker('file-processing', async (job) => {
     }
 
     if (newDocs.length === 0) {
-      await setJobStatus(jobId, { status: 'completed', skipped: true, namespace });
+      await setJobStatus(jobId, { status: 'completed', skipped: true, namespace, fileId });
       await fs.unlink(filePath).catch(() => {});
       return { skipped: true, message: 'All duplicates' };
     }
@@ -59,13 +59,15 @@ const worker = new Worker('file-processing', async (job) => {
     const chunks = cleanAndChunkContent(fakePages).filter(shouldEmbedChunk);
     const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload', {
       sourceUrl: `file-upload:${originalName || 'unknown'}`,
+      fileId,
     });
 
     await job.updateProgress(100);
     await setJobStatus(jobId, {
       status: 'completed',
       chunksAdded: result.inserted,
-      namespace
+      namespace,
+      fileId
     });
     await fs.unlink(filePath).catch(() => {});
     console.log(`Job ${jobId} completed, chunks: ${result.inserted}`);
@@ -76,7 +78,8 @@ const worker = new Worker('file-processing', async (job) => {
     await setJobStatus(jobId, {
       status: 'failed',
       error: 'File processing failed. Please try again.',
-      namespace
+      namespace,
+      fileId
     });
     await fs.unlink(filePath).catch(() => {});
     throw err;
