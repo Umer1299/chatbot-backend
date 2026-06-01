@@ -33,6 +33,27 @@ function sanitizePreviewList(value) {
     .map((item) => item.slice(0, MAX_PREVIEW_TEXT_LENGTH));
 }
 
+function normalizeQuickQuestion(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function deleteQuickQuestionFromList(list, { question, index }) {
+  const prompts = Array.isArray(list) ? list : [];
+  if (Number.isInteger(index)) {
+    return prompts.filter((_, itemIndex) => itemIndex !== index);
+  }
+
+  const normalizedQuestion = normalizeQuickQuestion(question);
+  if (!normalizedQuestion) return prompts;
+  return prompts.filter((item) => normalizeQuickQuestion(item) !== normalizedQuestion);
+}
+
+function parseQuickQuestionIndex(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const index = Number(value);
+  return Number.isInteger(index) && index >= 0 ? index : null;
+}
+
 router.get('/settings', requireAuth, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM businesses WHERE id = $1', [req.business.businessId]);
   return res.json({ business: rows[0] || null });
@@ -428,6 +449,55 @@ router.patch('/bot-config/draft', requireAuth, async (req, res) => {
     await pool.query(`UPDATE businesses SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${values.length}`, values);
   }
   return res.json({ success: true });
+});
+
+
+router.delete('/bot-config/quick-question', requireAuth, async (req, res) => {
+  try {
+    const businessId = req.business.businessId;
+    const question = req.body?.question || req.query?.question;
+    const index = parseQuickQuestionIndex(req.body?.index ?? req.query?.index);
+
+    if (!question && index === null) {
+      return res.status(400).json({ error: 'question or index is required' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT bc.starter_prompts, bc.brand_starter_prompts, b.bot_id
+       FROM bot_configs bc
+       JOIN businesses b ON bc.business_id = b.id
+       WHERE bc.business_id = $1
+       LIMIT 1`,
+      [businessId],
+    );
+
+    if (!rows[0]) return res.status(404).json({ error: 'Bot config not found' });
+
+    const currentStarterPrompts = Array.isArray(rows[0].starter_prompts) ? rows[0].starter_prompts : [];
+    const currentBrandStarterPrompts = Array.isArray(rows[0].brand_starter_prompts) ? rows[0].brand_starter_prompts : [];
+    const starterPrompts = deleteQuickQuestionFromList(currentStarterPrompts, { question, index });
+    const brandStarterPrompts = deleteQuickQuestionFromList(currentBrandStarterPrompts, { question, index });
+
+    if (starterPrompts.length === currentStarterPrompts.length && brandStarterPrompts.length === currentBrandStarterPrompts.length) {
+      return res.status(404).json({ error: 'Quick question not found' });
+    }
+
+    await pool.query(
+      `UPDATE bot_configs
+       SET starter_prompts = $1,
+           brand_starter_prompts = $2,
+           updated_at = NOW()
+       WHERE business_id = $3`,
+      [JSON.stringify(starterPrompts), JSON.stringify(brandStarterPrompts), businessId],
+    );
+
+    if (rows[0].bot_id && redisClient) await redisClient.del(`chatbot_config:${rows[0].bot_id}`);
+
+    return res.json({ success: true, starterPrompts, brandStarterPrompts });
+  } catch (error) {
+    console.error('[business/bot-config/quick-question/delete]', { businessId: req.business.businessId, error: error.message });
+    return res.status(500).json({ error: 'Failed to delete quick question' });
+  }
 });
 
 router.get('/bot-config/:botId/preview', async (req, res) => {
