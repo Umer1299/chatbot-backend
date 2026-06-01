@@ -48,27 +48,6 @@ function buildUpsertMetadata(body = {}) {
   return metadata;
 }
 
-async function deleteChunksWithFilters(req, res, filters) {
-  if (!filters.sourceType && !filters.sourceUrl && !filters.contentHash && !filters.fileId) {
-    return res.status(400).json({
-      error: 'At least one delete filter is required: sourceType, sourceUrl, contentHash, or file_id',
-    });
-  }
-
-  try {
-    const deleted = await deleteBusinessChunksByFilter(req.businessId, filters, { namespace: req.namespace });
-
-    return res.json({
-      success: true,
-      deletedChunks: deleted,
-      filters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
-    });
-  } catch (err) {
-    console.error('[upsert]', req.method, req.path, err.message);
-    return res.status(500).json({ error: 'Failed to delete upserted chunks' });
-  }
-}
-
 router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (req, res) => {
   const namespace = req.namespace;
   const text = req.body.text;
@@ -177,8 +156,11 @@ router.delete('/chunks', tokenAuth, async (req, res) => {
     fileId: normalizeFilterValue(fileId),
   };
 
-  return deleteChunksWithFilters(req, res, filters);
-});
+  if (!filters.sourceType && !filters.sourceUrl && !filters.contentHash && !filters.fileId) {
+    return res.status(400).json({
+      error: 'At least one delete filter is required: sourceType, sourceUrl, contentHash, or file_id',
+    });
+  }
 
 router.delete('/file/:fileId', tokenAuth, async (req, res) => {
   const filters = {
