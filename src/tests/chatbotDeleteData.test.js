@@ -29,3 +29,9 @@ test('deleteChatbotData removes Redis keys related to the chatbot namespace', ()
   assert.match(serviceSource, /lead-extract:\$\{businessId\}:\*/);
   assert.match(serviceSource, /getRedisJobKeysForNamespace\(namespace\)/);
 });
+
+test('deleteChatbotDataForBusiness resolves the business bot namespace before cleanup', () => {
+  assert.match(serviceSource, /export async function deleteChatbotDataForBusiness\(businessId\)/);
+  assert.match(serviceSource, /SELECT bot_id FROM businesses WHERE id = \$1 LIMIT 1/);
+  assert.match(serviceSource, /return deleteChatbotData\(namespace\)/);
+});
