@@ -196,6 +196,50 @@ export async function getRelevantChunks(businessId, queryText, namespace, limit 
   }
 }
 
+export async function deleteBusinessChunksByFilter(businessId, filters = {}, options = {}) {
+  const { sourceType, sourceUrl, contentHash } = filters;
+  const { namespace = null } = options;
+
+  const conditions = ['business_id = $1'];
+  const values = [businessId];
+
+  if (sourceType) {
+    values.push(sourceType);
+    conditions.push(`source_type = $${values.length}`);
+  }
+
+  if (sourceUrl) {
+    values.push(sourceUrl);
+    conditions.push(`source_url = $${values.length}`);
+  }
+
+  if (contentHash) {
+    values.push(contentHash);
+    conditions.push(`content_hash = $${values.length}`);
+  }
+
+  if (conditions.length === 1) {
+    throw new Error('At least one delete filter is required');
+  }
+
+  try {
+    const result = await pool.query(
+      `DELETE FROM knowledge_chunks WHERE ${conditions.join(' AND ')}`,
+      values,
+    );
+
+    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
+    if (namespace) {
+      await clearRagCache(`rag:${namespace}:*`, `namespace ${namespace}`);
+    }
+
+    return result.rowCount;
+  } catch (error) {
+    console.error('Failed to delete business chunks by filter:', error.message);
+    throw error;
+  }
+}
+
 export async function deleteBusinessChunks(businessId) {
   try {
     const result = await pool.query(

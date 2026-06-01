@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import { fileQueue } from '../queues/fileQueue.js';
 import { isDuplicateContent } from '../services/recordManager.js';
-import { upsertSupplementalChunks, deleteBusinessChunks } from '../db/vectorStore.js';
+import { upsertSupplementalChunks, deleteBusinessChunks, deleteBusinessChunksByFilter } from '../db/vectorStore.js';
 import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
 import pool from '../db/pool.js';
 import { tokenAuth } from '../middleware/tokenAuth.js';
@@ -107,11 +107,45 @@ router.get('/job/:jobId', tokenAuth, async (req, res) => {
   res.json(job);
 });
 
+router.delete('/chunks', tokenAuth, async (req, res) => {
+  const sourceType = req.query.sourceType || req.body?.sourceType;
+  const sourceUrl = req.query.sourceUrl || req.body?.sourceUrl;
+  const contentHash = req.query.contentHash || req.body?.contentHash;
+
+  const filters = {
+    sourceType: typeof sourceType === 'string' ? sourceType.trim() : '',
+    sourceUrl: typeof sourceUrl === 'string' ? sourceUrl.trim() : '',
+    contentHash: typeof contentHash === 'string' ? contentHash.trim() : '',
+  };
+
+  if (!filters.sourceType && !filters.sourceUrl && !filters.contentHash) {
+    return res.status(400).json({
+      error: 'At least one delete filter is required: sourceType, sourceUrl, or contentHash',
+    });
+  }
+
+  try {
+    const deleted = await deleteBusinessChunksByFilter(req.businessId, filters, { namespace: req.namespace });
+
+    return res.json({
+      success: true,
+      deletedChunks: deleted,
+      filters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
+    });
+  } catch (err) {
+    console.error('[upsert]', req.method, req.path, err.message);
+    return res.status(500).json({ error: 'Failed to delete upserted chunks' });
+  }
+});
+
 router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {
   const { namespace } = req.params;
-  const bizResult = await pool.query('SELECT id FROM businesses WHERE bot_id = $1', [namespace]);
-  if (!bizResult.rows.length) return res.status(404).json({ error: 'Business not found' });
-  const deleted = await deleteBusinessChunks(bizResult.rows[0].id);
+
+  if (namespace !== req.namespace) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  const deleted = await deleteBusinessChunks(req.businessId);
   res.json({ success: true, deletedChunks: deleted });
 });
 
