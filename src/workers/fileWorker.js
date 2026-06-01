@@ -15,7 +15,7 @@ async function setJobStatus(jobId, payload) {
 }
 
 const worker = new Worker('file-processing', async (job) => {
-  const { namespace, filePath, originalName, mimeType, jobId } = job.data;
+  const { namespace, filePath, originalName, mimeType, jobId, metadata = {} } = job.data;
   console.log(`Processing file ${originalName} for namespace ${namespace}, job ${jobId}`);
 
   try {
@@ -59,6 +59,7 @@ const worker = new Worker('file-processing', async (job) => {
     const chunks = cleanAndChunkContent(fakePages).filter(shouldEmbedChunk);
     const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload', {
       sourceUrl: `file-upload:${originalName || 'unknown'}`,
+      metadata,
     });
 
     await job.updateProgress(100);
