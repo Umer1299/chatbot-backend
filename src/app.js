@@ -84,6 +84,7 @@ app.get('/readyz', (req, res) => res.send('Ready'));
 
 app.use('/api/chat', widgetLimiter);
 app.use('/api/upsert', widgetLimiter);
+app.use('/upsert', widgetLimiter);
 app.use('/api/leads', dashboardLimiter);
 app.use('/api/business', dashboardLimiter);
 app.use('/api/quick-answers', dashboardLimiter);
@@ -93,6 +94,7 @@ app.use('/api/moderate', widgetLimiter);
 
 app.use('/api/chat', chatRoutes);
 app.use('/api/upsert', upsertRoutes);
+app.use('/upsert', upsertRoutes);
 app.use('/api/chatbots', chatbotsRoutes);
 app.use('/api/moderate', moderateRoutes);
 app.use('/api/lead', leadRoutes);
