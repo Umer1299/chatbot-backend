@@ -162,18 +162,12 @@ router.delete('/chunks', tokenAuth, async (req, res) => {
     });
   }
 
-  try {
-    const deleted = await deleteBusinessChunksByFilter(req.businessId, filters, { namespace: req.namespace });
+router.delete('/file/:fileId', tokenAuth, async (req, res) => {
+  const filters = {
+    fileId: normalizeFilterValue(req.params.fileId),
+  };
 
-    return res.json({
-      success: true,
-      deletedChunks: deleted,
-      filters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
-    });
-  } catch (err) {
-    console.error('[upsert]', req.method, req.path, err.message);
-    return res.status(500).json({ error: 'Failed to delete upserted chunks' });
-  }
+  return deleteChunksWithFilters(req, res, filters);
 });
 
 router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {
