@@ -388,7 +388,25 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
           try {
             const openai = getOpenAIClient();
             if (!openai) throw new Error('lead_extractor_not_configured');
-            const prompt = `Return strict JSON object only with fields: isLead, fullName, name, email, phone, companyName, company_name, churchName, location, serviceNeed, budgetRange, budget_range, timeline, leadScore, scoreReasons. Extract only from this message: ${message}`;
+            const recentConversation = processedMessages
+              .map((m) => `${m.role}: ${m.content}`)
+              .join('\n');
+
+            const prompt = `
+Return strict JSON object only with fields:
+isLead, fullName, name, email, phone, companyName, company_name, churchName,
+location, serviceNeed, budgetRange, budget_range, timeline, leadScore, scoreReasons.
+
+Extract lead data from the full conversation below.
+Use the latest user message as highest priority.
+Only return JSON. No markdown. No prose.
+
+Conversation:
+${recentConversation}
+
+Latest user message:
+${message}
+`;
             const { tokenParamName, tokenParam } = getOpenAITokenLimitParam(LEAD_EXTRACTOR_MODEL, LEAD_EXTRACTOR_MAX_TOKENS);
             console.log('openai_token_param_debug', { modelId: LEAD_EXTRACTOR_MODEL, apiModelId: LEAD_EXTRACTOR_MODEL, tokenParamName });
             const rsp = await withTimeout((signal) => openai.chat.completions.create({ model: LEAD_EXTRACTOR_MODEL, ...tokenParam, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'You are a lead extraction agent. Output strict JSON only. No prose.' }, { role: 'user', content: prompt }] }), LEAD_EXTRACTOR_TIMEOUT_MS);
@@ -584,6 +602,15 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   summary.preferredTimeDetected = bookingSignals.preferredTimeDetected;
   summary.callbackRequested = bookingSignals.callbackRequested;
   summary.calendlyLinkShown = false;
+
+  perf.log('lead_pipeline_before_booking_shortcut', {
+    requestId,
+    businessId: config.business_id,
+    botId,
+    sessionId,
+    bookingIntentDetected: bookingSignals.bookingIntentDetected
+  });
+  await runLeadPipeline();
 
   if (bookingSignals.bookingIntentDetected) {
     const bookingReply = buildBookingReply(message, config);
@@ -1113,6 +1140,7 @@ function cleanAssistantResponse(text = '') {
     let streamUsage = { input_tokens: 0, output_tokens: 0 };
     try {
       perf.log('ai_call_start', { provider: summary.provider, modelId: summary.modelId, apiModelId: summary.apiModelId });
+      if (!summary.leadSaveAttempted) await runLeadPipeline();
       const result = await callWithFallback(true, config, finalSystemPrompt, messagesArray);
       const stream = result.stream;
       // result.resolvedModel will be used later in the meta frame
@@ -1174,7 +1202,7 @@ function cleanAssistantResponse(text = '') {
       }
       summary.replyCacheHit = false;
     }
-    if (quickAnswerMissed) await runLeadPipeline();
+    if (quickAnswerMissed && !summary.leadSaveAttempted) await runLeadPipeline();
     const result = await callWithFallback(false, config, finalSystemPrompt, messagesArray);
     const fullResponse = result.reply;
     // result.resolvedModel will be used later
