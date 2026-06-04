@@ -1,9 +1,25 @@
 // Model pricing (USD per 1M tokens for internal logging and credit calculation)
 export const MODEL_PRICING = {
+  // OpenAI GPT-4.1 models
+  'gpt-4.1': { input: 2.00, cachedInput: 0.50, output: 8.00, modelMultiplier: 1 },
+  'gpt-4.1-mini': { input: 0.40, output: 1.60, modelMultiplier: 1 },
+  'gpt-4.1-nano': { input: 0.10, cachedInput: 0.025, output: 0.40, modelMultiplier: 1 },
+
+  // OpenAI GPT-5 models
+  'gpt-5': { input: 1.25, cachedInput: 0.125, output: 10.00, modelMultiplier: 1 },
+  'gpt-5-mini': { input: 0.25, output: 2.00, modelMultiplier: 1 },
+  'gpt-5-nano': { input: 0.05, cachedInput: 0.005, output: 0.40, modelMultiplier: 1 },
+
+  // OpenAI GPT-5.4 models
+  'gpt-5.4': { input: 2.50, cachedInput: 0.25, output: 15.00, modelMultiplier: 1 },
   'gpt-5.4-mini': { input: 0.75, output: 4.50, modelMultiplier: 1 },
   'gpt-5.4-nano': { input: 0.20, output: 1.25, modelMultiplier: 1 },
-  'gpt-4.1-mini': { input: 0.40, output: 1.60, modelMultiplier: 1 },
-  'gpt-5-mini': { input: 0.25, output: 2.00, modelMultiplier: 1 },
+
+  // OpenAI GPT-5.5 models
+  'gpt-5.5': { input: 5.00, cachedInput: 0.50, output: 30.00, modelMultiplier: 1 },
+  'gpt-5.5-pro': { input: 30.00, output: 180.00, modelMultiplier: 1 },
+
+  // OpenAI legacy/utility model
   'gpt-4o-mini': { input: 0.15, output: 0.60, modelMultiplier: 1 },
 
   // Anthropic Claude models
