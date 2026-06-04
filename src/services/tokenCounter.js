@@ -1,5 +1,5 @@
 import { encoding_for_model } from 'tiktoken';
-import { getModelPricing } from './modelPricing.js';
+import { getModelPricing, recordEstimatedCost } from './modelPricing.js';
 
 export function countTokens(text, model = 'gpt-4o-mini') {
   try {
@@ -16,5 +16,7 @@ export function countTokens(text, model = 'gpt-4o-mini') {
 export function estimateCost(model, inputTokens, outputTokens) {
   const pricing = getModelPricing(model);
   const cost = (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
-  return Number(cost.toFixed(6));
+  const estimatedCostUsd = Number(cost.toFixed(6));
+  recordEstimatedCost(model, estimatedCostUsd);
+  return estimatedCostUsd;
 }
