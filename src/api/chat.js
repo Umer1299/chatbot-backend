@@ -49,12 +49,35 @@ function normalizeMessageForCache(input = '') {
 }
 
 function buildUsageSummary(rawUsage = {}, modelId = 'gpt-4o-mini') {
-  const inputTokens = rawUsage?.input_tokens || 0;
-  const outputTokens = rawUsage?.output_tokens || 0;
-  const totalTokens = rawUsage?.total_tokens || (inputTokens + outputTokens);
+  const inputTokens =
+    rawUsage?.input_tokens ??
+    rawUsage?.prompt_tokens ??
+    rawUsage?.inputTokens ??
+    rawUsage?.promptTokens ??
+    0;
+
+  const outputTokens =
+    rawUsage?.output_tokens ??
+    rawUsage?.completion_tokens ??
+    rawUsage?.outputTokens ??
+    rawUsage?.completionTokens ??
+    0;
+
+  const totalTokens =
+    rawUsage?.total_tokens ??
+    rawUsage?.totalTokens ??
+    inputTokens + outputTokens;
+
   const estimatedCostUsd = estimateCost(modelId, inputTokens, outputTokens);
   const creditsUsed = getModelCreditCost(modelId);
-  return { inputTokens, outputTokens, totalTokens, estimatedCostUsd, creditsUsed };
+
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    estimatedCostUsd,
+    creditsUsed
+  };
 }
 
 function isGPT5Model(modelId) {
@@ -956,7 +979,7 @@ ${message}
           return {
             reply: fb.choices[0].message.content,
             resolvedModel: { ...resolvedModel, wasDowngraded: true },
-            usage: DEFAULT_USAGE
+            usage: buildUsageSummary(fb.usage, fallbackModel)
           };
         } catch (openaiFallbackErr) {
           console.error('[chat] OpenAI fallback failed:', openaiFallbackErr.message);
@@ -1067,7 +1090,7 @@ ${message}
       return {
         reply: response.choices[0].message.content,
         resolvedModel,
-        usage: DEFAULT_USAGE
+        usage: buildUsageSummary(response.usage, resolvedModel.modelId)
       };
     }
 
