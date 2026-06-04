@@ -5,9 +5,17 @@ export const MODEL_PRICING = {
   'gpt-4.1-mini': { input: 0.40, output: 1.60 },
   'gpt-5-mini': { input: 0.25, output: 2.00 },
   'gpt-4o-mini': { input: 0.15, output: 0.60 },
+
+  // Anthropic Claude models
+  'claude-opus-4-8': { input: 5.00, output: 25.00, contextWindow: 1_000_000 },
+  'claude-opus-4-7': { input: 5.00, output: 25.00, contextWindow: 1_000_000 },
+  'claude-opus-4-6': { input: 5.00, output: 25.00, contextWindow: 1_000_000 },
+  'claude-sonnet-4-6': { input: 3.00, output: 15.00, contextWindow: 1_000_000 },
+  'claude-haiku-4-5': { input: 1.00, output: 5.00, contextWindow: 200_000 },
 };
 
 // Credit cost per message (Chatbase-style)
+// TODO: Replace this fixed table with dynamic formula-based credits.
 export const MODEL_CREDIT_COST = {
   'gpt-4o-mini': 1,
   'gpt-5-mini': 5,
