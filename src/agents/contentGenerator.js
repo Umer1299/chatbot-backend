@@ -39,6 +39,36 @@ function buildFallbackWelcomeMessage(businessInfo = {}) {
   return FALLBACK_WELCOME;
 }
 
+function promptToText(item) {
+  if (typeof item === 'string') return item;
+  if (!item || typeof item !== 'object') return '';
+
+  return item.prompt
+    || item.text
+    || item.label
+    || item.title
+    || item.question
+    || item.message
+    || item.value
+    || item.name
+    || '';
+}
+
+function normalizePromptArray(value) {
+  const prompts = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split('\n')
+      : [];
+
+  return prompts
+    .map(promptToText)
+    .map((item) => String(item || '').trim())
+    .map((item) => item.replace(/^[-*\d.)\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
 function buildFallbackStarterPrompts(businessInfo = {}) {
   const services = Array.isArray(businessInfo.primaryServices)
     ? businessInfo.primaryServices.filter(Boolean).slice(0, 2)
@@ -80,11 +110,11 @@ export async function generateWelcomeMessage(businessInfo = {}, validation = {})
 export async function generateStarterPrompts(businessInfo = {}, validation = {}) {
   try {
     const summary = buildBusinessSummary(businessInfo, validation);
-    const systemPrompt = 'You create short first-click chatbot prompts. Return JSON array only.';
+    const systemPrompt = 'You create short first-click chatbot prompts. Return JSON array of strings only, like ["What services do you offer?", "How much does it cost?", "How can I contact you?"]. Do not return objects.';
     const messages = [
       {
         role: 'user',
-        content: `Create exactly 3 short user prompts for this business.\nProfile:\n${JSON.stringify(summary)}`,
+        content: `Create exactly 3 short user prompts for this business. Return only a JSON array of strings.\nProfile:\n${JSON.stringify(summary)}`,
       },
     ];
 
@@ -96,13 +126,7 @@ export async function generateStarterPrompts(businessInfo = {}, validation = {})
     const cleaned = String(response || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
-    if (!Array.isArray(parsed)) return buildFallbackStarterPrompts(businessInfo);
-
-    const prompts = parsed
-      .map((item) => String(item || '').trim())
-      .filter(Boolean)
-      .slice(0, 3);
-
+    const prompts = normalizePromptArray(parsed);
     return prompts.length ? prompts : buildFallbackStarterPrompts(businessInfo);
   } catch (error) {
     console.error('STARTER_PROMPTS_GENERATION_ERROR:', error.message || error);
@@ -116,10 +140,13 @@ export async function generateChatbotContent(
   availabilitySlots = null,
   validation = {},
 ) {
-  const [welcomeMessage, starterPrompts] = await Promise.all([
+  const [welcomeMessage, rawStarterPrompts] = await Promise.all([
     generateWelcomeMessage(businessInfo, validation),
     generateStarterPrompts(businessInfo, validation),
   ]);
+  const starterPrompts = normalizePromptArray(rawStarterPrompts).length
+    ? normalizePromptArray(rawStarterPrompts)
+    : buildFallbackStarterPrompts(businessInfo);
 
   const services = Array.isArray(businessInfo.primaryServices)
     ? businessInfo.primaryServices.filter(Boolean).join(', ')
