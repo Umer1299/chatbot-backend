@@ -141,6 +141,19 @@ function extractPages(payload) {
     .filter((page) => page.content);
 }
 
+function crawlHasFinishedWithData(payload) {
+  const pages = extractPages(payload);
+  if (!pages.length) return false;
+
+  const completed = Number(payload?.completed ?? payload?.data?.completed ?? 0);
+  const total = Number(payload?.total ?? payload?.data?.total ?? 0);
+
+  if (total > 0 && completed >= total) return true;
+  if (payload?.next === null || payload?.data?.next === null) return true;
+
+  return false;
+}
+
 async function startCrawl(baseUrl, url, options) {
   const crawlUrl = `${baseUrl}/v1/crawl`;
   const response = await fetchWithTimeout(crawlUrl, {
@@ -185,7 +198,7 @@ async function pollCrawl(baseUrl, jobId) {
 
     const status = pollPayload?.status || pollPayload?.data?.status;
 
-    if (status === 'completed') {
+    if (status === 'completed' || crawlHasFinishedWithData(pollPayload)) {
       return extractPages(pollPayload);
     }
 
