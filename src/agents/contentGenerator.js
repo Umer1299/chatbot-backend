@@ -6,6 +6,7 @@ const FALLBACK_PROMPTS = [
   'How can I book an appointment?',
   'What are your business hours?',
 ];
+const CONTENT_GENERATION_TIMEOUT_MS = Number(process.env.CONTENT_GENERATION_TIMEOUT_MS || 15000);
 
 function buildBusinessSummary(businessInfo = {}, validation = {}) {
   return {
@@ -21,6 +22,37 @@ function buildBusinessSummary(businessInfo = {}, validation = {}) {
   };
 }
 
+function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
+
+function buildFallbackWelcomeMessage(businessInfo = {}) {
+  const name = businessInfo.businessName || 'there';
+  if (name && name !== 'this business') {
+    return `Hi! Welcome to ${name}. How can we help you today?`;
+  }
+  return FALLBACK_WELCOME;
+}
+
+function buildFallbackStarterPrompts(businessInfo = {}) {
+  const services = Array.isArray(businessInfo.primaryServices)
+    ? businessInfo.primaryServices.filter(Boolean).slice(0, 2)
+    : [];
+
+  const prompts = [
+    services.length ? `Tell me about ${services[0]}` : 'What services do you offer?',
+    'How much does it cost?',
+    businessInfo.calendlyLink ? 'How can I book a call?' : 'How can I contact you?',
+  ];
+
+  return prompts.slice(0, 3);
+}
+
 export async function generateWelcomeMessage(businessInfo = {}, validation = {}) {
   try {
     const summary = buildBusinessSummary(businessInfo, validation);
@@ -32,12 +64,16 @@ export async function generateWelcomeMessage(businessInfo = {}, validation = {})
       },
     ];
 
-    const response = await claudeChat(systemPrompt, messages, { maxTokens: 120 });
+    const response = await withTimeout(
+      claudeChat(systemPrompt, messages, { maxTokens: 120 }),
+      CONTENT_GENERATION_TIMEOUT_MS,
+      'Welcome message generation',
+    );
     const text = String(response || '').trim().replace(/^"|"$/g, '');
-    return text || FALLBACK_WELCOME;
+    return text || buildFallbackWelcomeMessage(businessInfo);
   } catch (error) {
-    console.error('WELCOME_MESSAGE_GENERATION_ERROR:', error);
-    return FALLBACK_WELCOME;
+    console.error('WELCOME_MESSAGE_GENERATION_ERROR:', error.message || error);
+    return buildFallbackWelcomeMessage(businessInfo);
   }
 }
 
@@ -52,21 +88,25 @@ export async function generateStarterPrompts(businessInfo = {}, validation = {})
       },
     ];
 
-    const response = await claudeChat(systemPrompt, messages, { maxTokens: 200 });
+    const response = await withTimeout(
+      claudeChat(systemPrompt, messages, { maxTokens: 200 }),
+      CONTENT_GENERATION_TIMEOUT_MS,
+      'Starter prompts generation',
+    );
     const cleaned = String(response || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
-    if (!Array.isArray(parsed)) return FALLBACK_PROMPTS;
+    if (!Array.isArray(parsed)) return buildFallbackStarterPrompts(businessInfo);
 
     const prompts = parsed
       .map((item) => String(item || '').trim())
       .filter(Boolean)
       .slice(0, 3);
 
-    return prompts.length ? prompts : FALLBACK_PROMPTS;
+    return prompts.length ? prompts : buildFallbackStarterPrompts(businessInfo);
   } catch (error) {
-    console.error('STARTER_PROMPTS_GENERATION_ERROR:', error);
-    return FALLBACK_PROMPTS;
+    console.error('STARTER_PROMPTS_GENERATION_ERROR:', error.message || error);
+    return buildFallbackStarterPrompts(businessInfo);
   }
 }
 
@@ -76,8 +116,10 @@ export async function generateChatbotContent(
   availabilitySlots = null,
   validation = {},
 ) {
-  const welcomeMessage = await generateWelcomeMessage(businessInfo, validation);
-  const starterPrompts = await generateStarterPrompts(businessInfo, validation);
+  const [welcomeMessage, starterPrompts] = await Promise.all([
+    generateWelcomeMessage(businessInfo, validation),
+    generateStarterPrompts(businessInfo, validation),
+  ]);
 
   const services = Array.isArray(businessInfo.primaryServices)
     ? businessInfo.primaryServices.filter(Boolean).join(', ')
