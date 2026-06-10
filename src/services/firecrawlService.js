@@ -133,11 +133,15 @@ function extractPages(payload) {
   const pages = candidates.find(Array.isArray) || [];
 
   return pages
-    .map((page) => ({
-      url: page?.url || page?.metadata?.sourceURL || page?.metadata?.url || '',
-      content: page?.markdown || page?.content || page?.html || '',
-      title: page?.metadata?.title || page?.title || '',
-    }))
+    .map((page) => {
+      const metadata = page?.metadata || {};
+      return {
+        url: page?.url || metadata?.sourceURL || metadata?.url || '',
+        content: page?.markdown || page?.content || page?.html || '',
+        title: metadata?.title || page?.title || '',
+        metadata,
+      };
+    })
     .filter((page) => page.content);
 }
 
