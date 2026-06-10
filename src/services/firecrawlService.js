@@ -78,8 +78,7 @@ function getFirecrawlHeaders(baseUrl, includeJsonContentType = false) {
 
   const customAuthorization = process.env.FIRECRAWL_SELF_HOSTED_AUTHORIZATION?.trim();
   const basicAuth = process.env.FIRECRAWL_BASIC_AUTH?.trim();
-  const selfHostedApiKey = process.env.FIRECRAWL_SELF_HOSTED_API_KEY?.trim();
-  const legacyApiKey = process.env.FIRECRAWL_API_KEY?.trim();
+  const selfHostedApiKey = process.env.FIRECRAWL_SELF_HOSTED_API_KEY?.trim() || process.env.FIRECRAWL_API_KEY?.trim();
 
   if (customAuthorization) {
     headers.Authorization = customAuthorization;
@@ -87,8 +86,6 @@ function getFirecrawlHeaders(baseUrl, includeJsonContentType = false) {
     headers.Authorization = toBasicAuth(basicAuth);
   } else if (selfHostedApiKey) {
     headers['x-api-key'] = selfHostedApiKey;
-  } else if (legacyApiKey) {
-    headers.Authorization = `Bearer ${legacyApiKey}`;
   }
 
   return headers;
@@ -176,6 +173,7 @@ async function pollCrawl(baseUrl, jobId) {
 
   while (Date.now() - start < FIRECRAWL_TIMEOUT_MS) {
     const pollResp = await fetchWithTimeout(pollUrl, {
+      method: 'GET',
       headers: getFirecrawlHeaders(baseUrl),
     });
 
