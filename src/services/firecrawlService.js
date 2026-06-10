@@ -33,12 +33,17 @@ function stripTrailingSlash(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
 
+function isOfficialFirecrawlUrl(baseUrl) {
+  return stripTrailingSlash(baseUrl) === OFFICIAL_FIRECRAWL_URL;
+}
+
 function getFirecrawlBaseUrls() {
   const configured = [process.env.GCP_VM_URL, process.env.FIRECRAWL_API_URL]
     .map(stripTrailingSlash)
     .filter(Boolean);
 
-  const shouldFallbackToOfficial = process.env.FIRECRAWL_FALLBACK_TO_OFFICIAL !== 'false';
+  const officialApiKey = process.env.FIRECRAWL_OFFICIAL_API_KEY?.trim();
+  const shouldFallbackToOfficial = process.env.FIRECRAWL_FALLBACK_TO_OFFICIAL === 'true' || Boolean(officialApiKey);
   const urls = shouldFallbackToOfficial ? [...configured, OFFICIAL_FIRECRAWL_URL] : configured;
 
   return [...new Set(urls.length ? urls : [OFFICIAL_FIRECRAWL_URL])];
@@ -49,6 +54,44 @@ function truncateBody(value, maxLength = 300) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+}
+
+function toBasicAuth(value) {
+  if (!value) return null;
+  return `Basic ${Buffer.from(value).toString('base64')}`;
+}
+
+function getFirecrawlHeaders(baseUrl, includeJsonContentType = false) {
+  const headers = {};
+
+  if (includeJsonContentType) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  if (isOfficialFirecrawlUrl(baseUrl)) {
+    const officialApiKey = process.env.FIRECRAWL_OFFICIAL_API_KEY?.trim() || process.env.FIRECRAWL_API_KEY?.trim();
+    if (officialApiKey) {
+      headers.Authorization = `Bearer ${officialApiKey}`;
+    }
+    return headers;
+  }
+
+  const customAuthorization = process.env.FIRECRAWL_SELF_HOSTED_AUTHORIZATION?.trim();
+  const basicAuth = process.env.FIRECRAWL_BASIC_AUTH?.trim();
+  const selfHostedApiKey = process.env.FIRECRAWL_SELF_HOSTED_API_KEY?.trim();
+  const legacyApiKey = process.env.FIRECRAWL_API_KEY?.trim();
+
+  if (customAuthorization) {
+    headers.Authorization = customAuthorization;
+  } else if (basicAuth) {
+    headers.Authorization = toBasicAuth(basicAuth);
+  } else if (selfHostedApiKey) {
+    headers['x-api-key'] = selfHostedApiKey;
+  } else if (legacyApiKey) {
+    headers.Authorization = `Bearer ${legacyApiKey}`;
+  }
+
+  return headers;
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -101,14 +144,11 @@ function extractPages(payload) {
     .filter((page) => page.content);
 }
 
-async function startCrawl(baseUrl, apiKey, url, options) {
+async function startCrawl(baseUrl, url, options) {
   const crawlUrl = `${baseUrl}/v1/crawl`;
   const response = await fetchWithTimeout(crawlUrl, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers: getFirecrawlHeaders(baseUrl, true),
     body: JSON.stringify({
       url,
       limit: options.limit || 20,
@@ -130,13 +170,13 @@ async function startCrawl(baseUrl, apiKey, url, options) {
   return payload;
 }
 
-async function pollCrawl(baseUrl, apiKey, jobId) {
+async function pollCrawl(baseUrl, jobId) {
   const pollUrl = `${baseUrl}/v1/crawl/${jobId}`;
   const start = Date.now();
 
   while (Date.now() - start < FIRECRAWL_TIMEOUT_MS) {
     const pollResp = await fetchWithTimeout(pollUrl, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: getFirecrawlHeaders(baseUrl),
     });
 
     const pollPayload = await readJsonResponse(pollResp, `Firecrawl poll crawl at ${pollUrl}`);
@@ -161,30 +201,29 @@ async function pollCrawl(baseUrl, apiKey, jobId) {
   throw new Error(`Firecrawl crawl timed out after ${Math.round(FIRECRAWL_TIMEOUT_MS / 1000)} seconds`);
 }
 
-async function scrapeWithBaseUrl(baseUrl, apiKey, url, options) {
-  const payload = await startCrawl(baseUrl, apiKey, url, options);
+async function scrapeWithBaseUrl(baseUrl, url, options) {
+  const payload = await startCrawl(baseUrl, url, options);
   const jobId = payload?.jobId || payload?.id || payload?.data?.jobId || payload?.data?.id;
 
   if (jobId) {
-    return pollCrawl(baseUrl, apiKey, jobId);
+    return pollCrawl(baseUrl, jobId);
   }
 
   return extractPages(payload);
 }
 
 export async function scrapeWebsite(url, options = {}) {
-  const apiKey = process.env.FIRECRAWL_API_KEY;
+  const baseUrls = getFirecrawlBaseUrls();
 
-  if (!apiKey) {
-    return { pages: [], totalPages: 0, error: 'Missing FIRECRAWL_API_KEY' };
+  if (!baseUrls.length) {
+    return { pages: [], totalPages: 0, error: 'Missing Firecrawl URL configuration' };
   }
 
-  const baseUrls = getFirecrawlBaseUrls();
   const errors = [];
 
   for (const baseUrl of baseUrls) {
     try {
-      const normalizedPages = await scrapeWithBaseUrl(baseUrl, apiKey, url, options);
+      const normalizedPages = await scrapeWithBaseUrl(baseUrl, url, options);
 
       if (!normalizedPages.length) {
         throw new Error('Firecrawl returned no usable page content');
