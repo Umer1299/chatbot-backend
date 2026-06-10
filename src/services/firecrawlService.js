@@ -24,6 +24,154 @@ const EXCLUDE_LINE_PATTERNS = [
   /terms (of service|and conditions)/i,
 ];
 
+const FIRECRAWL_TIMEOUT_MS = Number(process.env.FIRECRAWL_TIMEOUT_MS || 120000);
+const FIRECRAWL_POLL_INTERVAL_MS = Number(process.env.FIRECRAWL_POLL_INTERVAL_MS || 3000);
+const FIRECRAWL_REQUEST_TIMEOUT_MS = Number(process.env.FIRECRAWL_REQUEST_TIMEOUT_MS || 30000);
+const OFFICIAL_FIRECRAWL_URL = 'https://api.firecrawl.dev';
+
+function stripTrailingSlash(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function getFirecrawlBaseUrls() {
+  const configured = [process.env.GCP_VM_URL, process.env.FIRECRAWL_API_URL]
+    .map(stripTrailingSlash)
+    .filter(Boolean);
+
+  const shouldFallbackToOfficial = process.env.FIRECRAWL_FALLBACK_TO_OFFICIAL !== 'false';
+  const urls = shouldFallbackToOfficial ? [...configured, OFFICIAL_FIRECRAWL_URL] : configured;
+
+  return [...new Set(urls.length ? urls : [OFFICIAL_FIRECRAWL_URL])];
+}
+
+function truncateBody(value, maxLength = 300) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FIRECRAWL_REQUEST_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readJsonResponse(response, context) {
+  const contentType = response.headers.get('content-type') || '';
+  const rawBody = await response.text();
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(
+      `${context} returned non-JSON response (${response.status} ${response.statusText}). Body: ${truncateBody(rawBody)}`,
+    );
+  }
+
+  try {
+    return rawBody ? JSON.parse(rawBody) : {};
+  } catch (error) {
+    throw new Error(`${context} returned invalid JSON. Body: ${truncateBody(rawBody)}`);
+  }
+}
+
+function extractPages(payload) {
+  const candidates = [
+    payload?.data?.pages,
+    payload?.pages,
+    payload?.data?.data,
+    payload?.data,
+  ];
+
+  const pages = candidates.find(Array.isArray) || [];
+
+  return pages
+    .map((page) => ({
+      url: page?.url || page?.metadata?.sourceURL || page?.metadata?.url || '',
+      content: page?.markdown || page?.content || page?.html || '',
+      title: page?.metadata?.title || page?.title || '',
+    }))
+    .filter((page) => page.content);
+}
+
+async function startCrawl(baseUrl, apiKey, url, options) {
+  const crawlUrl = `${baseUrl}/v1/crawl`;
+  const response = await fetchWithTimeout(crawlUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      url,
+      limit: options.limit || 20,
+      maxDepth: options.maxDepth || 2,
+      scrapeOptions: {
+        formats: ['markdown'],
+        excludeTags: ['script', 'style', 'nav', 'footer', 'header', 'aside', '.cookie-banner', '#cookie'],
+      },
+      excludePaths: options.excludePaths || DEFAULT_EXCLUDE_PATHS,
+    }),
+  });
+
+  const payload = await readJsonResponse(response, `Firecrawl start crawl at ${crawlUrl}`);
+
+  if (!response.ok) {
+    throw new Error(payload?.error || payload?.message || `Failed to start crawl (${response.status})`);
+  }
+
+  return payload;
+}
+
+async function pollCrawl(baseUrl, apiKey, jobId) {
+  const pollUrl = `${baseUrl}/v1/crawl/${jobId}`;
+  const start = Date.now();
+
+  while (Date.now() - start < FIRECRAWL_TIMEOUT_MS) {
+    const pollResp = await fetchWithTimeout(pollUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+
+    const pollPayload = await readJsonResponse(pollResp, `Firecrawl poll crawl at ${pollUrl}`);
+
+    if (!pollResp.ok) {
+      throw new Error(pollPayload?.error || pollPayload?.message || `Crawl polling failed (${pollResp.status})`);
+    }
+
+    const status = pollPayload?.status || pollPayload?.data?.status;
+
+    if (status === 'completed') {
+      return extractPages(pollPayload);
+    }
+
+    if (status === 'failed') {
+      throw new Error(pollPayload?.error || pollPayload?.data?.error || 'Firecrawl crawl failed');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, FIRECRAWL_POLL_INTERVAL_MS));
+  }
+
+  throw new Error(`Firecrawl crawl timed out after ${Math.round(FIRECRAWL_TIMEOUT_MS / 1000)} seconds`);
+}
+
+async function scrapeWithBaseUrl(baseUrl, apiKey, url, options) {
+  const payload = await startCrawl(baseUrl, apiKey, url, options);
+  const jobId = payload?.jobId || payload?.id || payload?.data?.jobId || payload?.data?.id;
+
+  if (jobId) {
+    return pollCrawl(baseUrl, apiKey, jobId);
+  }
+
+  return extractPages(payload);
+}
+
 export async function scrapeWebsite(url, options = {}) {
   const apiKey = process.env.FIRECRAWL_API_KEY;
 
@@ -31,89 +179,37 @@ export async function scrapeWebsite(url, options = {}) {
     return { pages: [], totalPages: 0, error: 'Missing FIRECRAWL_API_KEY' };
   }
 
-  try {
-    const baseUrl = process.env.GCP_VM_URL?.trim() || 'https://api.firecrawl.dev';
-    const crawlUrl = `${baseUrl}/v1/crawl`;
+  const baseUrls = getFirecrawlBaseUrls();
+  const errors = [];
 
-    const response = await fetch(crawlUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url,
-        limit: options.limit || 20,
-        maxDepth: options.maxDepth || 2,
-        scrapeOptions: {
-          formats: ['markdown'],
-          excludeTags: ['script', 'style', 'nav', 'footer', 'header', 'aside', '.cookie-banner', '#cookie'],
-        },
-        excludePaths: options.excludePaths || DEFAULT_EXCLUDE_PATHS,
-      }),
-    });
+  for (const baseUrl of baseUrls) {
+    try {
+      const normalizedPages = await scrapeWithBaseUrl(baseUrl, apiKey, url, options);
 
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload?.error || payload?.message || 'Failed to start crawl');
-    }
-
-    let pages = [];
-    const jobId = payload?.jobId || payload?.id || payload?.data?.jobId;
-
-    if (jobId) {
-      const pollUrl = `${baseUrl}/v1/crawl/${jobId}`;
-      const start = Date.now();
-
-      while (Date.now() - start < 120000) {
-        const pollResp = await fetch(pollUrl, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-
-        const pollPayload = await pollResp.json();
-        if (!pollResp.ok) {
-          throw new Error(pollPayload?.error || pollPayload?.message || 'Crawl polling failed');
-        }
-
-        const status = pollPayload?.status || pollPayload?.data?.status;
-        if (status === 'completed') {
-          pages = pollPayload?.data?.pages || pollPayload?.pages || pollPayload?.data || [];
-          break;
-        }
-
-        if (status === 'failed') {
-          throw new Error(pollPayload?.error || 'Firecrawl crawl failed');
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+      if (!normalizedPages.length) {
+        throw new Error('Firecrawl returned no usable page content');
       }
 
-      if (!pages.length) {
-        throw new Error('Firecrawl crawl timed out after 120 seconds');
-      }
+      console.log(`Scraped ${normalizedPages.length} pages from ${url} via ${baseUrl}`);
 
-      console.log(`Scraped ${pages.length} pages from ${url}`);
-    } else {
-      pages = payload?.data?.pages || payload?.pages || payload?.data || [];
+      return {
+        pages: normalizedPages,
+        totalPages: normalizedPages.length,
+        error: null,
+      };
+    } catch (error) {
+      const message = `${baseUrl}: ${error.message}`;
+      errors.push(message);
+      console.error('[firecrawlService]', message);
     }
-
-    const normalizedPages = (Array.isArray(pages) ? pages : [])
-      .map((page) => ({
-        url: page?.url || '',
-        content: page?.markdown || page?.content || '',
-        title: page?.metadata?.title || page?.title || '',
-      }))
-      .filter((page) => page.content);
-
-    return {
-      pages: normalizedPages,
-      totalPages: normalizedPages.length,
-      error: null,
-    };
-  } catch (error) {
-    console.error('[firecrawlService]', error.message);
-    return { pages: [], totalPages: 0, error: 'Unable to scrape the provided URL. Please try again.' };
   }
+
+  const detailedMessage = errors.join(' | ');
+  return {
+    pages: [],
+    totalPages: 0,
+    error: detailedMessage || 'Unable to scrape the provided URL. Please try again.',
+  };
 }
 
 export function cleanAndChunkContent(pages) {
