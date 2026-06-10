@@ -57,6 +57,13 @@ async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) 
   return { inserted, skipped };
 }
 
+async function ensureBrandColumns() {
+  await pool.query(`ALTER TABLE businesses ADD COLUMN IF NOT EXISTS logo_url TEXT`);
+  await pool.query(`ALTER TABLE businesses ADD COLUMN IF NOT EXISTS primary_color TEXT`);
+  await pool.query(`ALTER TABLE bot_configs ADD COLUMN IF NOT EXISTS logo_url TEXT`);
+  await pool.query(`ALTER TABLE bot_configs ADD COLUMN IF NOT EXISTS primary_color TEXT`);
+}
+
 export async function setupVectorTable() {
   try {
     await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
@@ -82,7 +89,8 @@ export async function setupVectorTable() {
       ON knowledge_chunks
       USING hnsw (embedding vector_cosine_ops)
     `);
-    console.log('pgvector table and index ready');
+    await ensureBrandColumns();
+    console.log('pgvector table, indexes, and brand columns ready');
   } catch (error) {
     console.error('Failed to setup pgvector knowledge table:', error.message);
   }
@@ -195,7 +203,6 @@ export async function getKnowledgeAge(businessId) {
     );
 
     const row = result.rows[0];
-
     if (!row?.latest || row.total_chunks === 0) {
       return { ageInDays: null, totalChunks: 0, isStale: false };
     }
