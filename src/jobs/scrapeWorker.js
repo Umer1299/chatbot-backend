@@ -10,6 +10,8 @@ import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
 import { suggestAgents } from '../agents/agentSelector.js';
 
+const DEFAULT_PRIMARY_COLOR = '#111827';
+
 export async function addScrapeJob(businessId, url) {
   const { rows } = await pool.query(
     `INSERT INTO scrape_jobs (business_id, url, status, queued_at)
@@ -59,6 +61,59 @@ async function updateJobProgress(jobId, step, percent, extras = {}) {
   } catch (error) {
     console.error('SCRAPE_JOB_PROGRESS_UPDATE_ERROR:', error);
   }
+}
+
+function firstNonEmpty(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim())?.trim() || null;
+}
+
+function toAbsoluteUrl(value, baseUrl) {
+  if (!value) return null;
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return value;
+  }
+}
+
+function extractPrimaryColorFromValue(value) {
+  const text = typeof value === 'string' ? value : '';
+  const match = text.match(/#(?:[0-9a-fA-F]{3}){1,2}\b/);
+  return match?.[0] || null;
+}
+
+function extractBrandAssets(pages = [], sourceUrl = '', existing = {}) {
+  const homePage = pages.find((page) => page?.url === sourceUrl) || pages[0] || {};
+  const metadata = homePage.metadata || {};
+
+  const logoCandidate = firstNonEmpty(
+    metadata.logo,
+    metadata.logoUrl,
+    metadata.logo_url,
+    metadata['og:image'],
+    metadata.ogImage,
+    metadata.ogImageUrl,
+    metadata['twitter:image'],
+    metadata.twitterImage,
+    metadata.favicon,
+    metadata['msapplication-TileImage'],
+  );
+
+  const colorCandidate = firstNonEmpty(
+    metadata['theme-color'],
+    metadata.themeColor,
+    metadata['msapplication-TileColor'],
+    metadata.msapplicationTileColor,
+    extractPrimaryColorFromValue(metadata.description),
+    extractPrimaryColorFromValue(metadata.ogDescription),
+    existing.primary_color,
+    DEFAULT_PRIMARY_COLOR,
+  );
+
+  return {
+    logoUrl: toAbsoluteUrl(logoCandidate, homePage.url || sourceUrl),
+    primaryColor: colorCandidate,
+  };
 }
 
 async function processScrapeJob(job) {
@@ -133,12 +188,13 @@ async function processScrapeJob(job) {
 
     const { rows: businessRows } = await pool.query(
       `SELECT availability_slots, owner_phone, calendly_link,
-              business_name, primary_color
+              business_name, primary_color, logo_url
        FROM businesses
        WHERE id = $1`,
       [job.business_id],
     );
     const businessRow = businessRows[0] || {};
+    const brandAssets = extractBrandAssets(result.pages, job.url, businessRow);
 
     const businessInfo = {
       industry: analysisResult.industry,
@@ -154,6 +210,15 @@ async function processScrapeJob(job) {
       defaultAgentIds,
       businessRow.availability_slots,
       validation,
+    );
+
+    await pool.query(
+      `UPDATE businesses
+       SET logo_url = COALESCE($2, logo_url),
+           primary_color = COALESCE($3, primary_color),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [job.business_id, brandAssets.logoUrl, brandAssets.primaryColor],
     );
 
     await pool.query(
@@ -186,6 +251,8 @@ async function processScrapeJob(job) {
           ...analysisResult,
           suggestedAgentIds: defaultAgentIds,
           contentQuality: validation,
+          logoUrl: brandAssets.logoUrl,
+          primaryColor: brandAssets.primaryColor,
         }),
       ],
     );
@@ -197,8 +264,9 @@ async function processScrapeJob(job) {
          detection_confidence, content_quality_score,
          missing_fields, auto_generated_fields,
          selected_agents, system_prompt,
-         welcome_message, starter_prompts, is_draft)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
+         welcome_message, starter_prompts,
+         logo_url, primary_color, is_draft)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true)
        ON CONFLICT (business_id)
        DO UPDATE SET
          detected_industry = EXCLUDED.detected_industry,
@@ -206,6 +274,8 @@ async function processScrapeJob(job) {
          welcome_message = EXCLUDED.welcome_message,
          starter_prompts = EXCLUDED.starter_prompts,
          selected_agents = EXCLUDED.selected_agents,
+         logo_url = COALESCE(EXCLUDED.logo_url, bot_configs.logo_url),
+         primary_color = COALESCE(EXCLUDED.primary_color, bot_configs.primary_color),
          is_draft = true,
          updated_at = NOW()`,
       [
@@ -221,6 +291,8 @@ async function processScrapeJob(job) {
         generatedContent.systemPrompt,
         generatedContent.welcomeMessage,
         JSON.stringify(generatedContent.starterPrompts),
+        brandAssets.logoUrl,
+        brandAssets.primaryColor,
       ],
     );
 
