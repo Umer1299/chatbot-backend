@@ -8,6 +8,74 @@ import { getAvailableModels, getLockedModels, validateModelAccess } from '../ser
 
 const router = Router();
 
+function parseJsonValue(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback ?? value;
+  }
+}
+
+function promptToText(item) {
+  if (typeof item === 'string') return item;
+  if (!item || typeof item !== 'object') return '';
+  return item.prompt || item.text || item.label || item.title || item.question || item.message || item.value || item.name || '';
+}
+
+function normalizeStarterPrompts(value, fallback = []) {
+  const parsed = parseJsonValue(value, value);
+  const source = Array.isArray(parsed)
+    ? parsed
+    : typeof parsed === 'string'
+      ? parsed.split('\n')
+      : [];
+
+  const prompts = source
+    .map(promptToText)
+    .map((item) => String(item || '').trim())
+    .map((item) => item.replace(/^[-*\d.)\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 3);
+
+  if (prompts.length) return prompts;
+
+  const fallbackParsed = parseJsonValue(fallback, []);
+  if (Array.isArray(fallbackParsed) && fallbackParsed.length) {
+    return fallbackParsed.map(promptToText).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3);
+  }
+
+  return [
+    'What services do you offer?',
+    'How much does it cost?',
+    'How can I contact you?',
+  ];
+}
+
+function normalizeSelectedAgents(value, fallback = []) {
+  const parsed = parseJsonValue(value, value);
+  const source = Array.isArray(parsed)
+    ? parsed
+    : typeof parsed === 'string'
+      ? parsed.split(',')
+      : [];
+
+  const agents = source
+    .map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') return item.id || item.agentId || item.value || item.name || '';
+      return '';
+    })
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  if (agents.length) return agents;
+
+  const fallbackParsed = parseJsonValue(fallback, []);
+  return Array.isArray(fallbackParsed) ? fallbackParsed : [];
+}
+
 router.get('/settings', requireAuth, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM businesses WHERE id = $1', [req.business.businessId]);
   return res.json({ business: rows[0] || null });
@@ -80,7 +148,6 @@ router.patch('/model', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'modelId required' });
     }
 
-    // Verify model exists in database
     const modelRow = await pool.query(
       `SELECT model_id, branded_name
        FROM model_configs
@@ -91,7 +158,6 @@ router.patch('/model', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Invalid model ID: ' + modelId });
     }
 
-    // Check plan allows this model
     const validation = await validateModelAccess(modelId, plan);
     if (!validation.allowed) {
       console.warn('[business/model] Access denied', {
@@ -105,7 +171,6 @@ router.patch('/model', requireAuth, async (req, res) => {
       });
     }
 
-    // Update both tables
     await Promise.all([
       pool.query(
         `UPDATE bot_configs
@@ -121,12 +186,11 @@ router.patch('/model', requireAuth, async (req, res) => {
       )
     ]);
 
-    // Clear Redis bot config cache
     const bizRow = await pool.query(
       'SELECT bot_id FROM businesses WHERE id = $1',
       [businessId]
     );
-    if (bizRow.rows[0]?.bot_id) {
+    if (bizRow.rows[0]?.bot_id && redisClient) {
       await redisClient.del('chatbot_config:' + bizRow.rows[0].bot_id);
     }
 
@@ -160,12 +224,11 @@ router.post('/disable', requireAuth, async (req, res) => {
       WHERE id = $3
     `, [reason || 'Disabled by administrator', source, businessId]);
 
-    // Clear Redis cache immediately
     const bizRow = await pool.query(
       'SELECT bot_id FROM businesses WHERE id = $1',
       [businessId]
     );
-    if (bizRow.rows[0]?.bot_id) {
+    if (bizRow.rows[0]?.bot_id && redisClient) {
       await redisClient.del('chatbot_config:' + bizRow.rows[0].bot_id);
     }
 
@@ -200,7 +263,7 @@ router.post('/enable', requireAuth, async (req, res) => {
       'SELECT bot_id FROM businesses WHERE id = $1',
       [businessId]
     );
-    if (bizRow.rows[0]?.bot_id) {
+    if (bizRow.rows[0]?.bot_id && redisClient) {
       await redisClient.del('chatbot_config:' + bizRow.rows[0].bot_id);
     }
 
@@ -251,7 +314,8 @@ router.get('/bot-config', requireAuth, async (req, res) => {
     `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.welcome_message, b.industry
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
-     WHERE bc.business_id = $1 AND bc.active = true
+     WHERE bc.business_id = $1
+     ORDER BY bc.active DESC, bc.updated_at DESC
      LIMIT 1`,
     [req.business.businessId],
   );
@@ -268,35 +332,81 @@ router.get('/bot-config', requireAuth, async (req, res) => {
 });
 
 router.post('/bot-config/approve', requireAuth, async (req, res) => {
-  const { systemPrompt, welcomeMessage, starterPrompts, selectedAgents } = req.body;
-  const businessId = req.business.businessId;
+  try {
+    const businessId = req.business.businessId;
 
-  await pool.query(
-    `UPDATE bot_configs
-     SET system_prompt = $1,
-         welcome_message = $2,
-         starter_prompts = $3,
-         selected_agents = $4,
-         is_draft = false,
-         active = true,
-         updated_at = NOW()
-     WHERE business_id = $5`,
-    [systemPrompt, welcomeMessage, starterPrompts, selectedAgents, businessId],
-  );
+    const existingResult = await pool.query(
+      `SELECT system_prompt, welcome_message, starter_prompts, selected_agents
+       FROM bot_configs
+       WHERE business_id = $1
+       ORDER BY active DESC, updated_at DESC
+       LIMIT 1`,
+      [businessId],
+    );
 
-  await pool.query(
-    `UPDATE businesses
-     SET onboarding_complete = true,
-         updated_at = NOW()
-     WHERE id = $1`,
-    [businessId],
-  );
+    const existing = existingResult.rows[0];
+    if (!existing) {
+      return res.status(404).json({ error: 'Bot config not found', message: 'Run scrape/onboarding first.' });
+    }
 
-  const botResult = await pool.query('SELECT bot_id FROM businesses WHERE id = $1', [businessId]);
-  const botId = botResult.rows[0]?.bot_id;
-  if (botId && redisClient) await redisClient.del(`chatbot_config:${botId}`);
+    const systemPrompt = req.body.systemPrompt || req.body.system_prompt || existing.system_prompt;
+    const welcomeMessage = req.body.welcomeMessage || req.body.welcome_message || existing.welcome_message || 'Hi! How can we help you today?';
+    const starterPrompts = normalizeStarterPrompts(
+      req.body.starterPrompts ?? req.body.starter_prompts,
+      existing.starter_prompts,
+    );
+    const selectedAgents = normalizeSelectedAgents(
+      req.body.selectedAgents ?? req.body.selected_agents,
+      existing.selected_agents,
+    );
 
-  return res.json({ success: true, message: 'Chatbot is now live' });
+    if (!systemPrompt) {
+      return res.status(400).json({ error: 'systemPrompt required', message: 'System prompt is missing from request and existing config.' });
+    }
+
+    const updateResult = await pool.query(
+      `UPDATE bot_configs
+       SET system_prompt = $1,
+           welcome_message = $2,
+           starter_prompts = $3::jsonb,
+           selected_agents = $4,
+           is_draft = false,
+           active = true,
+           updated_at = NOW()
+       WHERE business_id = $5
+       RETURNING *`,
+      [systemPrompt, welcomeMessage, JSON.stringify(starterPrompts), selectedAgents, businessId],
+    );
+
+    await pool.query(
+      `UPDATE businesses
+       SET onboarding_complete = true,
+           welcome_message = COALESCE($2, welcome_message),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [businessId, welcomeMessage],
+    );
+
+    const botResult = await pool.query('SELECT bot_id FROM businesses WHERE id = $1', [businessId]);
+    const botId = botResult.rows[0]?.bot_id;
+    if (botId && redisClient) await redisClient.del(`chatbot_config:${botId}`);
+
+    return res.json({
+      success: true,
+      message: 'Chatbot is now live',
+      config: {
+        ...updateResult.rows[0],
+        starter_prompts: starterPrompts,
+        starterPrompts,
+      },
+    });
+  } catch (err) {
+    console.error('[business/bot-config/approve]', err.message, err.stack);
+    return res.status(500).json({
+      error: 'Failed to approve bot config',
+      message: err.message,
+    });
+  }
 });
 
 router.get('/bot-config/:botId/preview', async (req, res) => {
@@ -319,7 +429,7 @@ router.get('/bot-config/:botId/preview', async (req, res) => {
     industry: rows[0].industry,
     primaryColor: rows[0].primary_color,
     welcomeMessage: rows[0].welcome_message,
-    starterPrompts: rows[0].starter_prompts || [],
+    starterPrompts: normalizeStarterPrompts(rows[0].starter_prompts),
     isPreview: true,
     isDisabled: rows[0].is_disabled || false,
     disabledMessage: rows[0].disabled_reason || null
