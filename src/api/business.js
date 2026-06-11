@@ -107,7 +107,6 @@ router.patch('/settings', requireAuth, async (req, res) => {
   return res.json({ business });
 });
 
-
 router.get('/models', requireAuth, async (req, res) => {
   try {
     const plan = req.business.plan || 'trial';
@@ -136,7 +135,6 @@ router.get('/models', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
-
 
 router.patch('/model', requireAuth, async (req, res) => {
   try {
@@ -205,7 +203,6 @@ router.patch('/model', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
-
 
 router.post('/disable', requireAuth, async (req, res) => {
   try {
@@ -311,7 +308,7 @@ router.get('/status', requireAuth, async (req, res) => {
 
 router.get('/bot-config', requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.welcome_message, b.industry
+    `SELECT bc.*, b.calendly_link, b.availability_slots, b.bot_id, b.primary_color, b.industry
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
      WHERE bc.business_id = $1
@@ -381,10 +378,9 @@ router.post('/bot-config/approve', requireAuth, async (req, res) => {
     await pool.query(
       `UPDATE businesses
        SET onboarding_complete = true,
-           welcome_message = COALESCE($2, welcome_message),
            updated_at = NOW()
        WHERE id = $1`,
-      [businessId, welcomeMessage],
+      [businessId],
     );
 
     const botResult = await pool.query('SELECT bot_id FROM businesses WHERE id = $1', [businessId]);
