@@ -176,6 +176,20 @@ function extractBrandAssets(pages = [], sourceUrl = '', existing = {}) {
   };
 }
 
+function getScrapedTextStats(pages = []) {
+  const rawCharacters = pages.reduce(
+    (sum, page) => sum + String(page?.content || page?.markdown || '').trim().length,
+    0,
+  );
+
+  const titles = pages
+    .map((page) => page?.title || page?.metadata?.title)
+    .filter(Boolean)
+    .slice(0, 3);
+
+  return { rawCharacters, titles };
+}
+
 async function processScrapeJob(job) {
   try {
     await updateJobProgress(job.id, 'Scraping website', 10, {
@@ -200,7 +214,10 @@ async function processScrapeJob(job) {
     const filtered = chunks.filter(shouldEmbedChunk);
 
     if (!filtered.length) {
-      throw new Error('Could not extract usable content from this website');
+      const stats = getScrapedTextStats(result.pages);
+      throw new Error(
+        `Website was scraped (${result.pages.length} pages), but no embed-ready business content was found after cleaning. Raw scraped characters: ${stats.rawCharacters}. This usually means the site is image-heavy, has mostly navigation/cookie/footer text, or very short page copy.`,
+      );
     }
 
     await updateJobProgress(job.id, 'Generating embeddings', 40, {
@@ -394,11 +411,7 @@ export function startScrapeWorker() {
         await processScrapeJob(rows[0]);
       }
     } catch (error) {
-      console.error('SCRAPE_WORKER_LOOP_ERROR:', error);
+      console.error('SCRAPE_WORKER_ERROR:', error);
     }
   }, 5000);
-}
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startScrapeWorker();
 }
