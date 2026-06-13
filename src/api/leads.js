@@ -38,10 +38,15 @@ router.get('/', requireAuth, async (req, res) => {
     pool.query(
       `SELECT l.*, ps.stage_label, ps.stage_color
        FROM leads l
-       LEFT JOIN pipeline_stages ps
-         ON ps.stage_key = l.status
-         AND ps.industry = l.industry
-         AND (ps.business_id = l.business_id OR ps.business_id IS NULL)
+       LEFT JOIN LATERAL (
+         SELECT ps_inner.stage_label, ps_inner.stage_color
+         FROM pipeline_stages ps_inner
+         WHERE ps_inner.stage_key = l.status
+           AND ps_inner.industry = l.industry
+           AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL)
+         ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END
+         LIMIT 1
+       ) ps ON true
        WHERE ${where.join(' AND ')}
        ORDER BY l.${sortBy} ${sortDir}
        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
@@ -103,10 +108,15 @@ router.get('/:leadId', requireAuth, async (req, res) => {
     pool.query(
       `SELECT l.*, ps.stage_label, ps.stage_color
        FROM leads l
-       LEFT JOIN pipeline_stages ps
-         ON ps.stage_key = l.status
-         AND ps.industry = l.industry
-         AND (ps.business_id = l.business_id OR ps.business_id IS NULL)
+       LEFT JOIN LATERAL (
+         SELECT ps_inner.stage_label, ps_inner.stage_color
+         FROM pipeline_stages ps_inner
+         WHERE ps_inner.stage_key = l.status
+           AND ps_inner.industry = l.industry
+           AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL)
+         ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END
+         LIMIT 1
+       ) ps ON true
        WHERE l.id = $1 AND l.business_id = $2
        LIMIT 1`,
       [leadId, businessId],
