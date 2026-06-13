@@ -258,6 +258,69 @@ export async function scrapeWebsite(url, options = {}) {
   };
 }
 
+function stripMarkdownAndHtml(value) {
+  return String(value || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[#*_`~>]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function chunkWords(text, maxWords = 400, overlapWords = 50) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+
+  const chunks = [];
+  let start = 0;
+
+  while (start < words.length) {
+    const end = Math.min(start + maxWords, words.length);
+    chunks.push(words.slice(start, end).join(' '));
+    if (end === words.length) break;
+    start = Math.max(end - overlapWords, start + 1);
+  }
+
+  return chunks;
+}
+
+function fallbackCleanAndChunkContent(pages) {
+  const fallbackSections = [];
+
+  for (const page of pages || []) {
+    const metadata = page?.metadata || {};
+    const metadataText = [
+      page?.title,
+      metadata.title,
+      metadata.description,
+      metadata.ogDescription,
+      metadata['og:description'],
+      metadata.keywords,
+    ]
+      .filter(Boolean)
+      .join('. ');
+
+    const pageText = stripMarkdownAndHtml(page?.content || page?.markdown || '');
+    const combined = [metadataText, pageText]
+      .filter(Boolean)
+      .join('. ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (combined.length >= 120) {
+      fallbackSections.push(combined);
+    }
+  }
+
+  const combined = [...new Set(fallbackSections)].join('\n\n').trim();
+  if (combined.length < 150) return [];
+
+  return chunkWords(combined, 400, 50).filter((chunk) => chunk.length >= 150);
+}
+
 export function cleanAndChunkContent(pages) {
   if (!Array.isArray(pages)) return [];
 
@@ -279,36 +342,48 @@ export function cleanAndChunkContent(pages) {
     .filter((content) => content.length >= 150);
 
   const combined = cleanedPages.join('\n\n');
-  if (!combined) return [];
+  const strictChunks = [];
 
-  const paragraphs = combined.split(/\n\n+/);
-  const chunks = [];
-  let currentWords = [];
+  if (combined) {
+    const paragraphs = combined.split(/\n\n+/);
+    let currentWords = [];
 
-  for (const paragraph of paragraphs) {
-    const paragraphWords = paragraph.split(/\s+/).filter(Boolean);
-    if (paragraphWords.length === 0) continue;
+    for (const paragraph of paragraphs) {
+      const paragraphWords = paragraph.split(/\s+/).filter(Boolean);
+      if (paragraphWords.length === 0) continue;
 
-    const tentative = [...currentWords, ...paragraphWords];
+      const tentative = [...currentWords, ...paragraphWords];
 
-    if (tentative.length > 400 && currentWords.length > 0) {
-      chunks.push(currentWords.join(' '));
-      const overlap = currentWords.slice(-50);
-      currentWords = [...overlap, ...paragraphWords];
-    } else {
-      currentWords = tentative;
+      if (tentative.length > 400 && currentWords.length > 0) {
+        strictChunks.push(currentWords.join(' '));
+        const overlap = currentWords.slice(-50);
+        currentWords = [...overlap, ...paragraphWords];
+      } else {
+        currentWords = tentative;
+      }
+    }
+
+    if (currentWords.length > 0) {
+      strictChunks.push(currentWords.join(' '));
     }
   }
 
-  if (currentWords.length > 0) {
-    chunks.push(currentWords.join(' '));
-  }
-
-  return chunks.filter((chunk) => {
+  const filteredStrictChunks = strictChunks.filter((chunk) => {
     const wordCount = chunk.split(/\s+/).filter(Boolean).length;
     const pipeCount = chunk.split('|').length - 1;
     return wordCount >= 30 && pipeCount <= 5;
   });
+
+  if (filteredStrictChunks.length) return filteredStrictChunks;
+
+  const fallbackChunks = fallbackCleanAndChunkContent(pages);
+  if (fallbackChunks.length) {
+    console.warn(
+      `[firecrawlService] Using thin-site fallback extraction. pages=${pages.length} chunks=${fallbackChunks.length}`,
+    );
+  }
+
+  return fallbackChunks;
 }
 
 export function shouldEmbedChunk(chunk) {
