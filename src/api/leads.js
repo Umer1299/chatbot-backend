@@ -11,183 +11,83 @@ function parsePositiveInt(value, fallback, max) {
   return Math.min(parsed, max);
 }
 
+function toNumber(value) {
+  const num = Number(value || 0);
+  return Number.isFinite(num) ? num : 0;
+}
+
 router.get('/', requireAuth, async (req, res) => {
   const page = parseInt(req.query.page || '1', 10);
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
   const offset = (page - 1) * limit;
-
   const allowedSortBy = new Set(['created_at', 'lead_score', 'status', 'estimated_value', 'actual_value']);
   const sortBy = allowedSortBy.has(req.query.sortBy) ? req.query.sortBy : 'created_at';
   const sortDir = req.query.sortDir === 'asc' ? 'ASC' : 'DESC';
-
   const where = ['l.business_id = $1'];
   const countWhere = ['business_id = $1'];
   const values = [req.business.businessId];
-
   const addFilter = (condition, countCondition, value) => {
     values.push(value);
     where.push(condition.replace('$N', `$${values.length}`));
     countWhere.push(countCondition.replace('$N', `$${values.length}`));
   };
-
   if (req.query.score) addFilter('l.lead_score = $N', 'lead_score = $N', req.query.score);
   if (req.query.status) addFilter('l.status = $N', 'status = $N', req.query.status);
-  if (req.query.search) {
-    addFilter('(l.full_name ILIKE $N OR l.phone ILIKE $N OR l.email ILIKE $N)', '(full_name ILIKE $N OR phone ILIKE $N OR email ILIKE $N)', `%${req.query.search}%`);
-  }
+  if (req.query.search) addFilter('(l.full_name ILIKE $N OR l.phone ILIKE $N OR l.email ILIKE $N)', '(full_name ILIKE $N OR phone ILIKE $N OR email ILIKE $N)', `%${req.query.search}%`);
   if (req.query.dateFrom) addFilter('l.created_at >= $N', 'created_at >= $N', req.query.dateFrom);
   if (req.query.dateTo) addFilter('l.created_at <= $N', 'created_at <= $N', req.query.dateTo);
-
   const listValues = [...values, limit, offset];
-
   const [listResult, countResult] = await Promise.all([
-    pool.query(
-      `SELECT l.*, ps.stage_label, ps.stage_color
-       FROM leads l
-       LEFT JOIN LATERAL (
-         SELECT ps_inner.stage_label, ps_inner.stage_color
-         FROM pipeline_stages ps_inner
-         WHERE ps_inner.stage_key = l.status
-           AND ps_inner.industry = l.industry
-           AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL)
-         ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END
-         LIMIT 1
-       ) ps ON true
-       WHERE ${where.join(' AND ')}
-       ORDER BY l.${sortBy} ${sortDir}
-       LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-      listValues,
-    ),
+    pool.query(`SELECT l.*, ps.stage_label, ps.stage_color FROM leads l LEFT JOIN LATERAL (SELECT ps_inner.stage_label, ps_inner.stage_color FROM pipeline_stages ps_inner WHERE ps_inner.stage_key = l.status AND ps_inner.industry = l.industry AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL) ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END LIMIT 1) ps ON true WHERE ${where.join(' AND ')} ORDER BY l.${sortBy} ${sortDir} LIMIT $${values.length + 1} OFFSET $${values.length + 2}`, listValues),
     pool.query(`SELECT COUNT(*)::int AS total FROM leads WHERE ${countWhere.join(' AND ')}`, values),
   ]);
-
   const total = countResult.rows[0]?.total || 0;
-
   return res.json({ leads: listResult.rows, total, page, pages: Math.ceil(total / limit) });
 });
 
 router.get('/analytics/summary', requireAuth, async (req, res) => {
   const days = parseInt(req.query.days || '30', 10);
   const businessId = req.business.businessId;
-
   const [overviewResult, byDayResult, agentUsageResult, knowledgeAge] = await Promise.all([
-    pool.query(`SELECT
-      COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot,
-      COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm,
-      COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold,
-      COUNT(*) FILTER (WHERE status='appointment_shown')::int AS appointments_shown,
-      COUNT(*) FILTER (WHERE status='won')::int AS won,
-      COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue,
-      COALESCE(SUM(estimated_value),0) AS pipeline_value,
-      COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM created_at) < 8 OR EXTRACT(HOUR FROM created_at) >= 18 OR EXTRACT(DOW FROM created_at) IN (0,6))::int AS after_hours
-      FROM leads
-      WHERE business_id=$1 AND created_at >= NOW() - ($2::text || ' days')::interval`, [businessId, days]),
-    pool.query(`SELECT DATE(created_at) AS date,
-      COUNT(*)::int AS total,
-      COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot
-      FROM leads
-      WHERE business_id=$1 AND created_at >= NOW() - ($2::text || ' days')::interval
-      GROUP BY DATE(created_at)
-      ORDER BY date ASC`, [businessId, days]),
-    pool.query(`SELECT agent, COUNT(*)::int AS total
-      FROM leads, UNNEST(COALESCE(agents_used, ARRAY[]::text[])) AS agent
-      WHERE business_id=$1
-      GROUP BY agent
-      ORDER BY total DESC`, [businessId]),
+    pool.query(`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot, COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm, COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold, COUNT(*) FILTER (WHERE status='appointment_shown')::int AS appointments_shown, COUNT(*) FILTER (WHERE status='won')::int AS won, COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue, COALESCE(SUM(estimated_value),0) AS pipeline_value, COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM created_at) < 8 OR EXTRACT(HOUR FROM created_at) >= 18 OR EXTRACT(DOW FROM created_at) IN (0,6))::int AS after_hours FROM leads WHERE business_id=$1 AND created_at >= NOW() - ($2::text || ' days')::interval`, [businessId, days]),
+    pool.query(`SELECT DATE(created_at) AS date, COUNT(*)::int AS total, COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot FROM leads WHERE business_id=$1 AND created_at >= NOW() - ($2::text || ' days')::interval GROUP BY DATE(created_at) ORDER BY date ASC`, [businessId, days]),
+    pool.query(`SELECT agent, COUNT(*)::int AS total FROM leads, UNNEST(COALESCE(agents_used, ARRAY[]::text[])) AS agent WHERE business_id=$1 GROUP BY agent ORDER BY total DESC`, [businessId]),
     getKnowledgeAge(businessId),
   ]);
-
-  return res.json({
-    overview: overviewResult.rows[0] || {},
-    byDay: byDayResult.rows,
-    agentUsage: agentUsageResult.rows,
-    knowledgeAge,
-  });
+  return res.json({ overview: overviewResult.rows[0] || {}, byDay: byDayResult.rows, agentUsage: agentUsageResult.rows, knowledgeAge });
 });
 
 router.get('/analytics/weekly', requireAuth, async (req, res) => {
   try {
     const businessId = req.business.businessId;
     const weeks = parsePositiveInt(req.query.weeks || '8', 8, 26);
-
-    const [weeklyResult, currentResult, previousResult, recentLeadsResult, agentUsageResult] = await Promise.all([
-      pool.query(`WITH bounds AS (
-          SELECT date_trunc('week', NOW()) - (($2::int - 1) * interval '1 week') AS start_date
-        )
-        SELECT
-          date_trunc('week', l.created_at)::date AS week_start,
-          (date_trunc('week', l.created_at) + interval '6 days')::date AS week_end,
-          COUNT(*)::int AS total,
-          COUNT(*) FILTER (WHERE l.lead_score='hot')::int AS hot,
-          COUNT(*) FILTER (WHERE l.lead_score='warm')::int AS warm,
-          COUNT(*) FILTER (WHERE l.lead_score='cold')::int AS cold,
-          COUNT(*) FILTER (WHERE l.status='appointment_shown')::int AS appointments_shown,
-          COUNT(*) FILTER (WHERE l.appointment_scheduled IS TRUE)::int AS appointments_scheduled,
-          COUNT(*) FILTER (WHERE l.status='won')::int AS won,
-          COALESCE(SUM(CASE WHEN l.status='won' THEN l.actual_value ELSE 0 END),0) AS revenue,
-          COALESCE(SUM(l.estimated_value),0) AS pipeline_value,
-          COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM l.created_at) < 8 OR EXTRACT(HOUR FROM l.created_at) >= 18 OR EXTRACT(DOW FROM l.created_at) IN (0,6))::int AS after_hours
-        FROM leads l, bounds b
-        WHERE l.business_id=$1
-          AND l.created_at >= b.start_date
-        GROUP BY date_trunc('week', l.created_at)
-        ORDER BY week_start ASC`, [businessId, weeks]),
-      pool.query(`SELECT
-          COUNT(*)::int AS total,
-          COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot,
-          COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm,
-          COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold,
-          COUNT(*) FILTER (WHERE appointment_scheduled IS TRUE)::int AS appointments_scheduled,
-          COUNT(*) FILTER (WHERE status='won')::int AS won,
-          COALESCE(SUM(estimated_value),0) AS pipeline_value,
-          COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue
-        FROM leads
-        WHERE business_id=$1
-          AND created_at >= date_trunc('week', NOW())`, [businessId]),
-      pool.query(`SELECT
-          COUNT(*)::int AS total,
-          COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot,
-          COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm,
-          COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold,
-          COUNT(*) FILTER (WHERE appointment_scheduled IS TRUE)::int AS appointments_scheduled,
-          COUNT(*) FILTER (WHERE status='won')::int AS won,
-          COALESCE(SUM(estimated_value),0) AS pipeline_value,
-          COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue
-        FROM leads
-        WHERE business_id=$1
-          AND created_at >= date_trunc('week', NOW()) - interval '1 week'
-          AND created_at < date_trunc('week', NOW())`, [businessId]),
-      pool.query(`SELECT id, full_name, email, phone, lead_score, status, budget_range, appointment_scheduled, created_at
-        FROM leads
-        WHERE business_id=$1
-          AND created_at >= date_trunc('week', NOW())
-        ORDER BY created_at DESC
-        LIMIT 10`, [businessId]),
-      pool.query(`SELECT agent, COUNT(*)::int AS total
-        FROM leads, UNNEST(COALESCE(agents_used, ARRAY[]::text[])) AS agent
-        WHERE business_id=$1
-          AND created_at >= date_trunc('week', NOW())
-        GROUP BY agent
-        ORDER BY total DESC`, [businessId]),
+    const [weeklyResult, currentLeadResult, previousLeadResult, recentLeadsResult, agentUsageResult, conversationResult, messageResult, peakUsageResult, mostAskedResult, failedQuestionsResult, intentResult] = await Promise.all([
+      pool.query(`WITH bounds AS (SELECT date_trunc('week', NOW()) - (($2::int - 1) * interval '1 week') AS start_date) SELECT date_trunc('week', l.created_at)::date AS week_start, (date_trunc('week', l.created_at) + interval '6 days')::date AS week_end, COUNT(*)::int AS total, COUNT(*) FILTER (WHERE l.lead_score='hot')::int AS hot, COUNT(*) FILTER (WHERE l.lead_score='warm')::int AS warm, COUNT(*) FILTER (WHERE l.lead_score='cold')::int AS cold, COUNT(*) FILTER (WHERE l.appointment_scheduled IS TRUE)::int AS appointments_scheduled, COUNT(*) FILTER (WHERE l.status='won')::int AS won, COALESCE(SUM(l.estimated_value),0) AS pipeline_value, COALESCE(SUM(CASE WHEN l.status='won' THEN l.actual_value ELSE 0 END),0) AS revenue FROM leads l, bounds b WHERE l.business_id=$1 AND l.created_at >= b.start_date GROUP BY date_trunc('week', l.created_at) ORDER BY week_start ASC`, [businessId, weeks]),
+      pool.query(`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot, COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm, COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold, COUNT(*) FILTER (WHERE appointment_scheduled IS TRUE)::int AS appointments_scheduled, COUNT(*) FILTER (WHERE status='won')::int AS won, COALESCE(SUM(estimated_value),0) AS pipeline_value, COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue FROM leads WHERE business_id=$1 AND created_at >= date_trunc('week', NOW())`, [businessId]),
+      pool.query(`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot, COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm, COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold, COUNT(*) FILTER (WHERE appointment_scheduled IS TRUE)::int AS appointments_scheduled, COUNT(*) FILTER (WHERE status='won')::int AS won, COALESCE(SUM(estimated_value),0) AS pipeline_value, COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue FROM leads WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) - interval '1 week' AND created_at < date_trunc('week', NOW())`, [businessId]),
+      pool.query(`SELECT id, full_name, email, phone, lead_score, status, budget_range, appointment_scheduled, created_at FROM leads WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) ORDER BY created_at DESC LIMIT 10`, [businessId]),
+      pool.query(`SELECT agent, COUNT(*)::int AS total FROM leads, UNNEST(COALESCE(agents_used, ARRAY[]::text[])) AS agent WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) GROUP BY agent ORDER BY total DESC`, [businessId]),
+      pool.query(`SELECT COUNT(*)::int AS total_conversations FROM sessions WHERE business_id=$1 AND started_at >= date_trunc('week', NOW())`, [businessId]),
+      pool.query(`SELECT COUNT(*)::int AS total_messages FROM messages WHERE business_id=$1 AND created_at >= date_trunc('week', NOW())`, [businessId]),
+      pool.query(`SELECT DATE(created_at) AS date, COUNT(*)::int AS total FROM messages WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) GROUP BY DATE(created_at) ORDER BY total DESC, date ASC LIMIT 1`, [businessId]),
+      pool.query(`SELECT content AS question, COUNT(*)::int AS total FROM messages WHERE business_id=$1 AND role='user' AND created_at >= date_trunc('week', NOW()) AND length(trim(content)) > 3 GROUP BY content ORDER BY total DESC, max(created_at) DESC LIMIT 5`, [businessId]),
+      pool.query(`SELECT m.content AS question, COUNT(*)::int AS total FROM messages m WHERE m.business_id=$1 AND m.created_at >= date_trunc('week', NOW()) AND m.role='user' AND EXISTS (SELECT 1 FROM messages a WHERE a.session_id=m.session_id AND a.role='assistant' AND a.created_at > m.created_at AND (a.content ILIKE '%server error%' OR a.content ILIKE '%something went wrong%' OR a.content ILIKE '%no response%')) GROUP BY m.content ORDER BY total DESC LIMIT 5`, [businessId]),
+      pool.query(`SELECT COALESCE(NULLIF(budget_range, ''), lead_score, 'General enquiry') AS category, COUNT(*)::int AS total FROM leads WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) GROUP BY category ORDER BY total DESC LIMIT 5`, [businessId]),
     ]);
-
-    const currentWeek = currentResult.rows[0] || {};
-    const previousWeek = previousResult.rows[0] || {};
-    const currentTotal = Number(currentWeek.total || 0);
-    const previousTotal = Number(previousWeek.total || 0);
-    const change = previousTotal === 0
-      ? (currentTotal > 0 ? 100 : 0)
-      : Math.round(((currentTotal - previousTotal) / previousTotal) * 100);
-
-    return res.json({
-      currentWeek,
-      previousWeek,
-      changePercent: change,
-      weekly: weeklyResult.rows,
-      recentLeads: recentLeadsResult.rows,
-      agentUsage: agentUsageResult.rows,
-    });
+    const currentWeek = currentLeadResult.rows[0] || {};
+    const previousWeek = previousLeadResult.rows[0] || {};
+    const totalConversations = toNumber(conversationResult.rows[0]?.total_conversations);
+    const totalMessages = toNumber(messageResult.rows[0]?.total_messages);
+    const leadsCaptured = toNumber(currentWeek.total);
+    const previousTotal = toNumber(previousWeek.total);
+    const changePercent = previousTotal === 0 ? (leadsCaptured > 0 ? 100 : 0) : Math.round(((leadsCaptured - previousTotal) / previousTotal) * 100);
+    const peakUsageDay = peakUsageResult.rows[0] || null;
+    const mostAskedQuestions = mostAskedResult.rows;
+    const failedQuestions = failedQuestionsResult.rows;
+    const topIntentCategories = intentResult.rows;
+    const insights = [{ title: 'Weekly summary', text: `This chatbot had ${totalConversations} conversations, ${totalMessages} messages, and ${leadsCaptured} leads captured this week.` }];
+    const recommendations = totalConversations === 0 ? ['Increase traffic to the page or test widget placement.'] : leadsCaptured === 0 ? ['Improve lead capture prompts and follow-up questions.'] : ['Follow up with captured leads quickly.'];
+    return res.json({ totalConversations, totalMessages, leadsCaptured, peakUsageDay, mostAskedQuestions, failedQuestions, topIntentCategories, insights, recommendations, currentWeek, previousWeek, changePercent, weekly: weeklyResult.rows, recentLeads: recentLeadsResult.rows, agentUsage: agentUsageResult.rows });
   } catch (error) {
     console.error('LEADS_WEEKLY_ANALYTICS_ERROR:', error);
     return res.status(500).json({ error: 'Failed to load weekly lead analytics', detail: error.message });
@@ -197,73 +97,31 @@ router.get('/analytics/weekly', requireAuth, async (req, res) => {
 router.get('/:leadId', requireAuth, async (req, res) => {
   const { leadId } = req.params;
   const businessId = req.business.businessId;
-
   const [leadResult, messagesResult, notificationsResult] = await Promise.all([
-    pool.query(
-      `SELECT l.*, ps.stage_label, ps.stage_color
-       FROM leads l
-       LEFT JOIN LATERAL (
-         SELECT ps_inner.stage_label, ps_inner.stage_color
-         FROM pipeline_stages ps_inner
-         WHERE ps_inner.stage_key = l.status
-           AND ps_inner.industry = l.industry
-           AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL)
-         ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END
-         LIMIT 1
-       ) ps ON true
-       WHERE l.id = $1 AND l.business_id = $2
-       LIMIT 1`,
-      [leadId, businessId],
-    ),
-    pool.query(
-      `SELECT * FROM messages
-       WHERE session_id = (
-         SELECT id FROM sessions WHERE lead_id = $1 LIMIT 1
-       )
-       ORDER BY created_at ASC`,
-      [leadId],
-    ),
-    pool.query(
-      `SELECT * FROM notifications
-       WHERE lead_id = $1
-       ORDER BY sent_at DESC
-       LIMIT 10`,
-      [leadId],
-    ),
+    pool.query(`SELECT l.*, ps.stage_label, ps.stage_color FROM leads l LEFT JOIN LATERAL (SELECT ps_inner.stage_label, ps_inner.stage_color FROM pipeline_stages ps_inner WHERE ps_inner.stage_key = l.status AND ps_inner.industry = l.industry AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL) ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END LIMIT 1) ps ON true WHERE l.id = $1 AND l.business_id = $2 LIMIT 1`, [leadId, businessId]),
+    pool.query(`SELECT * FROM messages WHERE session_id = (SELECT id FROM sessions WHERE lead_id = $1 LIMIT 1) ORDER BY created_at ASC`, [leadId]),
+    pool.query(`SELECT * FROM notifications WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 10`, [leadId]),
   ]);
-
   if (!leadResult.rows[0]) return res.status(404).json({ error: 'Lead not found' });
-
-  return res.json({
-    lead: leadResult.rows[0],
-    messages: messagesResult.rows,
-    notifications: notificationsResult.rows,
-  });
+  return res.json({ lead: leadResult.rows[0], messages: messagesResult.rows, notifications: notificationsResult.rows });
 });
 
 router.patch('/:leadId', requireAuth, async (req, res) => {
   const allowedFields = ['status', 'owner_notes', 'follow_up_date', 'follow_up_note', 'estimated_value', 'actual_value', 'tags', 'assigned_to'];
   const updates = [];
   const values = [req.params.leadId, req.business.businessId];
-
   for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(req.body, field)) {
       values.push(req.body[field]);
       updates.push(`${field} = $${values.length}`);
     }
   }
-
   if (updates.length === 0) return res.status(400).json({ error: 'No valid fields provided' });
-
   updates.push('updated_at = NOW()');
-  if (Object.prototype.hasOwnProperty.call(req.body, 'status')) {
-    updates.push('status_updated_at = NOW()');
-  }
-
+  if (Object.prototype.hasOwnProperty.call(req.body, 'status')) updates.push('status_updated_at = NOW()');
   const query = `UPDATE leads SET ${updates.join(', ')} WHERE id = $1 AND business_id = $2 RETURNING *`;
   const result = await pool.query(query, values);
   if (!result.rows[0]) return res.status(404).json({ error: 'Lead not found' });
-
   return res.json({ lead: result.rows[0] });
 });
 
