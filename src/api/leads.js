@@ -5,6 +5,12 @@ import requireAuth from '../middleware/jwtAuth.js';
 
 const router = Router();
 
+function parsePositiveInt(value, fallback, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
+}
+
 router.get('/', requireAuth, async (req, res) => {
   const page = parseInt(req.query.page || '1', 10);
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
@@ -98,6 +104,94 @@ router.get('/analytics/summary', requireAuth, async (req, res) => {
     agentUsage: agentUsageResult.rows,
     knowledgeAge,
   });
+});
+
+router.get('/analytics/weekly', requireAuth, async (req, res) => {
+  try {
+    const businessId = req.business.businessId;
+    const weeks = parsePositiveInt(req.query.weeks || '8', 8, 26);
+
+    const [weeklyResult, currentResult, previousResult, recentLeadsResult, agentUsageResult] = await Promise.all([
+      pool.query(`WITH bounds AS (
+          SELECT date_trunc('week', NOW()) - (($2::int - 1) * interval '1 week') AS start_date
+        )
+        SELECT
+          date_trunc('week', l.created_at)::date AS week_start,
+          (date_trunc('week', l.created_at) + interval '6 days')::date AS week_end,
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE l.lead_score='hot')::int AS hot,
+          COUNT(*) FILTER (WHERE l.lead_score='warm')::int AS warm,
+          COUNT(*) FILTER (WHERE l.lead_score='cold')::int AS cold,
+          COUNT(*) FILTER (WHERE l.status='appointment_shown')::int AS appointments_shown,
+          COUNT(*) FILTER (WHERE l.appointment_scheduled IS TRUE)::int AS appointments_scheduled,
+          COUNT(*) FILTER (WHERE l.status='won')::int AS won,
+          COALESCE(SUM(CASE WHEN l.status='won' THEN l.actual_value ELSE 0 END),0) AS revenue,
+          COALESCE(SUM(l.estimated_value),0) AS pipeline_value,
+          COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM l.created_at) < 8 OR EXTRACT(HOUR FROM l.created_at) >= 18 OR EXTRACT(DOW FROM l.created_at) IN (0,6))::int AS after_hours
+        FROM leads l, bounds b
+        WHERE l.business_id=$1
+          AND l.created_at >= b.start_date
+        GROUP BY date_trunc('week', l.created_at)
+        ORDER BY week_start ASC`, [businessId, weeks]),
+      pool.query(`SELECT
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot,
+          COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm,
+          COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold,
+          COUNT(*) FILTER (WHERE appointment_scheduled IS TRUE)::int AS appointments_scheduled,
+          COUNT(*) FILTER (WHERE status='won')::int AS won,
+          COALESCE(SUM(estimated_value),0) AS pipeline_value,
+          COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue
+        FROM leads
+        WHERE business_id=$1
+          AND created_at >= date_trunc('week', NOW())`, [businessId]),
+      pool.query(`SELECT
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE lead_score='hot')::int AS hot,
+          COUNT(*) FILTER (WHERE lead_score='warm')::int AS warm,
+          COUNT(*) FILTER (WHERE lead_score='cold')::int AS cold,
+          COUNT(*) FILTER (WHERE appointment_scheduled IS TRUE)::int AS appointments_scheduled,
+          COUNT(*) FILTER (WHERE status='won')::int AS won,
+          COALESCE(SUM(estimated_value),0) AS pipeline_value,
+          COALESCE(SUM(CASE WHEN status='won' THEN actual_value ELSE 0 END),0) AS revenue
+        FROM leads
+        WHERE business_id=$1
+          AND created_at >= date_trunc('week', NOW()) - interval '1 week'
+          AND created_at < date_trunc('week', NOW())`, [businessId]),
+      pool.query(`SELECT id, full_name, email, phone, lead_score, status, budget_range, appointment_scheduled, created_at
+        FROM leads
+        WHERE business_id=$1
+          AND created_at >= date_trunc('week', NOW())
+        ORDER BY created_at DESC
+        LIMIT 10`, [businessId]),
+      pool.query(`SELECT agent, COUNT(*)::int AS total
+        FROM leads, UNNEST(COALESCE(agents_used, ARRAY[]::text[])) AS agent
+        WHERE business_id=$1
+          AND created_at >= date_trunc('week', NOW())
+        GROUP BY agent
+        ORDER BY total DESC`, [businessId]),
+    ]);
+
+    const currentWeek = currentResult.rows[0] || {};
+    const previousWeek = previousResult.rows[0] || {};
+    const currentTotal = Number(currentWeek.total || 0);
+    const previousTotal = Number(previousWeek.total || 0);
+    const change = previousTotal === 0
+      ? (currentTotal > 0 ? 100 : 0)
+      : Math.round(((currentTotal - previousTotal) / previousTotal) * 100);
+
+    return res.json({
+      currentWeek,
+      previousWeek,
+      changePercent: change,
+      weekly: weeklyResult.rows,
+      recentLeads: recentLeadsResult.rows,
+      agentUsage: agentUsageResult.rows,
+    });
+  } catch (error) {
+    console.error('LEADS_WEEKLY_ANALYTICS_ERROR:', error);
+    return res.status(500).json({ error: 'Failed to load weekly lead analytics', detail: error.message });
+  }
 });
 
 router.get('/:leadId', requireAuth, async (req, res) => {
