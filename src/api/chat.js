@@ -21,11 +21,150 @@ function isSimpleInitialGreeting(message, conversationHistory = []) {
   return conversationHistory.length === 0 && SIMPLE_GREETING_PATTERN.test((message || '').trim());
 }
 
+function findBalancedJsonObjects(text = '') {
+  const source = String(text || '');
+  const objects = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (char === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (char === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (char === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(source.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return objects;
+}
+
+function tryParseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function getLeadJsonCandidates(text = '') {
+  return findBalancedJsonObjects(text)
+    .map((candidate) => ({ raw: candidate, parsed: tryParseJsonObject(candidate) }))
+    .filter((item) => item.parsed);
+}
+
+function looksLikeLeadData(data = {}) {
+  const keys = Object.keys(data).map((key) => key.toLowerCase());
+  const hasContact = ['name', 'full_name', 'email', 'phone'].some((key) => keys.includes(key));
+  const hasLeadFields = ['project_type', 'budget_range', 'timeline', 'is_decision_maker', 'lead_score', 'needs', 'business_goal'].some((key) => keys.includes(key));
+  return hasContact && hasLeadFields;
+}
+
+function normalizeLeadData(rawData = {}, config = {}, conversationText = '') {
+  const data = { ...rawData };
+  const text = String(conversationText || '').toLowerCase();
+  const hasEmail = Boolean(data.email);
+  const hasPhone = Boolean(data.phone);
+  const hasBudget = Boolean(data.budget_range || data.budget || data.estimated_budget);
+  const hasTimeline = Boolean(data.timeline || data.preferred_timeline);
+  const decisionKnown = typeof data.is_decision_maker === 'boolean' || /decision maker|signing off|sign off|owner/i.test(String(conversationText || ''));
+
+  const normalized = {
+    ...data,
+    name: data.name || data.full_name || data.fullName || null,
+    phone: data.phone || data.phone_number || data.phoneNumber || null,
+    email: data.email || data.email_address || data.emailAddress || null,
+    company_name: data.company_name || data.companyName || null,
+    project_type: data.project_type || data.projectType || data.service_needed || data.service || data.needs || null,
+    needs: data.needs || data.business_goal || data.project_details || null,
+    budget_range: data.budget_range || data.budget || data.estimated_budget || null,
+    timeline: data.timeline || data.preferred_timeline || null,
+    is_decision_maker: typeof data.is_decision_maker === 'boolean' ? data.is_decision_maker : (/\byes\b.*decision maker|decision maker/i.test(String(conversationText || '')) ? true : null),
+    appointment_scheduled: Boolean(data.appointment_scheduled || data.has_appointment || /\b(meeting|appointment|book|call)\b/i.test(String(conversationText || ''))),
+    agents_used: Array.isArray(data.agents_used) ? data.agents_used : [],
+    score_reasons: Array.isArray(data.score_reasons) ? data.score_reasons : [],
+  };
+
+  if (!normalized.lead_score) {
+    if (hasEmail && hasPhone && hasBudget && hasTimeline && decisionKnown) normalized.lead_score = 'hot';
+    else if ((hasEmail || hasPhone) && (hasBudget || hasTimeline)) normalized.lead_score = 'warm';
+    else normalized.lead_score = 'cold';
+  }
+
+  if (!normalized.score_reasons.length) {
+    if (hasEmail && hasPhone) normalized.score_reasons.push('Contact details provided');
+    if (hasBudget) normalized.score_reasons.push('Budget provided');
+    if (hasTimeline) normalized.score_reasons.push('Timeline provided');
+    if (decisionKnown) normalized.score_reasons.push('Decision-maker status known');
+    if (normalized.appointment_scheduled) normalized.score_reasons.push('Meeting requested');
+  }
+
+  if (!normalized.urgency_flag && /\b(urgent|asap|emergency|this week|2 weeks|two weeks|soon)\b/i.test(text)) {
+    normalized.urgency_flag = true;
+    normalized.urgency_reason = normalized.urgency_reason || 'Short or urgent timeline mentioned';
+  }
+
+  if (!normalized.agents_used.length && Array.isArray(config.selected_agents)) {
+    normalized.agents_used = config.selected_agents;
+  }
+
+  return normalized;
+}
+
+function extractLeadDataFromResponse(fullResponse = '', config = {}) {
+  const text = String(fullResponse || '');
+
+  const markerMatch = text.match(/LEAD_DATA:\s*({[\s\S]*})/);
+  if (markerMatch) {
+    const markerCandidates = getLeadJsonCandidates(markerMatch[1]);
+    const markedLead = markerCandidates.find((item) => looksLikeLeadData(item.parsed)) || markerCandidates[0];
+    if (markedLead) return normalizeLeadData(markedLead.parsed, config, text);
+  }
+
+  const candidates = getLeadJsonCandidates(text).filter((item) => looksLikeLeadData(item.parsed));
+  if (!candidates.length) return null;
+
+  return normalizeLeadData(candidates[candidates.length - 1].parsed, config, text);
+}
+
+function removeVisibleLeadJson(text = '') {
+  let cleaned = String(text || '');
+  for (const item of getLeadJsonCandidates(cleaned)) {
+    if (looksLikeLeadData(item.parsed)) {
+      cleaned = cleaned.replace(item.raw, '').trim();
+    }
+  }
+  return cleaned;
+}
+
 function cleanAssistantResponse(text = '') {
-  return String(text || '')
+  return removeVisibleLeadJson(String(text || ''))
     .replace(/CALENDLY_BUTTON:\S+/g, '')
     .replace(/PHASE_\d+_COMPLETE/g, '')
-    .replace(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/g, '')
+    .replace(/LEAD_DATA:\s*({[\s\S]*})\s*(?:\n|$)/g, '')
     .replace(/ESCALATION_REQUIRED/g, '')
     .replace(/URGENT_ESCALATION/g, '')
     .trim();
@@ -60,11 +199,17 @@ async function generateLeadSummary(leadData, industry) {
   }
 }
 
-async function saveLead(config, sessionId, leadData, namespace) {
+async function saveLead(config, sessionId, rawLeadData, namespace) {
   try {
-    if (!config || !sessionId || !leadData) return;
+    if (!config || !sessionId || !rawLeadData) return;
+    const leadData = normalizeLeadData(rawLeadData, config, JSON.stringify(rawLeadData));
+    if (!leadData.name || !leadData.email || !leadData.phone) {
+      console.log('Lead skipped because contact details are incomplete', { hasName: Boolean(leadData.name), hasEmail: Boolean(leadData.email), hasPhone: Boolean(leadData.phone) });
+      return;
+    }
+
     const dedupeKey = `lead:${namespace}:${sessionId}`;
-    try { if (await redisClient.get(dedupeKey)) return console.log('Duplicate lead skipped'); } catch (e) { console.error(e.message); }
+    const wasAlreadyNotified = await redisClient.get(dedupeKey).catch(() => null);
     const aiSummary = await generateLeadSummary(leadData, config.industry);
     const projectDetails = generateProjectDetails(config.industry, leadData);
     const result = await pool.query(`
@@ -95,6 +240,7 @@ async function saveLead(config, sessionId, leadData, namespace) {
     budget_range = EXCLUDED.budget_range,
     is_decision_maker = EXCLUDED.is_decision_maker,
     calendly_link_shown = EXCLUDED.calendly_link_shown,
+    appointment_scheduled = EXCLUDED.appointment_scheduled,
     urgency_flag = EXCLUDED.urgency_flag,
     urgency_reason = EXCLUDED.urgency_reason,
     agents_used = EXCLUDED.agents_used,
@@ -119,7 +265,7 @@ async function saveLead(config, sessionId, leadData, namespace) {
       await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW() WHERE id=$2", [savedLead.id, sessionId]);
     }
     try { await redisClient.setex(dedupeKey, 3600, '1'); } catch (e) { console.error(e.message); }
-    if (process.env.BUBBLE_API_URL && process.env.BUBBLE_API_KEY && savedLead) {
+    if (!wasAlreadyNotified && process.env.BUBBLE_API_URL && process.env.BUBBLE_API_KEY && savedLead) {
       fetch(`${process.env.BUBBLE_API_URL}/api/1.1/obj/lead`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`, 'Content-Type': 'application/json' },
@@ -145,7 +291,9 @@ async function saveLead(config, sessionId, leadData, namespace) {
         })
       }).catch((err) => console.error('Bubble push failed:', err.message));
     }
-    sendLeadAlert(config, { ...savedLead, project_details: projectDetails, ai_summary: aiSummary, score_reasons: leadData.score_reasons || [] }).catch((err) => console.error('Email alert failed:', err.message));
+    if (!wasAlreadyNotified) {
+      sendLeadAlert(config, { ...savedLead, project_details: projectDetails, ai_summary: aiSummary, score_reasons: leadData.score_reasons || [] }).catch((err) => console.error('Email alert failed:', err.message));
+    }
   } catch (error) { console.error('saveLead error:', error.message); }
 }
 
@@ -396,7 +544,14 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     tasks.push(saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: fullResponse, phase: currentPhase, modelUsed: result.resolvedModel.apiModelId }));
     tasks.push((async () => { const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/); if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]); })());
     tasks.push((async () => { if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); } })());
-    tasks.push((async () => { const leadMatch = fullResponse.match(/LEAD_DATA:\s*({[\s\S]*?})\s*(?:\n|$)/); if (leadMatch) { try { const leadData = JSON.parse(leadMatch[1]); await saveLead(config, sessionId, leadData, req.namespace); } catch (e) { console.error('LEAD_DATA parse failed:', e.message); } } })());
+    tasks.push((async () => {
+      const leadData = extractLeadDataFromResponse(fullResponse, config);
+      if (leadData) {
+        await saveLead(config, sessionId, leadData, req.namespace);
+      } else {
+        console.log('No lead payload found in assistant response');
+      }
+    })());
     await Promise.allSettled(tasks);
   };
 
