@@ -22,6 +22,21 @@ const MONEY_RE = /(?:£|\$|€|rs\.?|pkr|gbp|usd|eur)\s?\d[\d,]*(?:\.\d+)?|\d[\d
 const TIMELINE_RE = /\b(?:today|tomorrow|asap|urgent|this week|next week|this month|next month|\d+\s?(?:day|days|week|weeks|month|months)|two weeks|three weeks|few days|few weeks)\b/i;
 const MEETING_RE = /\b(?:book|meeting|appointment|call|consultation|schedule|2pm|\d{1,2}\s?(?:am|pm))\b/i;
 
+const CREDIT_VALUE_USD = Number(process.env.CREDIT_VALUE_USD || 0.001);
+const PROFIT_MULTIPLIER = Number(process.env.CREDIT_PROFIT_MULTIPLIER || 10);
+const BASE_CREDITS = Number(process.env.BASE_CREDITS || 1);
+const MINIMUM_CREDITS = Number(process.env.MINIMUM_CREDITS || 1);
+
+const MODEL_PRICING_USD_PER_1M = {
+  'gpt-4o-mini': { input: 0.15, output: 0.6, multiplier: 1 },
+  'gpt-4o': { input: 5, output: 15, multiplier: 1 },
+  'claude-sonnet': { input: 3, output: 15, multiplier: 1 },
+  'claude-opus': { input: 15, output: 75, multiplier: 1 },
+  'claude-sonnet-4-5': { input: 3, output: 15, multiplier: 1 },
+  'claude-3-5-sonnet': { input: 3, output: 15, multiplier: 1 },
+  'claude-3-opus': { input: 15, output: 75, multiplier: 1 },
+};
+
 function isSimpleInitialGreeting(message, conversationHistory = []) {
   return conversationHistory.length === 0 && SIMPLE_GREETING_PATTERN.test((message || '').trim());
 }
@@ -37,6 +52,76 @@ function cleanValue(value) {
   const text = String(value).trim();
   if (!text || ['unknown', 'not specified', 'n/a', 'null', 'undefined'].includes(text.toLowerCase())) return null;
   return text;
+}
+
+function estimateTokensFromText(value = '') {
+  const text = String(value || '');
+  if (!text.trim()) return 0;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function estimateTokensFromMessages(messages = []) {
+  return messages.reduce((total, item) => total + estimateTokensFromText(`${item?.role || ''}: ${item?.content || ''}`), 0);
+}
+
+function getPricingForModel(resolvedModel = {}) {
+  const keys = [resolvedModel.modelId, resolvedModel.apiModelId].filter(Boolean);
+  for (const key of keys) {
+    if (MODEL_PRICING_USD_PER_1M[key]) return MODEL_PRICING_USD_PER_1M[key];
+    const lowered = String(key).toLowerCase();
+    if (lowered.includes('gpt-4o-mini')) return MODEL_PRICING_USD_PER_1M['gpt-4o-mini'];
+    if (lowered.includes('gpt-4o')) return MODEL_PRICING_USD_PER_1M['gpt-4o'];
+    if (lowered.includes('opus')) return MODEL_PRICING_USD_PER_1M['claude-opus'];
+    if (lowered.includes('sonnet')) return MODEL_PRICING_USD_PER_1M['claude-sonnet'];
+  }
+  return MODEL_PRICING_USD_PER_1M['gpt-4o-mini'];
+}
+
+function normalizeUsageTokens(rawUsage = {}) {
+  const inputTokens = Number(rawUsage.inputTokens ?? rawUsage.input_tokens ?? rawUsage.prompt_tokens ?? rawUsage.promptTokens ?? 0);
+  const outputTokens = Number(rawUsage.outputTokens ?? rawUsage.output_tokens ?? rawUsage.completion_tokens ?? rawUsage.completionTokens ?? 0);
+  return {
+    inputTokens: Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0,
+    outputTokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0,
+  };
+}
+
+function calculateChatUsage({ systemPrompt = '', messages = [], reply = '', resolvedModel = {}, rawUsage = null }) {
+  const exact = normalizeUsageTokens(rawUsage || {});
+  const inputTokens = exact.inputTokens || estimateTokensFromText(systemPrompt) + estimateTokensFromMessages(messages);
+  const outputTokens = exact.outputTokens || estimateTokensFromText(reply);
+  const pricing = getPricingForModel(resolvedModel);
+  const inputCostUsd = (inputTokens / 1_000_000) * pricing.input;
+  const outputCostUsd = (outputTokens / 1_000_000) * pricing.output;
+  const estimatedCostUsd = inputCostUsd + outputCostUsd;
+  const creditsUsed = Math.max(
+    MINIMUM_CREDITS,
+    Math.ceil(BASE_CREDITS + ((estimatedCostUsd * (pricing.multiplier || 1) * PROFIT_MULTIPLIER) / CREDIT_VALUE_USD))
+  );
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    estimatedCostUsd: Number(estimatedCostUsd.toFixed(8)),
+    creditsUsed,
+    creditValueUsd: CREDIT_VALUE_USD,
+    profitMultiplier: PROFIT_MULTIPLIER,
+    modelMultiplier: pricing.multiplier || 1,
+  };
+}
+
+function createStaticUsage(reply = '', modelId = 'static') {
+  return {
+    inputTokens: 0,
+    outputTokens: estimateTokensFromText(reply),
+    totalTokens: estimateTokensFromText(reply),
+    estimatedCostUsd: 0,
+    creditsUsed: MINIMUM_CREDITS,
+    creditValueUsd: CREDIT_VALUE_USD,
+    profitMultiplier: PROFIT_MULTIPLIER,
+    modelMultiplier: 1,
+    model: modelId,
+  };
 }
 
 function findBalancedJsonObjects(text = '') {
@@ -317,17 +402,19 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
   if (config.is_disabled) {
     const disabledMsg = config.disabled_reason || 'This chatbot is temporarily unavailable. Please contact the business directly.';
-    if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write('data: ' + JSON.stringify({ text: disabledMsg, token: disabledMsg }) + '\n\n'); res.write('data: ' + JSON.stringify({ type: 'meta', reply: disabledMsg, isDisabled: true }) + '\n\n'); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: disabledMsg, isDisabled: true });
+    const usage = { ...createStaticUsage(disabledMsg, 'disabled'), creditsUsed: 0 };
+    if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write('data: ' + JSON.stringify({ text: disabledMsg, token: disabledMsg }) + '\n\n'); res.write('data: ' + JSON.stringify({ type: 'meta', reply: disabledMsg, isDisabled: true, creditsUsed: usage.creditsUsed, usage }) + '\n\n'); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: disabledMsg, isDisabled: true, creditsUsed: usage.creditsUsed, usage });
     return;
   }
 
   const triageKeywords = ['chest pain', 'cant breathe', 'cannot breathe', 'difficulty breathing', 'unconscious', 'overdose', 'stroke', 'severe bleeding', 'collapsed', 'heart attack', 'seizure', 'not responsive', 'dying', 'life threatening', 'emergency help', 'ambulance'];
   if (config.industry === 'healthcare' && triageKeywords.some((kw) => message.toLowerCase().includes(kw))) {
     const triageText = `This sounds urgent. Please call emergency services immediately or go to your nearest emergency room. Do not wait for a callback from us. If you need our direct line right now: ${config.owner_phone || config.ownerPhone || 'contact reception directly'}`;
+    const usage = createStaticUsage(triageText, 'static-triage');
     await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]);
     await Promise.allSettled([saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: triageText, phase: 1 }), pool.query("UPDATE sessions SET status = 'escalated', last_activity_at = NOW() WHERE id = $1", [sessionId])]);
     sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message));
-    if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: triageText, token: triageText })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: triageText })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: triageText });
+    if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: triageText, token: triageText })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: triageText, creditsUsed: usage.creditsUsed, usage })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: triageText, creditsUsed: usage.creditsUsed, usage });
     return;
   }
 
@@ -340,9 +427,10 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
 
   if (isSimpleInitialGreeting(message, conversationHistory)) {
     const greetingReply = `Hi — happy to help. What are you looking to get done${config.business_name ? ` with ${config.business_name}` : ''}?`;
+    const usage = createStaticUsage(greetingReply, 'static-greeting');
     await saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: greetingReply, phase: currentPhase });
     await updateCollectedData(sessionId, extractLeadDataFromConversation({ session, conversationHistory, userMessage: message, assistantMessage: greetingReply, config })).catch((e) => console.error('collected_data update failed:', e.message));
-    if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: greetingReply, token: greetingReply })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: greetingReply, model: 'static-greeting', wasDowngraded: false })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: greetingReply, resolvedModel: { modelId: 'static-greeting', provider: 'static', wasDowngraded: false } });
+    if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: greetingReply, token: greetingReply })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: greetingReply, model: 'static-greeting', wasDowngraded: false, creditsUsed: usage.creditsUsed, usage })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: greetingReply, resolvedModel: { modelId: 'static-greeting', provider: 'static', wasDowngraded: false }, creditsUsed: usage.creditsUsed, usage });
     return;
   }
 
@@ -362,14 +450,14 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     console.log('[chat] Model resolved', { businessId: botConfig.business_id, plan: botConfig.plan, requested: botConfig.selected_model, using: resolvedModel.modelId, provider: resolvedModel.provider, wasDowngraded: resolvedModel.wasDowngraded });
     if (resolvedModel.provider === 'anthropic') {
       if (stream) { const anthropic = getAnthropicClient(); if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY'); const anthropicStream = await anthropic.messages.stream({ model: resolvedModel.apiModelId, max_tokens: 1000, system: systemPrompt, messages }); return { stream: anthropicStream, resolvedModel }; }
-      try { const anthropic = getAnthropicClient(); if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY'); const response = await anthropic.messages.create({ model: resolvedModel.apiModelId, max_tokens: 1000, system: systemPrompt, messages }); return { reply: response.content[0].text, resolvedModel }; }
-      catch (anthropicErr) { console.warn('[chat] Anthropic failed, falling back to OpenAI:', anthropicErr.message); const openai = getOpenAIClient(); if (!openai) throw anthropicErr; const fb = await openai.chat.completions.create({ model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini', max_tokens: 1000, messages: [{ role: 'system', content: systemPrompt }, ...messages] }); return { reply: fb.choices[0].message.content, resolvedModel: { ...resolvedModel, wasDowngraded: true } }; }
+      try { const anthropic = getAnthropicClient(); if (!anthropic) throw new Error('Missing ANTHROPIC_API_KEY'); const response = await anthropic.messages.create({ model: resolvedModel.apiModelId, max_tokens: 1000, system: systemPrompt, messages }); return { reply: response.content[0].text, resolvedModel, rawUsage: response.usage }; }
+      catch (anthropicErr) { console.warn('[chat] Anthropic failed, falling back to OpenAI:', anthropicErr.message); const openai = getOpenAIClient(); if (!openai) throw anthropicErr; const fb = await openai.chat.completions.create({ model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini', max_tokens: 1000, messages: [{ role: 'system', content: systemPrompt }, ...messages] }); return { reply: fb.choices[0].message.content, resolvedModel: { ...resolvedModel, wasDowngraded: true }, rawUsage: fb.usage }; }
     }
     if (resolvedModel.provider === 'openai') {
       const openaiMessages = [{ role: 'system', content: systemPrompt }, ...messages];
       const openai = getOpenAIClient(); if (!openai) throw new Error('Missing OPENAI_API_KEY');
       if (stream) { const openaiStream = await openai.chat.completions.create({ model: resolvedModel.apiModelId, max_tokens: 1000, stream: true, messages: openaiMessages }); const wrappedStream = { [Symbol.asyncIterator]: async function* () { for await (const chunk of openaiStream) { const text = chunk.choices[0]?.delta?.content; if (text) yield { type: 'content_block_delta', delta: { type: 'text_delta', text } }; } } }; return { stream: wrappedStream, resolvedModel }; }
-      const response = await openai.chat.completions.create({ model: resolvedModel.apiModelId, max_tokens: 1000, messages: openaiMessages }); return { reply: response.choices[0].message.content, resolvedModel };
+      const response = await openai.chat.completions.create({ model: resolvedModel.apiModelId, max_tokens: 1000, messages: openaiMessages }); return { reply: response.choices[0].message.content, resolvedModel, rawUsage: response.usage };
     }
     throw new Error('[chat] Unknown provider: ' + resolvedModel.provider);
   };
@@ -397,7 +485,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
       const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/); if (calendlyMatch) calendlyUrl = calendlyMatch[1];
       if (calendlyUrl) res.write(`data: ${JSON.stringify({ type: 'calendly_button', url: calendlyUrl, label: 'Book Your Appointment →' })}\n\n`);
       const cleanResponse = cleanAssistantResponse(fullResponse);
-      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded })}\n\n`); res.write('data: [DONE]\n\n'); res.end();
+      const usage = calculateChatUsage({ systemPrompt: fullSystemPrompt, messages: messagesArray, reply: cleanResponse || fullResponse, resolvedModel: result.resolvedModel, rawUsage: result.rawUsage });
+      result.usage = usage;
+      res.write(`data: ${JSON.stringify({ type: 'meta', reply: cleanResponse, model: result.resolvedModel.modelId, wasDowngraded: result.resolvedModel.wasDowngraded, creditsUsed: usage.creditsUsed, usage })}\n\n`); res.write('data: [DONE]\n\n'); res.end();
       processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
     } catch (streamError) { clearInterval(keepAlive); clearTimeout(timeout); res.write(`data: ${JSON.stringify({ type: 'error', message: 'Something went wrong. Please try again.' })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); }
     return;
@@ -408,7 +498,9 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const calendlyMatch = fullResponse.match(/CALENDLY_BUTTON:(\S+)/);
     const calendlyUrl = calendlyMatch ? calendlyMatch[1] : null;
     const cleanResponse = cleanAssistantResponse(fullResponse);
-    res.json({ reply: cleanResponse, calendlyUrl, resolvedModel: result.resolvedModel });
+    const usage = calculateChatUsage({ systemPrompt: fullSystemPrompt, messages: messagesArray, reply: cleanResponse || fullResponse, resolvedModel: result.resolvedModel, rawUsage: result.rawUsage });
+    result.usage = usage;
+    res.json({ reply: cleanResponse, calendlyUrl, resolvedModel: result.resolvedModel, creditsUsed: usage.creditsUsed, usage });
     processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
   } catch { res.status(500).json({ error: 'Something went wrong. Please try again.' }); }
 });
