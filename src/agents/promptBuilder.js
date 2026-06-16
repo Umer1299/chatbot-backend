@@ -19,9 +19,24 @@ function hasRealAvailability(availability = {}) {
   return Object.values(availability).some((slots) => Array.isArray(slots) ? slots.filter(Boolean).length > 0 : Boolean(String(slots || '').trim()));
 }
 
-function buildAgentBlocks(industry, selectedAgents = []) {
+function applyRuntimeAgentOverrides(instructions = '', hasAvailability = false) {
+  let text = String(instructions || '');
+
+  if (!hasAvailability) {
+    text = text
+      .replace(/Offer exactly 2 available slots\./gi, 'Do not offer specific time slots. Ask for the visitor\'s preferred day/time, or direct them to the booking link when available.')
+      .replace(/HOT lead: offer exactly 2 time slots from availability\./gi, 'HOT lead: do not offer specific time slots unless availability is provided. Ask for the visitor\'s preferred day/time or direct them to the booking link when available.')
+      .replace(/WARM lead: offer 2 slots OR promise callback in 24hrs\./gi, 'WARM lead: ask for the visitor\'s preferred day/time or promise a callback when appropriate.')
+      .replace(/Never offer more than 2 slot options at once\./gi, 'Do not offer slot options unless availability is provided.');
+  }
+
+  return text;
+}
+
+function buildAgentBlocks(industry, selectedAgents = [], availability = {}) {
   const industryTemplate = AGENT_TEMPLATES[industry];
   if (!industryTemplate?.agents || !Array.isArray(selectedAgents)) return '';
+  const realAvailabilityAvailable = hasRealAvailability(availability);
 
   return selectedAgents
     .map((agentId) => industryTemplate.agents[agentId])
@@ -33,8 +48,9 @@ function buildAgentBlocks(industry, selectedAgents = []) {
       const scoringRules = agent.scoringRules
         ? Object.entries(agent.scoringRules).map(([score, rule]) => `${score}: ${rule}`).join('\n')
         : 'Not specified';
+      const promptInstructions = applyRuntimeAgentOverrides(agent.promptInstructions, realAvailabilityAvailable);
 
-      return `AGENT: ${agent.name} (${agent.id})\nPHASE: ${agent.phase}\nPURPOSE: ${agent.description}\nCOLLECTS: ${fields}\nQUICK REPLIES: ${quickReplies}\nSCORING RULES:\n${scoringRules}\nINSTRUCTIONS:\n${agent.promptInstructions}`;
+      return `AGENT: ${agent.name} (${agent.id})\nPHASE: ${agent.phase}\nPURPOSE: ${agent.description}\nCOLLECTS: ${fields}\nQUICK REPLIES: ${quickReplies}\nSCORING RULES:\n${scoringRules}\nINSTRUCTIONS:\n${promptInstructions}`;
     })
     .join('\n\n---\n\n');
 }
@@ -52,8 +68,8 @@ export function buildMasterPrompt(businessInfoOrPrompt = '', selectedAgentsOrOpt
   const selectedAgents = Array.isArray(selectedAgentsOrOptions) ? selectedAgentsOrOptions : [];
   const phase = options.phase || 1;
   const ragBlock = options.ragBlock || '';
-  const agentBlocks = buildAgentBlocks(businessInfo.industry, selectedAgents);
   const realAvailabilityAvailable = hasRealAvailability(availability);
+  const agentBlocks = buildAgentBlocks(businessInfo.industry, selectedAgents, availability);
 
   return `${ragBlock}You are the website sales assistant for ${businessInfo.businessName || 'this business'}.
 
@@ -113,6 +129,13 @@ BOOKING / CONFIRMATION RULES
 
 ACTIVE AGENT FLOW
 ${agentBlocks || 'Use the approved business prompt and collect a useful lead profile.'}
+
+FINAL OVERRIDES
+- These final overrides win over every agent instruction above.
+- Real availability slots available is ${realAvailabilityAvailable ? 'yes' : 'no'}.
+- If Real availability slots available is no, never mention example slots, weekdays, dates, or times. Use the booking link or ask for the visitor's preferred day/time.
+- If Calendar link available is yes, prefer sending the booking link after collecting name, email, phone, organisation/company name, and project summary.
+- Before sending a booking link or asking for a call time, ask for missing contact details in this order: name, email, phone, organisation/company name.
 
 LEAD_DATA FORMAT
 When enough lead details are collected, output LEAD_DATA on its own line with valid JSON only. Include fields when known:
