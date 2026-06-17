@@ -1,91 +1,68 @@
 import pool from '../db/pool.js';
 
-// Plan hierarchy for access control
+// Plan constants are kept for backwards compatibility with existing imports/UI,
+// but model access is no longer restricted by plan.
 export const PLAN_HIERARCHY = {
-  trial:        0,
+  trial: 0,
   professional: 1,
-  growth:       2,
-  agency:       3
+  growth: 2,
+  agency: 3
 };
 
-// Which model_ids each plan can access
-// model_id values must match model_configs table
 export const PLAN_MODEL_ACCESS = {
-  trial:        ['gpt-4o-mini'],
-  professional: ['gpt-4o-mini', 'claude-sonnet'],
-  growth:       ['gpt-4o-mini', 'gpt-4o', 'claude-sonnet'],
-  agency:       ['gpt-4o-mini', 'gpt-4o', 'claude-sonnet', 'claude-opus']
+  trial: [],
+  professional: [],
+  growth: [],
+  agency: []
 };
 
 // ──────────────────────────────────────────────
 // getAvailableModels(plan)
-// Returns models this plan can access
+// Returns every active model. Plans no longer restrict model access.
 // ──────────────────────────────────────────────
 export async function getAvailableModels(plan) {
-  const allowed = PLAN_MODEL_ACCESS[plan] ?? PLAN_MODEL_ACCESS.trial;
-
   const result = await pool.query(`
     SELECT model_id, display_name, branded_name,
            provider, min_plan, sort_order
     FROM model_configs
-    WHERE model_id = ANY($1) AND is_active = true
+    WHERE is_active = true
     ORDER BY sort_order ASC
-  `, [allowed]);
+  `);
 
   return result.rows;
 }
 
 // ──────────────────────────────────────────────
 // getLockedModels(plan)
-// Returns models this plan cannot access (for UI)
+// No models are locked by plan anymore.
 // ──────────────────────────────────────────────
 export async function getLockedModels(plan) {
-  const allowed = PLAN_MODEL_ACCESS[plan] ?? PLAN_MODEL_ACCESS.trial;
-
-  const result = await pool.query(`
-    SELECT model_id, display_name, branded_name,
-           provider, min_plan, sort_order
-    FROM model_configs
-    WHERE model_id != ALL($1) AND is_active = true
-    ORDER BY sort_order ASC
-  `, [allowed]);
-
-  return result.rows.map(m => ({ ...m, isLocked: true }));
+  return [];
 }
 
 // ──────────────────────────────────────────────
 // validateModelAccess(modelId, plan)
+// Allows any active model regardless of plan.
 // Returns { allowed, reason, fallback, requiredPlan }
 // ──────────────────────────────────────────────
 export async function validateModelAccess(modelId, plan) {
-  const allowed = PLAN_MODEL_ACCESS[plan] ?? PLAN_MODEL_ACCESS.trial;
-
-  if (allowed.includes(modelId)) {
-    return { allowed: true, reason: null, fallback: null, requiredPlan: null };
-  }
-
   const modelResult = await pool.query(
-    `SELECT min_plan, branded_name
-     FROM model_configs WHERE model_id = $1`,
+    `SELECT model_id, min_plan, branded_name
+     FROM model_configs
+     WHERE model_id = $1 AND is_active = true`,
     [modelId]
   );
 
   if (!modelResult.rows.length) {
     return {
       allowed: false,
-      reason: 'Model not found: ' + modelId,
-      fallback: allowed.at(-1) ?? 'gpt-4o-mini',
+      reason: 'Model not found or inactive: ' + modelId,
+      fallback: 'gpt-4o-mini',
       requiredPlan: null
     };
   }
 
-  const model = modelResult.rows[0];
-  return {
-    allowed: false,
-    reason: model.branded_name + ' requires ' + model.min_plan + ' plan or higher',
-    fallback: allowed.at(-1) ?? 'gpt-4o-mini',
-    requiredPlan: model.min_plan
-  };
+  return { allowed: true, reason: null, fallback: null, requiredPlan: null };
 }
 
 // ──────────────────────────────────────────────
@@ -94,54 +71,45 @@ export async function validateModelAccess(modelId, plan) {
 //
 // CRITICAL:
 // - api_model_id is read from model_configs table
-// - never hardcoded
-// - always returned, never stored in outer scope
+// - never hardcoded except final emergency fallback
+// - plan no longer controls model selection
 // ──────────────────────────────────────────────
 export async function getSafeModel(requestedModelId, plan) {
-  const validation = await validateModelAccess(requestedModelId, plan);
+  const requested = requestedModelId || 'gpt-4o-mini';
 
-  const modelIdToUse = validation.allowed
-    ? requestedModelId
-    : (validation.fallback ?? 'gpt-4o-mini');
-
-  if (!validation.allowed) {
-    console.warn('[modelService] Plan downgrade', {
-      requested: requestedModelId,
-      plan,
-      using: modelIdToUse,
-      reason: validation.reason
-    });
-  }
-
-  // Always fetch api_model_id from DB — never hardcode
   const apiResult = await pool.query(
     `SELECT api_model_id, provider
      FROM model_configs
      WHERE model_id = $1 AND is_active = true`,
-    [modelIdToUse]
+    [requested]
   );
 
-  if (!apiResult.rows.length) {
-    // Final fallback — gpt-4o-mini must always exist
-    console.error('[modelService] Model not in DB, emergency fallback', { modelIdToUse });
-    const fb = await pool.query(
-      `SELECT api_model_id, provider
-       FROM model_configs WHERE model_id = 'gpt-4o-mini'`
-    );
-    const fbRow = fb.rows[0];
+  if (apiResult.rows.length) {
+    const row = apiResult.rows[0];
     return {
-      modelId: 'gpt-4o-mini',
-      apiModelId: fbRow?.api_model_id ?? 'gpt-4o-mini',
-      provider: fbRow?.provider ?? 'openai',
-      wasDowngraded: true
+      modelId: requested,
+      apiModelId: row.api_model_id,
+      provider: row.provider,
+      wasDowngraded: false
     };
   }
 
-  const row = apiResult.rows[0];
+  console.warn('[modelService] Requested model unavailable, using emergency fallback', {
+    requested,
+    plan
+  });
+
+  const fb = await pool.query(
+    `SELECT api_model_id, provider
+     FROM model_configs
+     WHERE model_id = 'gpt-4o-mini' AND is_active = true`
+  );
+  const fbRow = fb.rows[0];
+
   return {
-    modelId: modelIdToUse,
-    apiModelId: row.api_model_id,
-    provider: row.provider,
-    wasDowngraded: !validation.allowed
+    modelId: 'gpt-4o-mini',
+    apiModelId: fbRow?.api_model_id ?? 'gpt-4o-mini',
+    provider: fbRow?.provider ?? 'openai',
+    wasDowngraded: true
   };
 }
