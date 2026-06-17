@@ -63,6 +63,7 @@ export function buildMasterPrompt(businessInfoOrPrompt = '', selectedAgentsOrOpt
   const ragBlock = options.ragBlock || '';
   const realAvailabilityAvailable = false;
   const agentBlocks = buildAgentBlocks(businessInfo.industry, selectedAgents, {});
+  const officialCalendlyLink = businessInfo.calendlyLink || '';
 
   return `${ragBlock}You are the website sales assistant for ${businessInfo.businessName || 'this business'}.
 
@@ -72,7 +73,8 @@ Business name: ${businessInfo.businessName || 'Not specified'}
 Location: ${businessInfo.location || 'Not specified'}
 Primary services: ${formatList(businessInfo.primaryServices)}
 Owner phone: ${businessInfo.ownerPhone || 'Not specified'}
-Calendar link available: ${businessInfo.calendlyLink ? 'yes' : 'no'}
+Calendar link available: ${officialCalendlyLink ? 'yes' : 'no'}
+Official calendar link: ${officialCalendlyLink || 'Not specified'}
 Real availability slots available: no
 Availability:\n${formatAvailability({})}
 
@@ -116,7 +118,9 @@ BOOKING / CONFIRMATION RULES
 - Do not offer specific days, dates, or times.
 - Do not ask the visitor to choose from any slots.
 - Do not ask for a preferred time when a calendar link is available.
-- If a calendly_link is available, output CALENDLY_BUTTON:<url> only after it is contextually appropriate.
+- If a calendar link is available and booking is appropriate, output exactly CALENDLY_BUTTON:${officialCalendlyLink}.
+- Never output a booking URL other than the official calendar link from BUSINESS CONTEXT.
+- If no official calendar link is available, do not output CALENDLY_BUTTON.
 - Do not say a meeting is booked, confirmed, scheduled, or that a confirmation email will be sent unless the backend has a real booking/email integration for that action.
 - If only the booking link is shown, set appointment_scheduled false in LEAD_DATA.
 
@@ -127,7 +131,8 @@ FINAL OVERRIDES
 - These final overrides win over every agent instruction above.
 - Never mention example slots, weekdays, dates, or times.
 - Never offer slots, even if agent instructions mention slots.
-- If Calendar link available is yes, share only the official booking link through CALENDLY_BUTTON:<url> after collecting enough lead details.
+- If Calendar link available is yes, share only the official booking link through CALENDLY_BUTTON:${officialCalendlyLink} after collecting enough lead details.
+- Never create, rewrite, shorten, or guess a Calendly URL. Use only the official calendar link above.
 - Before sending a booking link, ask for missing contact details in this order: name, email, phone, organisation/company name.
 
 AI LEAD CAPTURE RULES
