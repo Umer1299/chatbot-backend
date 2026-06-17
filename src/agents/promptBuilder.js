@@ -6,29 +6,23 @@ function formatList(items = []) {
 }
 
 function formatAvailability(availability = {}) {
-  if (!availability || typeof availability !== 'object') return 'Not specified';
-  const entries = Object.entries(availability).filter(([, value]) => value);
-  if (entries.length === 0) return 'Not specified';
-  return entries
-    .map(([day, slots]) => `${day}: ${Array.isArray(slots) ? slots.join(', ') : String(slots)}`)
-    .join('\n');
+  return 'Hidden. Do not use availability slots. Share only the official booking link when booking is appropriate.';
 }
 
 function hasRealAvailability(availability = {}) {
-  if (!availability || typeof availability !== 'object') return false;
-  return Object.values(availability).some((slots) => Array.isArray(slots) ? slots.filter(Boolean).length > 0 : Boolean(String(slots || '').trim()));
+  return false;
 }
 
 function applyRuntimeAgentOverrides(instructions = '', hasAvailability = false) {
   let text = String(instructions || '');
 
-  if (!hasAvailability) {
-    text = text
-      .replace(/Offer exactly 2 available slots\./gi, 'Do not offer specific time slots. Ask for the visitor\'s preferred day/time, or direct them to the booking link when available.')
-      .replace(/HOT lead: offer exactly 2 time slots from availability\./gi, 'HOT lead: do not offer specific time slots unless availability is provided. Ask for the visitor\'s preferred day/time or direct them to the booking link when available.')
-      .replace(/WARM lead: offer 2 slots OR promise callback in 24hrs\./gi, 'WARM lead: ask for the visitor\'s preferred day/time or promise a callback when appropriate.')
-      .replace(/Never offer more than 2 slot options at once\./gi, 'Do not offer slot options unless availability is provided.');
-  }
+  text = text
+    .replace(/Offer exactly 2 available slots\./gi, 'Do not offer slots. Share the official booking link when available.')
+    .replace(/HOT lead: offer exactly 2 time slots from availability\./gi, 'HOT lead: do not offer slots. Share the official booking link when available.')
+    .replace(/WARM lead: offer 2 slots OR promise callback in 24hrs\./gi, 'WARM lead: do not offer slots. Share the official booking link when available, or say the team will follow up.')
+    .replace(/Never offer more than 2 slot options at once\./gi, 'Never offer slot options at all.')
+    .replace(/HOT: Book viewing immediately with 2 slot options\./gi, 'HOT: do not offer slots. Share the official booking link when available.')
+    .replace(/WARM: Book viewing OR send property matches by email\./gi, 'WARM: share the official booking link when available, or offer to send property matches by email.');
 
   return text;
 }
@@ -56,7 +50,6 @@ function buildAgentBlocks(industry, selectedAgents = [], availability = {}) {
 }
 
 export function buildMasterPrompt(businessInfoOrPrompt = '', selectedAgentsOrOptions = [], availability = {}, options = {}) {
-  // Backwards compatible path for older callers: buildMasterPrompt(systemPrompt, { ragBlock, phase })
   if (typeof businessInfoOrPrompt === 'string') {
     const legacyOptions = selectedAgentsOrOptions || {};
     const ragBlock = legacyOptions.ragBlock || '';
@@ -68,8 +61,8 @@ export function buildMasterPrompt(businessInfoOrPrompt = '', selectedAgentsOrOpt
   const selectedAgents = Array.isArray(selectedAgentsOrOptions) ? selectedAgentsOrOptions : [];
   const phase = options.phase || 1;
   const ragBlock = options.ragBlock || '';
-  const realAvailabilityAvailable = hasRealAvailability(availability);
-  const agentBlocks = buildAgentBlocks(businessInfo.industry, selectedAgents, availability);
+  const realAvailabilityAvailable = false;
+  const agentBlocks = buildAgentBlocks(businessInfo.industry, selectedAgents, {});
 
   return `${ragBlock}You are the website sales assistant for ${businessInfo.businessName || 'this business'}.
 
@@ -80,8 +73,8 @@ Location: ${businessInfo.location || 'Not specified'}
 Primary services: ${formatList(businessInfo.primaryServices)}
 Owner phone: ${businessInfo.ownerPhone || 'Not specified'}
 Calendar link available: ${businessInfo.calendlyLink ? 'yes' : 'no'}
-Real availability slots available: ${realAvailabilityAvailable ? 'yes' : 'no'}
-Availability:\n${formatAvailability(availability)}
+Real availability slots available: no
+Availability:\n${formatAvailability({})}
 
 CORE BEHAVIOUR
 - Be warm, professional, concise, and commercially intelligent.
@@ -109,7 +102,7 @@ PRICING SAFETY RULES
 BUDGET QUALITY RULES
 - Never guarantee that the business can complete the work within the visitor's budget.
 - If the stated budget may be tight for the stated scope, say something like: "That budget may be workable depending on priorities. To make sure we guide you properly, we’ll want to discuss the must-haves, nice-to-haves, and where there may be flexibility."
-- For construction, refurbishment, office fit-out, roofing, renovation, trades, and B2B services, treat budget as a range to qualify, not as a promise.
+- Treat budget as a range to qualify, not as a promise.
 - Capture budget_risk_level as low, medium, or high in LEAD_DATA when budget is known.
 - Capture budget_risk_reason when there is any risk that the requested scope may exceed the budget.
 
@@ -120,22 +113,22 @@ DECISION-MAKER QUALIFICATION
 
 BOOKING / CONFIRMATION RULES
 - Do not invent booking slots.
-- Do not offer specific days/times unless Real availability slots available is yes and the offered slots are copied from the Availability section.
-- If real availability is not available, ask the visitor for their preferred day/time or use the official calendar link if available.
-- Do not say a meeting is booked, confirmed, scheduled, or that a confirmation email will be sent unless the backend has a real booking/email integration for that action.
-- Safer wording: "I’ve captured your preferred time. Our team will review this and confirm the call shortly."
+- Do not offer specific days, dates, or times.
+- Do not ask the visitor to choose from any slots.
+- Do not ask for a preferred time when a calendar link is available.
 - If a calendly_link is available, output CALENDLY_BUTTON:<url> only after it is contextually appropriate.
-- If only a preferred time is collected, set appointment_scheduled false in LEAD_DATA.
+- Do not say a meeting is booked, confirmed, scheduled, or that a confirmation email will be sent unless the backend has a real booking/email integration for that action.
+- If only the booking link is shown, set appointment_scheduled false in LEAD_DATA.
 
 ACTIVE AGENT FLOW
 ${agentBlocks || 'Use the approved business prompt and collect a useful lead profile.'}
 
 FINAL OVERRIDES
 - These final overrides win over every agent instruction above.
-- Real availability slots available is ${realAvailabilityAvailable ? 'yes' : 'no'}.
-- If Real availability slots available is no, never mention example slots, weekdays, dates, or times. Use the booking link or ask for the visitor's preferred day/time.
-- If Calendar link available is yes, prefer sending the booking link after collecting name, email, phone, organisation/company name, and project summary.
-- Before sending a booking link or asking for a call time, ask for missing contact details in this order: name, email, phone, organisation/company name.
+- Never mention example slots, weekdays, dates, or times.
+- Never offer slots, even if agent instructions mention slots.
+- If Calendar link available is yes, share only the official booking link through CALENDLY_BUTTON:<url> after collecting enough lead details.
+- Before sending a booking link, ask for missing contact details in this order: name, email, phone, organisation/company name.
 
 LEAD_DATA FORMAT
 When enough lead details are collected, output LEAD_DATA on its own line with valid JSON only. Include fields when known:
@@ -155,7 +148,6 @@ When enough lead details are collected, output LEAD_DATA on its own line with va
   "is_decision_maker": true,
   "decision_maker_role": "string",
   "other_stakeholders": "string",
-  "preferred_meeting_time": "string",
   "appointment_scheduled": false,
   "lead_score": "hot|warm|cold",
   "score_reasons": ["string"],
