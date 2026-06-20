@@ -1,1 +1,1 @@
-export { default } from '../api/chat.js';
+export { default } from '../api/chatOptimized.js';
