@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import app from './app.js';
 import { setupVectorTable } from './db/vectorStore.js';
+import { setupSessionHistoryIndexes } from './db/sessionHistory.js';
 import { startScrapeWorker } from './jobs/scrapeWorker.js';
 import { startReminderJobs } from './jobs/followUpReminders.js';
 
@@ -13,6 +14,9 @@ app.listen(PORT, () => {
     try {
       await setupVectorTable();
       console.log('pgvector ready');
+
+      await setupSessionHistoryIndexes();
+      console.log('session history indexes ready');
 
       startScrapeWorker();
       console.log('Scrape worker running');
