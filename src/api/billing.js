@@ -14,6 +14,10 @@ import {
 
 const router = Router();
 
+function getRequestedPlan(body = {}) {
+  return body.plan ?? body.planId ?? body.plan_id ?? body.selectedPlan ?? body.selected_plan;
+}
+
 async function getBillingSnapshot(businessId) {
   const businessResult = await pool.query(
     `SELECT id, plan, bot_id FROM businesses WHERE id = $1 LIMIT 1`,
@@ -73,7 +77,7 @@ router.get('/usage', requireAuth, async (req, res) => {
 
 router.post('/select-plan', requireAuth, async (req, res) => {
   try {
-    const selectedPlan = assertSelectablePlan(req.body?.plan);
+    const selectedPlan = assertSelectablePlan(getRequestedPlan(req.body));
     const storagePlan = toStoragePlan(selectedPlan);
     const result = await pool.query(
       `UPDATE businesses SET plan = $1, updated_at = NOW() WHERE id = $2 RETURNING id, plan, bot_id`,
