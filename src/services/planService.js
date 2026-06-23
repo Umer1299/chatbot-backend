@@ -8,14 +8,6 @@ export const PLAN_DEFINITIONS = {
     leadEmailAlerts: false,
     description: 'Free plan with up to 5 captured leads per month and no lead email alerts.',
   },
-  trial: {
-    id: 'trial',
-    label: 'Trial',
-    monthlyLeadLimit: FREE_PLAN_LEAD_LIMIT,
-    leadEmailAlerts: false,
-    description: 'Legacy trial plan. Same restrictions as Free.',
-    legacy: true,
-  },
   professional: {
     id: 'professional',
     label: 'Professional',
@@ -40,9 +32,17 @@ export const PLAN_DEFINITIONS = {
 };
 
 const PLAN_ALIASES = {
+  trial: 'free',
   basic: 'professional',
   pro: 'growth',
   elite: 'agency',
+};
+
+const STORAGE_PLAN_BY_PUBLIC_PLAN = {
+  free: 'trial',
+  professional: 'professional',
+  growth: 'growth',
+  agency: 'agency',
 };
 
 const SELECTABLE_PLAN_IDS = ['free', 'professional', 'growth', 'agency'];
@@ -53,12 +53,16 @@ export function normalizePlan(plan = 'free') {
   return PLAN_ALIASES[raw] || 'free';
 }
 
+export function toStoragePlan(plan = 'free') {
+  return STORAGE_PLAN_BY_PUBLIC_PLAN[normalizePlan(plan)] || 'trial';
+}
+
 export function getPlanDefinition(plan = 'free') {
   return PLAN_DEFINITIONS[normalizePlan(plan)] || PLAN_DEFINITIONS.free;
 }
 
 export function isFreePlan(plan = 'free') {
-  return ['free', 'trial'].includes(normalizePlan(plan));
+  return normalizePlan(plan) === 'free';
 }
 
 export function getMonthlyLeadLimit(plan = 'free') {
