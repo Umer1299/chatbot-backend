@@ -10,6 +10,7 @@ import chatbotsRoutes from './routes/chatbots.js';
 import moderateRoutes from './routes/moderate.js';
 import leadRoutes from './routes/lead.js';
 import authRoutes from './api/auth.js';
+import billingRoutes from './api/billing.js';
 import scrapeRoutes from './api/scrape.js';
 import leadsRoutes from './api/leads.js';
 import businessRoutes from './api/business.js';
@@ -81,10 +82,23 @@ app.get('/healthz', (req, res) => res.send('OK'));
 app.get('/ready', (req, res) => res.send('Ready'));
 app.get('/readyz', (req, res) => res.send('Ready'));
 
+app.get('/billing/select-plan', (req, res) => {
+  const frontendUrl = process.env.BUBBLE_APP_URL || process.env.FRONTEND_URL;
+  if (!frontendUrl) {
+    return res.status(404).json({
+      error: 'Billing page is not hosted by this API. Set BUBBLE_APP_URL or FRONTEND_URL to enable redirect.',
+    });
+  }
+  const base = frontendUrl.replace(/\/+$/, '');
+  const query = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+  return res.redirect(302, `${base}/billing/select-plan${query}`);
+});
+
 app.use('/api/chat', widgetLimiter);
 app.use('/api/upsert', widgetLimiter);
 app.use('/api/leads', dashboardLimiter);
 app.use('/api/business', dashboardLimiter);
+app.use('/api/billing', dashboardLimiter);
 app.use('/api/scrape', dashboardLimiter);
 app.use('/api/auth', dashboardLimiter);
 app.use('/api/moderate', widgetLimiter);
@@ -95,6 +109,7 @@ app.use('/api/chatbots', chatbotsRoutes);
 app.use('/api/moderate', moderateRoutes);
 app.use('/api/lead', leadRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/billing', billingRoutes);
 app.use('/api/scrape', scrapeRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/business', businessRoutes);
