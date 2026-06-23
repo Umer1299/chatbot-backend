@@ -9,6 +9,7 @@ import {
   getPlanDefinition,
   listSelectablePlans,
   normalizePlan,
+  toStoragePlan,
 } from '../services/planService.js';
 
 const router = Router();
@@ -35,6 +36,7 @@ async function getBillingSnapshot(businessId) {
 
   return {
     currentPlan: plan,
+    storedPlan: business.plan,
     plan: getPlanDefinition(plan),
     usage: {
       leadsThisMonth,
@@ -72,9 +74,10 @@ router.get('/usage', requireAuth, async (req, res) => {
 router.post('/select-plan', requireAuth, async (req, res) => {
   try {
     const selectedPlan = assertSelectablePlan(req.body?.plan);
+    const storagePlan = toStoragePlan(selectedPlan);
     const result = await pool.query(
       `UPDATE businesses SET plan = $1, updated_at = NOW() WHERE id = $2 RETURNING id, plan, bot_id`,
-      [selectedPlan, req.business.businessId],
+      [storagePlan, req.business.businessId],
     );
     const business = result.rows[0];
     if (!business) return res.status(404).json({ error: 'Business not found' });
