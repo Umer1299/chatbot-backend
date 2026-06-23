@@ -2,6 +2,7 @@ import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import pool from '../db/pool.js';
+import { normalizePlan, toStoragePlan } from '../services/planService.js';
 
 const router = Router();
 
@@ -28,19 +29,20 @@ router.post('/token', async (req, res) => {
       const inserted = await pool.query(
         `INSERT INTO businesses
           (bubble_user_id, business_name, industry, owner_email, bot_id, plan)
-         VALUES ($1, $2, $3, $4, $5, 'free')
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING *`,
-        [bubbleUserId, businessName || 'New Business', industry || 'other', email, botId],
+        [bubbleUserId, businessName || 'New Business', industry || 'other', email, botId, toStoragePlan('free')],
       );
       business = inserted.rows[0];
     }
 
+    const publicPlan = normalizePlan(business.plan);
     const token = jwt.sign(
       {
         businessId: business.id,
         bubbleUserId: business.bubble_user_id,
         industry: business.industry,
-        plan: business.plan,
+        plan: publicPlan,
         botId: business.bot_id,
       },
       process.env.JWT_SECRET,
@@ -51,7 +53,7 @@ router.post('/token', async (req, res) => {
       businessId: business.id,
       botId: business.bot_id,
       industry: business.industry,
-      plan: business.plan,
+      plan: publicPlan,
       onboardingComplete: business.onboarding_complete,
     });
   } catch (error) {
