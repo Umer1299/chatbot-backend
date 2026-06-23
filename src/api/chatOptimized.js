@@ -4,6 +4,7 @@ import { buildSessionMemoryBlock, getChatHistoryLimit } from '../db/sessionHisto
 
 const originalQuery = pool.query.bind(pool);
 const ORIGINAL_HISTORY_QUERY = 'SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at ASC LIMIT 30';
+const BOT_CONFIG_QUERY_MARKER = 'FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1';
 
 const HAIKU_PRICING_USD_PER_1M = {
   input: Number(process.env.CLAUDE_HAIKU_INPUT_USD_PER_1M || 1),
@@ -13,6 +14,28 @@ const HAIKU_PRICING_USD_PER_1M = {
 
 function normalizeQuery(value) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function isFreeOrTrialPlan(plan) {
+  return ['free', 'trial'].includes(String(plan || 'free').trim().toLowerCase());
+}
+
+function removeLeadEmailRecipientsForFreePlans(text, result) {
+  if (!normalizeQuery(text).includes(BOT_CONFIG_QUERY_MARKER)) return result;
+  if (!result?.rows?.length) return result;
+
+  return {
+    ...result,
+    rows: result.rows.map((row) => {
+      if (!isFreeOrTrialPlan(row?.plan)) return row;
+      return {
+        ...row,
+        owner_email: null,
+        escalation_email: null,
+        lead_email_alerts_enabled: false,
+      };
+    }),
+  };
 }
 
 function isHaikuModel(model = {}) {
@@ -122,7 +145,8 @@ pool.query = async function optimizedSessionHistoryQuery(text, params = [], ...r
     return getOptimizedHistory(params[0]);
   }
 
-  return originalQuery(text, params, ...rest);
+  const result = await originalQuery(text, params, ...rest);
+  return removeLeadEmailRecipientsForFreePlans(text, result);
 };
 
 const { default: originalRouter } = await import('./chat.js');
