@@ -3,7 +3,7 @@ import app from './app.js';
 import { setupVectorTable } from './db/vectorStore.js';
 import { setupSessionHistoryIndexes } from './db/sessionHistory.js';
 import { startScrapeWorker } from './jobs/scrapeWorker.js';
-import { startReminderJobs } from './jobs/followUpReminders.js';
+import { startReminderJobs } from './jobs/paidPlanReminders.js';
 
 const PORT = process.env.PORT || 3000;
 
