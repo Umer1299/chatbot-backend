@@ -8,44 +8,31 @@ export const PLAN_DEFINITIONS = {
     leadEmailAlerts: false,
     description: 'Free plan with up to 5 captured leads per month and no lead email alerts.',
   },
-  professional: {
-    id: 'professional',
-    label: 'Professional',
+  pro_97: {
+    id: 'pro_97',
+    label: 'Pro',
     monthlyLeadLimit: null,
     leadEmailAlerts: true,
-    description: 'Paid plan with unlimited captured leads and lead email alerts.',
-  },
-  growth: {
-    id: 'growth',
-    label: 'Growth',
-    monthlyLeadLimit: null,
-    leadEmailAlerts: true,
-    description: 'Paid growth plan with unlimited captured leads and lead email alerts.',
-  },
-  agency: {
-    id: 'agency',
-    label: 'Agency',
-    monthlyLeadLimit: null,
-    leadEmailAlerts: true,
-    description: 'Paid agency plan with unlimited captured leads and lead email alerts.',
+    description: 'Pro plan with unlimited captured leads and lead email alerts.',
   },
 };
 
 const PLAN_ALIASES = {
   trial: 'free',
-  basic: 'professional',
-  pro: 'growth',
-  elite: 'agency',
+  professional: 'pro_97',
+  growth: 'pro_97',
+  agency: 'pro_97',
+  basic: 'pro_97',
+  pro: 'pro_97',
+  elite: 'pro_97',
 };
 
 const STORAGE_PLAN_BY_PUBLIC_PLAN = {
   free: 'trial',
-  professional: 'professional',
-  growth: 'growth',
-  agency: 'agency',
+  pro_97: 'professional',
 };
 
-const SELECTABLE_PLAN_IDS = ['free', 'professional', 'growth', 'agency'];
+const SELECTABLE_PLAN_IDS = ['free', 'pro_97'];
 
 export function normalizePlan(plan = 'free') {
   const raw = String(plan || 'free').trim().toLowerCase();
