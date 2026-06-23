@@ -41,6 +41,10 @@ function toSafeUrl(url) {
   return escapeHtml(String(url || '').replace(/\/+$/, ''));
 }
 
+function getEmailButtonUrl(fallbackUrl) {
+  return toSafeUrl(process.env.EMAIL_BUTTON_URL || fallbackUrl);
+}
+
 function canSendEmail(context) {
   if (!process.env.RESEND_API_KEY) {
     console.log(`[emailService] RESEND_API_KEY missing. Skipping ${context}.`);
@@ -62,7 +66,7 @@ export async function sendLeadAlert(config, lead) {
   const dateText = new Date().toLocaleDateString('en-US');
   const dashboardBase = toSafeUrl(getDashboardBaseUrl());
   const leadId = encodeURIComponent(String(lead?.id ?? ''));
-  const dashboardLink = `${dashboardBase}/lead-detail?id=${leadId}`;
+  const dashboardLink = getEmailButtonUrl(`${dashboardBase}/lead-detail?id=${leadId}`);
   const reasons = Array.isArray(lead?.score_reasons) ? lead.score_reasons : [];
 
   const htmlString = `
@@ -119,7 +123,7 @@ export async function sendUrgentEscalation(config, sessionId, message) {
 
   const nowText = new Date().toLocaleString('en-US');
   const dashboardBase = toSafeUrl(getDashboardBaseUrl());
-  const dashboardLink = `${dashboardBase}/lead-detail?id=${encodeURIComponent(String(sessionId || ''))}`;
+  const dashboardLink = getEmailButtonUrl(`${dashboardBase}/lead-detail?id=${encodeURIComponent(String(sessionId || ''))}`);
 
   const htmlString = `
     <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:640px;margin:0 auto;border:1px solid #e5e7eb;">
@@ -149,7 +153,7 @@ export async function sendFollowUpReminder(lead, recipientEmail) {
   if (!resend) return { skipped: true, reason: 'RESEND_API_KEY missing' };
 
   const dashboardBase = toSafeUrl(getDashboardBaseUrl());
-  const dashboardLink = `${dashboardBase}/lead-detail?id=${encodeURIComponent(String(lead?.id || ''))}`;
+  const dashboardLink = getEmailButtonUrl(`${dashboardBase}/lead-detail?id=${encodeURIComponent(String(lead?.id || ''))}`);
 
   const htmlString = `
     <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:640px;margin:0 auto;border:1px solid #e5e7eb;">
