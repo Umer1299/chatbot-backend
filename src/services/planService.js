@@ -65,6 +65,12 @@ export function listSelectablePlans() {
 }
 
 export function assertSelectablePlan(plan) {
+  if (plan === undefined || plan === null || String(plan).trim() === '') {
+    const error = new Error('plan is required. Allowed plans: ' + SELECTABLE_PLAN_IDS.join(', '));
+    error.status = 400;
+    throw error;
+  }
+
   const normalized = normalizePlan(plan);
   if (!SELECTABLE_PLAN_IDS.includes(normalized)) {
     const error = new Error('Invalid plan. Allowed plans: ' + SELECTABLE_PLAN_IDS.join(', '));
