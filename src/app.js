@@ -13,7 +13,7 @@ import authRoutes from './api/auth.js';
 import billingRoutes from './api/billing.js';
 import scrapeRoutes from './api/scrape.js';
 import leadsRoutes from './api/leads.js';
-import businessRoutes from './api/business.js';
+import businessRoutes from './api/businessPublic.js';
 import { redisClient } from './services/redis.js';
 import { globalErrorHandler } from './middleware/errorHandler.js';
 
