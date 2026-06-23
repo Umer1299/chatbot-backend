@@ -28,7 +28,7 @@ router.post('/token', async (req, res) => {
       const inserted = await pool.query(
         `INSERT INTO businesses
           (bubble_user_id, business_name, industry, owner_email, bot_id, plan)
-         VALUES ($1, $2, $3, $4, $5, 'trial')
+         VALUES ($1, $2, $3, $4, $5, 'free')
          RETURNING *`,
         [bubbleUserId, businessName || 'New Business', industry || 'other', email, botId],
       );
