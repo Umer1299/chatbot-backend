@@ -2,6 +2,15 @@ import { Resend } from 'resend';
 
 let resendClient = null;
 
+const DEFAULT_FROM_EMAIL = 'support@chatflowai.io';
+const DEFAULT_FROM_NAME = 'ChatflowAI';
+
+function getFromAddress(name = DEFAULT_FROM_NAME) {
+  const fromEmail = process.env.RESEND_FROM_EMAIL || DEFAULT_FROM_EMAIL;
+  const fromName = process.env.RESEND_FROM_NAME || name;
+  return `${fromName} <${fromEmail}>`;
+}
+
 function getResendClient() {
   if (!process.env.RESEND_API_KEY) {
     console.warn('RESEND_API_KEY is not configured. Email not sent.');
@@ -96,7 +105,7 @@ export async function sendLeadAlert(config, lead) {
   `;
 
   await resend.emails.send({
-    from: 'ChatflowAI Alerts <alerts@chatflowai.com>',
+    from: getFromAddress('ChatflowAI Alerts'),
     to: recipient,
     subject: `${emoji} ${label} — ${lead?.full_name || 'New visitor'} | ${String(lead?.project_details || '').substring(0, 60)}`,
     html: htmlString,
@@ -127,7 +136,7 @@ export async function sendUrgentEscalation(config, sessionId, message) {
   `;
 
   await resend.emails.send({
-    from: 'ChatflowAI Alerts <alerts@chatflowai.com>',
+    from: getFromAddress('ChatflowAI Alerts'),
     to: config?.escalation_email || config?.owner_email,
     subject: `🚨 URGENT: Customer needs immediate help — ${config?.business_name || 'Business'}`,
     html: htmlString,
@@ -156,7 +165,7 @@ export async function sendFollowUpReminder(lead, recipientEmail) {
   `;
 
   await resend.emails.send({
-    from: 'ChatflowAI <reminders@chatflowai.com>',
+    from: getFromAddress(),
     to: recipientEmail,
     subject: `⏰ Follow-up due: ${lead?.full_name || 'Lead'} — ${lead?.project_details?.substring(0, 50) || ''}`,
     html: htmlString,
@@ -192,7 +201,7 @@ export async function sendMonthlyReport(business, stats) {
   `;
 
   await resend.emails.send({
-    from: 'ChatflowAI <reports@chatflowai.com>',
+    from: getFromAddress(),
     to: business?.owner_email,
     subject: `📊 Your ChatflowAI Monthly Report — ${month}`,
     html: htmlString,
