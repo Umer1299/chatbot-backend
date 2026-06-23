@@ -1,8 +1,7 @@
 import pool from '../db/pool.js';
 
-// Plan constants are kept for backwards compatibility with existing imports/UI,
-// but model access is no longer restricted by plan.
 export const PLAN_HIERARCHY = {
+  free: 0,
   trial: 0,
   professional: 1,
   growth: 2,
@@ -10,16 +9,13 @@ export const PLAN_HIERARCHY = {
 };
 
 export const PLAN_MODEL_ACCESS = {
+  free: [],
   trial: [],
   professional: [],
   growth: [],
   agency: []
 };
 
-// ──────────────────────────────────────────────
-// getAvailableModels(plan)
-// Returns every active model. Plans no longer restrict model access.
-// ──────────────────────────────────────────────
 export async function getAvailableModels(plan) {
   const result = await pool.query(`
     SELECT model_id, display_name, branded_name,
@@ -32,19 +28,10 @@ export async function getAvailableModels(plan) {
   return result.rows;
 }
 
-// ──────────────────────────────────────────────
-// getLockedModels(plan)
-// No models are locked by plan anymore.
-// ──────────────────────────────────────────────
 export async function getLockedModels(plan) {
   return [];
 }
 
-// ──────────────────────────────────────────────
-// validateModelAccess(modelId, plan)
-// Allows any active model regardless of plan.
-// Returns { allowed, reason, fallback, requiredPlan }
-// ──────────────────────────────────────────────
 export async function validateModelAccess(modelId, plan) {
   const modelResult = await pool.query(
     `SELECT model_id, min_plan, branded_name
@@ -65,15 +52,6 @@ export async function validateModelAccess(modelId, plan) {
   return { allowed: true, reason: null, fallback: null, requiredPlan: null };
 }
 
-// ──────────────────────────────────────────────
-// getSafeModel(requestedModelId, plan)
-// Returns { modelId, apiModelId, provider, wasDowngraded }
-//
-// CRITICAL:
-// - api_model_id is read from model_configs table
-// - never hardcoded except final emergency fallback
-// - plan no longer controls model selection
-// ──────────────────────────────────────────────
 export async function getSafeModel(requestedModelId, plan) {
   const requested = requestedModelId || 'gpt-4o-mini';
 
