@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 
+import './agents/registerSaasSoftware.js';
 import chatRoutes from './routes/chat.js';
 import upsertRoutes from './routes/upsert.js';
 import chatbotsRoutes from './routes/chatbots.js';
