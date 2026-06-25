@@ -42,7 +42,8 @@ async function ensureQuickAnswersTable() {
       business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
       question TEXT NOT NULL,
       answer TEXT NOT NULL,
-      normalized_key TEXT,
+      normalized_key TEXT DEFAULT '',
+      normalized_question TEXT DEFAULT '',
       embedding vector(1536),
       active BOOLEAN DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -50,7 +51,8 @@ async function ensureQuickAnswersTable() {
     )
   `);
 
-  await pool.query(`ALTER TABLE quick_answers ADD COLUMN IF NOT EXISTS normalized_key TEXT`);
+  await pool.query(`ALTER TABLE quick_answers ADD COLUMN IF NOT EXISTS normalized_key TEXT DEFAULT ''`);
+  await pool.query(`ALTER TABLE quick_answers ADD COLUMN IF NOT EXISTS normalized_question TEXT DEFAULT ''`);
   await pool.query(`ALTER TABLE quick_answers ADD COLUMN IF NOT EXISTS embedding vector(1536)`);
   await pool.query(`ALTER TABLE quick_answers ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true`);
   await pool.query(`ALTER TABLE quick_answers ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
@@ -58,12 +60,18 @@ async function ensureQuickAnswersTable() {
 
   await pool.query(`
     UPDATE quick_answers
-    SET normalized_key = lower(regexp_replace(regexp_replace(question, '[’'']', '', 'g'), '[^a-zA-Z0-9]+', ' ', 'g'))
+    SET normalized_key = lower(regexp_replace(question, '[^a-zA-Z0-9]+', ' ', 'g'))
     WHERE normalized_key IS NULL OR normalized_key = ''
+  `);
+  await pool.query(`
+    UPDATE quick_answers
+    SET normalized_question = COALESCE(NULLIF(normalized_key, ''), lower(regexp_replace(question, '[^a-zA-Z0-9]+', ' ', 'g')))
+    WHERE normalized_question IS NULL OR normalized_question = ''
   `);
 
   await pool.query(`UPDATE quick_answers SET active = true WHERE active IS NULL`);
   await pool.query(`ALTER TABLE quick_answers ALTER COLUMN normalized_key SET DEFAULT ''`);
+  await pool.query(`ALTER TABLE quick_answers ALTER COLUMN normalized_question SET DEFAULT ''`);
   await pool.query(`ALTER TABLE quick_answers ALTER COLUMN active SET DEFAULT true`);
 
   await pool.query(`
@@ -73,6 +81,10 @@ async function ensureQuickAnswersTable() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_quick_answers_normalized_key
     ON quick_answers(business_id, normalized_key)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_quick_answers_normalized_question
+    ON quick_answers(business_id, normalized_question)
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_quick_answers_embedding
@@ -110,7 +122,7 @@ router.get('/', async (req, res) => {
     await ensureQuickAnswersTable();
 
     const result = await pool.query(
-      `SELECT id, question, answer, normalized_key, active, created_at, updated_at
+      `SELECT id, question, answer, normalized_key, normalized_question, active, created_at, updated_at
        FROM quick_answers
        WHERE business_id = $1
        ORDER BY created_at DESC`,
@@ -144,13 +156,14 @@ router.post('/', async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO quick_answers
-        (business_id, question, answer, normalized_key, embedding, active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5::vector, $6, NOW(), NOW())
-       RETURNING id, question, answer, normalized_key, active, created_at, updated_at`,
+        (business_id, question, answer, normalized_key, normalized_question, embedding, active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6::vector, $7, NOW(), NOW())
+       RETURNING id, question, answer, normalized_key, normalized_question, active, created_at, updated_at`,
       [
         businessId,
         question,
         answer,
+        normalizedKey,
         normalizedKey,
         embedding ? JSON.stringify(embedding) : null,
         active,
@@ -197,11 +210,12 @@ router.patch('/:id', async (req, res) => {
        SET question = $1,
            answer = $2,
            normalized_key = $3,
+           normalized_question = $3,
            active = $4,
            embedding = CASE WHEN $5::vector IS NULL THEN embedding ELSE $5::vector END,
            updated_at = NOW()
        WHERE id = $6 AND business_id = $7
-       RETURNING id, question, answer, normalized_key, active, created_at, updated_at`,
+       RETURNING id, question, answer, normalized_key, normalized_question, active, created_at, updated_at`,
       [
         question,
         answer,
