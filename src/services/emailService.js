@@ -29,7 +29,7 @@ function escapeHtml(value) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/\"/g, '&quot;')
+    .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
 
@@ -112,6 +112,72 @@ export async function sendLeadAlert(config, lead) {
     from: getFromAddress('ChatflowAI Alerts'),
     to: recipient,
     subject: `${emoji} ${label} — ${lead?.full_name || 'New visitor'} | ${String(lead?.project_details || '').substring(0, 60)}`,
+    html: htmlString,
+  });
+}
+
+export async function sendInquiryAlert(config, inquiry) {
+  if (!canSendEmail('sendInquiryAlert')) return { skipped: true, reason: 'RESEND_API_KEY missing' };
+  const resend = getResendClient();
+  if (!resend) return { skipped: true, reason: 'RESEND_API_KEY missing' };
+
+  const recipient = inquiry?.urgency_flag
+    ? (config?.escalation_email || config?.owner_email)
+    : (config?.owner_email || config?.escalation_email);
+  if (!recipient) return { skipped: true, reason: 'No owner email configured' };
+
+  const typeText = String(inquiry?.inquiry_type || 'general').replace(/_/g, ' ');
+  const priorityText = String(inquiry?.priority || 'normal').toUpperCase();
+  const emoji = inquiry?.urgency_flag || inquiry?.priority === 'high' ? '🚨' : '📩';
+  const dateText = new Date().toLocaleString('en-US');
+  const dashboardBase = toSafeUrl(getDashboardBaseUrl());
+  const inquiryId = encodeURIComponent(String(inquiry?.id ?? ''));
+  const dashboardLink = getEmailButtonUrl(`${dashboardBase}/inquiry-detail?id=${inquiryId}`);
+
+  const htmlString = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:640px;margin:0 auto;border:1px solid #e5e7eb;">
+      <div style="background:#0f172a;color:white;padding:16px 20px;font-weight:700;font-size:18px;">
+        ${emoji} New Inquiry — ${escapeHtml(config?.business_name || 'Your Business')}
+      </div>
+
+      <div style="padding:20px;">
+        <div style="background:#f3f4f6;border-radius:8px;padding:14px;margin-bottom:16px;">
+          <div style="font-size:12px;font-weight:700;color:#6b7280;margin-bottom:6px;">INQUIRY SUMMARY</div>
+          <div>${escapeHtml(inquiry?.ai_summary || inquiry?.message_summary || 'No summary provided.')}</div>
+        </div>
+
+        <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+          <tr><td style="padding:6px 0;font-weight:600;width:160px;">Type:</td><td>${escapeHtml(typeText)}</td></tr>
+          <tr><td style="padding:6px 0;font-weight:600;">Priority:</td><td>${escapeHtml(priorityText)}</td></tr>
+          <tr><td style="padding:6px 0;font-weight:600;">Name:</td><td>${escapeHtml(inquiry?.full_name || 'Not provided')}</td></tr>
+          <tr><td style="padding:6px 0;font-weight:600;">Phone:</td><td><a href="tel:${escapeHtml(inquiry?.phone || '')}">${escapeHtml(inquiry?.phone || 'Not provided')}</a></td></tr>
+          <tr><td style="padding:6px 0;font-weight:600;">Email:</td><td><a href="mailto:${escapeHtml(inquiry?.email || '')}">${escapeHtml(inquiry?.email || 'Not provided')}</a></td></tr>
+          ${inquiry?.company_name ? `<tr><td style="padding:6px 0;font-weight:600;">Company:</td><td>${escapeHtml(inquiry.company_name)}</td></tr>` : ''}
+          ${inquiry?.preferred_contact_method ? `<tr><td style="padding:6px 0;font-weight:600;">Preferred Contact:</td><td>${escapeHtml(inquiry.preferred_contact_method)}</td></tr>` : ''}
+        </table>
+
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:16px;">
+          <div style="font-size:12px;font-weight:700;color:#6b7280;margin-bottom:6px;">CONTACT REASON</div>
+          <div>${escapeHtml(inquiry?.contact_reason || 'Not provided')}</div>
+        </div>
+
+        ${inquiry?.urgency_flag ? `<div style="background:#fee2e2;color:#991b1b;padding:12px;border-radius:8px;margin-bottom:16px;font-weight:600;">🚨 URGENT — ${escapeHtml(inquiry?.urgency_reason || 'Needs quick attention')}</div>` : ''}
+
+        <div style="text-align:center;margin:24px 0 10px;">
+          <a href="${dashboardLink}" style="background:#0f172a;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;display:inline-block;">View Inquiry in Dashboard →</a>
+        </div>
+      </div>
+
+      <div style="padding:12px 20px;color:#6b7280;font-size:12px;border-top:1px solid #e5e7eb;">
+        Sent by ChatflowAI • ${escapeHtml(dateText)}
+      </div>
+    </div>
+  `;
+
+  await resend.emails.send({
+    from: getFromAddress('ChatflowAI Alerts'),
+    to: recipient,
+    subject: `${emoji} New ${typeText} inquiry — ${inquiry?.full_name || 'Website visitor'} | ${String(inquiry?.message_summary || inquiry?.contact_reason || '').substring(0, 70)}`,
     html: htmlString,
   });
 }
