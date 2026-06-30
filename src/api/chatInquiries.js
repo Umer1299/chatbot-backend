@@ -5,6 +5,23 @@ import originalRouter from './chatOptimized.js';
 
 const router = express.Router();
 const originalQuery = pool.query.bind(pool);
+const inquiryOnlySessions = new Set();
+
+pool.query = async function inquiryAwareQuery(text, params = [], ...rest) {
+  const queryText = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+  const sessionId = params?.[1];
+  if (queryText.includes('INSERT INTO leads') && sessionId && inquiryOnlySessions.has(sessionId)) {
+    console.log('[inquiries] Lead insert skipped because this session was saved as an inquiry', { sessionId });
+    return { rows: [] };
+  }
+  return originalQuery(text, params, ...rest);
+};
+
+function rememberInquiryOnlySession(sessionId) {
+  if (!sessionId) return;
+  inquiryOnlySessions.add(sessionId);
+  setTimeout(() => inquiryOnlySessions.delete(sessionId), 30 * 60 * 1000).unref?.();
+}
 
 function cleanPayload(payload, capture) {
   if (!payload || typeof payload !== 'object') return payload;
@@ -84,13 +101,19 @@ router.use(async (req, res, next) => {
     });
 
     if (config) {
-      saveInquiry(req, capture, config).catch((error) => console.error('pre inquiry save failed:', error.message));
+      const inquiry = await saveInquiry(req, capture, config).catch((error) => {
+        console.error('pre inquiry save failed:', error.message);
+        return null;
+      });
+      if (inquiry?.id) rememberInquiryOnlySession(req.body.sessionId);
     }
   }
 
   res.on('finish', () => {
     if (!config) return;
-    saveInquiry(req, capture, config).catch((error) => console.error('post inquiry save failed:', error.message));
+    saveInquiry(req, capture, config)
+      .then((inquiry) => { if (inquiry?.id) rememberInquiryOnlySession(req.body.sessionId); })
+      .catch((error) => console.error('post inquiry save failed:', error.message));
   });
 
   return originalRouter(req, res, next);
