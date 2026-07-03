@@ -477,46 +477,19 @@ async function pollCrawl(baseUrl, jobId) {
 }
 
 async function scrapeWithBaseUrl(baseUrl, url, options) {
-  try {
-    const payload = await startCrawl(baseUrl, url, options);
-    const jobId = payload?.jobId || payload?.id || payload?.data?.jobId || payload?.data?.id;
-    const pages = jobId ? await pollCrawl(baseUrl, jobId) : extractPages(payload);
+  const payload = await startCrawl(baseUrl, url, options);
+  const jobId = payload?.jobId || payload?.id || payload?.data?.jobId || payload?.data?.id;
+  const pages = jobId ? await pollCrawl(baseUrl, jobId) : extractPages(payload);
 
-    if (pages.length) {
-      return pages;
-    }
-
-    throw new Error('Firecrawl crawl returned no usable page content');
-  } catch (crawlError) {
-    console.warn(
-      `[firecrawlService] crawl failed for ${url} via ${baseUrl}; trying single-page scrape fallback. Reason: ${crawlError.message}`,
-    );
-
-    try {
-      const fallbackPages = await scrapeSinglePage(baseUrl, url, options);
-      console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s) for ${url} via ${baseUrl}`);
-      return fallbackPages;
-    } catch (singlePageError) {
-      console.warn(
-        `[firecrawlService] single-page scrape fallback failed for ${url} via ${baseUrl}; trying direct HTML fallback. Reason: ${singlePageError.message}`,
-      );
-      return scrapeDirectHtml(url);
-    }
+  if (pages.length) {
+    return pages;
   }
+
+  throw new Error('Firecrawl crawl returned no usable page content');
 }
 
 export async function scrapeWebsite(url, options = {}) {
   const baseUrls = getFirecrawlBaseUrls();
-
-  if (!baseUrls.length) {
-    try {
-      const directPages = await scrapeDirectHtml(url);
-      return { pages: directPages, totalPages: directPages.length, error: null };
-    } catch (error) {
-      return { pages: [], totalPages: 0, error: `Missing Firecrawl URL configuration and ${error.message}` };
-    }
-  }
-
   const errors = [];
 
   for (const baseUrl of baseUrls) {
@@ -534,10 +507,26 @@ export async function scrapeWebsite(url, options = {}) {
         totalPages: normalizedPages.length,
         error: null,
       };
-    } catch (error) {
-      const message = `${baseUrl}: ${error.message}`;
-      errors.push(message);
-      console.error('[firecrawlService]', message);
+    } catch (crawlError) {
+      errors.push(`${baseUrl}: ${crawlError.message}`);
+      console.warn(
+        `[firecrawlService] crawl failed for ${url} via ${baseUrl}; trying single-page scrape fallback. Reason: ${crawlError.message}`,
+      );
+
+      try {
+        const fallbackPages = await scrapeSinglePage(baseUrl, url, options);
+        console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s) for ${url} via ${baseUrl}`);
+        return {
+          pages: fallbackPages,
+          totalPages: fallbackPages.length,
+          error: null,
+        };
+      } catch (singlePageError) {
+        errors.push(`${baseUrl}: ${singlePageError.message}`);
+        console.warn(
+          `[firecrawlService] single-page scrape fallback failed for ${url} via ${baseUrl}. Reason: ${singlePageError.message}`,
+        );
+      }
     }
   }
 
