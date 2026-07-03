@@ -27,6 +27,8 @@ const EXCLUDE_LINE_PATTERNS = [
 const FIRECRAWL_TIMEOUT_MS = Number(process.env.FIRECRAWL_TIMEOUT_MS || 120000);
 const FIRECRAWL_POLL_INTERVAL_MS = Number(process.env.FIRECRAWL_POLL_INTERVAL_MS || 3000);
 const FIRECRAWL_REQUEST_TIMEOUT_MS = Number(process.env.FIRECRAWL_REQUEST_TIMEOUT_MS || 30000);
+const FIRECRAWL_EMPTY_COMPLETION_GRACE_MS = Number(process.env.FIRECRAWL_EMPTY_COMPLETION_GRACE_MS || 10000);
+const FIRECRAWL_WAIT_FOR_MS = Number(process.env.FIRECRAWL_WAIT_FOR_MS || 1500);
 const OFFICIAL_FIRECRAWL_URL = 'https://api.firecrawl.dev';
 
 function stripTrailingSlash(value) {
@@ -122,6 +124,18 @@ async function readJsonResponse(response, context) {
   }
 }
 
+function normalizePage(page) {
+  const metadata = page?.metadata || {};
+  const content = page?.markdown || page?.content || page?.html || page?.rawHtml || page?.summary || '';
+
+  return {
+    url: page?.url || metadata?.sourceURL || metadata?.url || '',
+    content,
+    title: metadata?.title || page?.title || '',
+    metadata,
+  };
+}
+
 function extractPages(payload) {
   const candidates = [
     payload?.data?.pages,
@@ -130,50 +144,146 @@ function extractPages(payload) {
     payload?.data,
   ];
 
-  const pages = candidates.find(Array.isArray) || [];
+  const pageCandidate = candidates.find((candidate) => Array.isArray(candidate) || (candidate && typeof candidate === 'object'));
+  const pages = Array.isArray(pageCandidate) ? pageCandidate : pageCandidate ? [pageCandidate] : [];
 
   return pages
-    .map((page) => {
-      const metadata = page?.metadata || {};
-      return {
-        url: page?.url || metadata?.sourceURL || metadata?.url || '',
-        content: page?.markdown || page?.content || page?.html || '',
-        title: metadata?.title || page?.title || '',
-        metadata,
-      };
-    })
-    .filter((page) => page.content);
+    .map(normalizePage)
+    .filter((page) => String(page.content || '').trim());
+}
+
+function getStatus(payload) {
+  return String(payload?.status || payload?.data?.status || '').toLowerCase();
+}
+
+function getCount(payload, key) {
+  const value = payload?.[key] ?? payload?.data?.[key];
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function getPayloadError(payload) {
+  return (
+    payload?.error ||
+    payload?.message ||
+    payload?.data?.error ||
+    payload?.data?.message ||
+    payload?.data?.metadata?.error ||
+    null
+  );
+}
+
+function getNextUrl(payload) {
+  return payload?.next || payload?.data?.next || null;
+}
+
+function resolveFirecrawlUrl(baseUrl, value) {
+  if (!value) return null;
+  try {
+    return new URL(value, `${baseUrl}/`).toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchPaginatedPages(baseUrl, firstNextUrl) {
+  const pages = [];
+  const seen = new Set();
+  let nextUrl = resolveFirecrawlUrl(baseUrl, firstNextUrl);
+
+  while (nextUrl && !seen.has(nextUrl)) {
+    seen.add(nextUrl);
+
+    const response = await fetchWithTimeout(nextUrl, {
+      method: 'GET',
+      headers: getFirecrawlHeaders(baseUrl),
+    });
+    const payload = await readJsonResponse(response, `Firecrawl paginated crawl at ${nextUrl}`);
+
+    if (!response.ok) {
+      throw new Error(getPayloadError(payload) || `Crawl pagination failed (${response.status})`);
+    }
+
+    pages.push(...extractPages(payload));
+    nextUrl = resolveFirecrawlUrl(baseUrl, getNextUrl(payload));
+  }
+
+  return pages;
+}
+
+function buildScrapeOptions(options = {}) {
+  const scrapeOptions = {
+    formats: ['markdown'],
+    onlyMainContent: options.onlyMainContent ?? false,
+    excludeTags: ['script', 'style', 'nav', 'footer', 'header', 'aside', '.cookie-banner', '#cookie'],
+    waitFor: options.waitFor ?? FIRECRAWL_WAIT_FOR_MS,
+    timeout: options.timeout ?? FIRECRAWL_REQUEST_TIMEOUT_MS,
+    removeBase64Images: true,
+    blockAds: true,
+  };
+
+  return scrapeOptions;
 }
 
 async function startCrawl(baseUrl, url, options) {
   const crawlUrl = `${baseUrl}/v1/crawl`;
+  const crawlOptions = {
+    url,
+    limit: options.limit || 20,
+    maxDepth: options.maxDepth || 2,
+    maxDiscoveryDepth: options.maxDiscoveryDepth || options.maxDepth || 2,
+    scrapeOptions: buildScrapeOptions(options),
+    excludePaths: options.excludePaths || DEFAULT_EXCLUDE_PATHS,
+  };
+
+  if (process.env.FIRECRAWL_IGNORE_ROBOTS_TXT === 'true') {
+    crawlOptions.ignoreRobotsTxt = true;
+  }
+
   const response = await fetchWithTimeout(crawlUrl, {
     method: 'POST',
     headers: getFirecrawlHeaders(baseUrl, true),
-    body: JSON.stringify({
-      url,
-      limit: options.limit || 20,
-      maxDepth: options.maxDepth || 2,
-      scrapeOptions: {
-        formats: ['markdown'],
-        excludeTags: ['script', 'style', 'nav', 'footer', 'header', 'aside', '.cookie-banner', '#cookie'],
-      },
-      excludePaths: options.excludePaths || DEFAULT_EXCLUDE_PATHS,
-    }),
+    body: JSON.stringify(crawlOptions),
   });
 
   const payload = await readJsonResponse(response, `Firecrawl start crawl at ${crawlUrl}`);
 
   if (!response.ok) {
-    throw new Error(payload?.error || payload?.message || `Failed to start crawl (${response.status})`);
+    throw new Error(getPayloadError(payload) || `Failed to start crawl (${response.status})`);
   }
 
   return payload;
 }
 
+async function scrapeSinglePage(baseUrl, url, options = {}) {
+  const scrapeUrl = `${baseUrl}/v1/scrape`;
+  const response = await fetchWithTimeout(scrapeUrl, {
+    method: 'POST',
+    headers: getFirecrawlHeaders(baseUrl, true),
+    body: JSON.stringify({
+      url,
+      ...buildScrapeOptions(options),
+    }),
+  });
+
+  const payload = await readJsonResponse(response, `Firecrawl fallback scrape at ${scrapeUrl}`);
+
+  if (!response.ok) {
+    throw new Error(getPayloadError(payload) || `Fallback scrape failed (${response.status})`);
+  }
+
+  const pages = extractPages(payload);
+  if (!pages.length) {
+    throw new Error(getPayloadError(payload) || 'Fallback scrape returned no usable page content');
+  }
+
+  return pages;
+}
+
 async function pollCrawl(baseUrl, jobId) {
   const pollUrl = `${baseUrl}/v1/crawl/${jobId}`;
   const start = Date.now();
+  let emptyCompletionStartedAt = null;
 
   while (Date.now() - start < FIRECRAWL_TIMEOUT_MS) {
     const pollResp = await fetchWithTimeout(pollUrl, {
@@ -184,22 +294,51 @@ async function pollCrawl(baseUrl, jobId) {
     const pollPayload = await readJsonResponse(pollResp, `Firecrawl poll crawl at ${pollUrl}`);
 
     if (!pollResp.ok) {
-      throw new Error(pollPayload?.error || pollPayload?.message || `Crawl polling failed (${pollResp.status})`);
+      throw new Error(getPayloadError(pollPayload) || `Crawl polling failed (${pollResp.status})`);
     }
 
-    const status = pollPayload?.status || pollPayload?.data?.status;
+    const status = getStatus(pollPayload);
+    const completed = getCount(pollPayload, 'completed');
+    const total = getCount(pollPayload, 'total');
     const pages = extractPages(pollPayload);
+    const nextUrl = getNextUrl(pollPayload);
+
+    if (nextUrl) {
+      pages.push(...await fetchPaginatedPages(baseUrl, nextUrl));
+    }
 
     console.log(
-      `[firecrawlService] poll ${jobId}: status=${status || 'unknown'} pages=${pages.length} completed=${pollPayload?.completed ?? pollPayload?.data?.completed ?? 'unknown'} total=${pollPayload?.total ?? pollPayload?.data?.total ?? 'unknown'}`,
+      `[firecrawlService] poll ${jobId}: status=${status || 'unknown'} pages=${pages.length} completed=${completed ?? 'unknown'} total=${total ?? 'unknown'}`,
     );
 
     if (pages.length > 0) {
       return pages;
     }
 
-    if (status === 'failed') {
-      throw new Error(pollPayload?.error || pollPayload?.data?.error || 'Firecrawl crawl failed');
+    if (status === 'failed' || status === 'cancelled') {
+      throw new Error(getPayloadError(pollPayload) || `Firecrawl crawl ${status}`);
+    }
+
+    if (status === 'completed' || status === 'complete') {
+      throw new Error(
+        getPayloadError(pollPayload) ||
+          `Firecrawl crawl completed but returned no usable page content (completed=${completed ?? 'unknown'}, total=${total ?? 'unknown'})`,
+      );
+    }
+
+    if (total && completed != null && completed >= total) {
+      if (!emptyCompletionStartedAt) {
+        emptyCompletionStartedAt = Date.now();
+      }
+
+      if (Date.now() - emptyCompletionStartedAt >= FIRECRAWL_EMPTY_COMPLETION_GRACE_MS) {
+        throw new Error(
+          getPayloadError(pollPayload) ||
+            `Firecrawl crawl appears finished but returned no usable page content (status=${status || 'unknown'}, completed=${completed}, total=${total})`,
+        );
+      }
+    } else {
+      emptyCompletionStartedAt = null;
     }
 
     await new Promise((resolve) => setTimeout(resolve, FIRECRAWL_POLL_INTERVAL_MS));
@@ -209,14 +348,25 @@ async function pollCrawl(baseUrl, jobId) {
 }
 
 async function scrapeWithBaseUrl(baseUrl, url, options) {
-  const payload = await startCrawl(baseUrl, url, options);
-  const jobId = payload?.jobId || payload?.id || payload?.data?.jobId || payload?.data?.id;
+  try {
+    const payload = await startCrawl(baseUrl, url, options);
+    const jobId = payload?.jobId || payload?.id || payload?.data?.jobId || payload?.data?.id;
+    const pages = jobId ? await pollCrawl(baseUrl, jobId) : extractPages(payload);
 
-  if (jobId) {
-    return pollCrawl(baseUrl, jobId);
+    if (pages.length) {
+      return pages;
+    }
+
+    throw new Error('Firecrawl crawl returned no usable page content');
+  } catch (crawlError) {
+    console.warn(
+      `[firecrawlService] crawl failed for ${url} via ${baseUrl}; trying single-page scrape fallback. Reason: ${crawlError.message}`,
+    );
+
+    const fallbackPages = await scrapeSinglePage(baseUrl, url, options);
+    console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s) for ${url} via ${baseUrl}`);
+    return fallbackPages;
   }
-
-  return extractPages(payload);
 }
 
 export async function scrapeWebsite(url, options = {}) {
