@@ -509,7 +509,12 @@ export async function scrapeWebsite(url, options = {}) {
   const baseUrls = getFirecrawlBaseUrls();
 
   if (!baseUrls.length) {
-    return { pages: [], totalPages: 0, error: 'Missing Firecrawl URL configuration' };
+    try {
+      const directPages = await scrapeDirectHtml(url);
+      return { pages: directPages, totalPages: directPages.length, error: null };
+    } catch (error) {
+      return { pages: [], totalPages: 0, error: `Missing Firecrawl URL configuration and ${error.message}` };
+    }
   }
 
   const errors = [];
@@ -534,6 +539,17 @@ export async function scrapeWebsite(url, options = {}) {
       errors.push(message);
       console.error('[firecrawlService]', message);
     }
+  }
+
+  try {
+    const directPages = await scrapeDirectHtml(url);
+    return {
+      pages: directPages,
+      totalPages: directPages.length,
+      error: null,
+    };
+  } catch (directError) {
+    errors.push(directError.message);
   }
 
   const detailedMessage = errors.join(' | ');
