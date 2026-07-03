@@ -1,3 +1,5 @@
+import * as cheerio from 'cheerio';
+
 const DEFAULT_EXCLUDE_PATHS = [
   '/blog/*',
   '/news/*',
@@ -29,6 +31,7 @@ const FIRECRAWL_POLL_INTERVAL_MS = Number(process.env.FIRECRAWL_POLL_INTERVAL_MS
 const FIRECRAWL_REQUEST_TIMEOUT_MS = Number(process.env.FIRECRAWL_REQUEST_TIMEOUT_MS || 30000);
 const FIRECRAWL_EMPTY_COMPLETION_GRACE_MS = Number(process.env.FIRECRAWL_EMPTY_COMPLETION_GRACE_MS || 10000);
 const FIRECRAWL_WAIT_FOR_MS = Number(process.env.FIRECRAWL_WAIT_FOR_MS || 1500);
+const DIRECT_HTML_MIN_CHARS = Number(process.env.DIRECT_HTML_MIN_CHARS || 300);
 const OFFICIAL_FIRECRAWL_URL = 'https://api.firecrawl.dev';
 
 function stripTrailingSlash(value) {
@@ -122,6 +125,25 @@ async function readJsonResponse(response, context) {
   } catch (error) {
     throw new Error(`${context} returned invalid JSON. Body: ${truncateBody(rawBody)}`);
   }
+}
+
+function normalizeWebsiteUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return raw;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw.replace(/^\/+/, '')}`;
+}
+
+function getUrlCandidates(value) {
+  const normalized = normalizeWebsiteUrl(value);
+  if (!normalized) return [];
+
+  const candidates = [normalized];
+  if (normalized.startsWith('https://')) {
+    candidates.push(normalized.replace(/^https:\/\//i, 'http://'));
+  }
+
+  return [...new Set(candidates)];
 }
 
 function normalizePage(page) {
@@ -225,10 +247,117 @@ function buildScrapeOptions(options = {}) {
   return scrapeOptions;
 }
 
+function htmlToBusinessText(html) {
+  const $ = cheerio.load(html || '');
+
+  $('script, style, noscript, svg, canvas, iframe, form').remove();
+
+  const selectors = [
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'p',
+    'li',
+    '.elementor-widget-container',
+    '.elementor-heading-title',
+    '.elementor-icon-list-text',
+    '[class*=service]',
+    '[class*=about]',
+    '[class*=testimonial]',
+  ];
+  const seen = new Set();
+  const sections = [];
+
+  for (const selector of selectors) {
+    $(selector).each((_, element) => {
+      const text = $(element).text().replace(/\s+/g, ' ').trim();
+      const key = text.toLowerCase();
+      if (text.length < 35) return;
+      if (text.split('|').length - 1 > 5) return;
+      if (seen.has(key)) return;
+      seen.add(key);
+      sections.push(text);
+    });
+  }
+
+  let combined = sections.join('\n\n').trim();
+
+  if (combined.length < DIRECT_HTML_MIN_CHARS) {
+    combined = $('body').text().replace(/\s+/g, ' ').trim();
+  }
+
+  return combined;
+}
+
+function extractHtmlMetadata($) {
+  return {
+    title: $('title').first().text().trim(),
+    description: $('meta[name="description"]').attr('content') || '',
+    ogDescription: $('meta[property="og:description"]').attr('content') || '',
+    ogImage: $('meta[property="og:image"]').attr('content') || '',
+    themeColor: $('meta[name="theme-color"]').attr('content') || '',
+  };
+}
+
+async function scrapeDirectHtml(url) {
+  const errors = [];
+
+  for (const candidateUrl of getUrlCandidates(url)) {
+    try {
+      const response = await fetchWithTimeout(candidateUrl, {
+        method: 'GET',
+        redirect: 'follow',
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'User-Agent': 'Mozilla/5.0 (compatible; ChatflowAIBot/1.0; +https://chatflowai.io)',
+        },
+      });
+
+      const rawBody = await response.text();
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}: ${truncateBody(rawBody)}`);
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+        throw new Error(`Unexpected content type: ${contentType}`);
+      }
+
+      const $ = cheerio.load(rawBody);
+      const content = htmlToBusinessText(rawBody);
+      if (content.length < DIRECT_HTML_MIN_CHARS) {
+        throw new Error(`Direct HTML extraction returned too little content (${content.length} chars)`);
+      }
+
+      const metadata = extractHtmlMetadata($);
+      const page = {
+        url: response.url || candidateUrl,
+        content,
+        title: metadata.title || new URL(candidateUrl).hostname,
+        metadata: {
+          ...metadata,
+          sourceURL: response.url || candidateUrl,
+          extractionFallback: 'direct-html',
+        },
+      };
+
+      console.log(
+        `[firecrawlService] direct HTML fallback returned ${content.length} characters for ${url} via ${candidateUrl}`,
+      );
+      return [page];
+    } catch (error) {
+      errors.push(`${candidateUrl}: ${error.message}`);
+    }
+  }
+
+  throw new Error(`Direct HTML fallback failed: ${errors.join(' | ')}`);
+}
+
 async function startCrawl(baseUrl, url, options) {
   const crawlUrl = `${baseUrl}/v1/crawl`;
   const crawlOptions = {
-    url,
+    url: normalizeWebsiteUrl(url),
     limit: options.limit || 20,
     maxDepth: options.maxDepth || 2,
     maxDiscoveryDepth: options.maxDiscoveryDepth || options.maxDepth || 2,
@@ -261,7 +390,7 @@ async function scrapeSinglePage(baseUrl, url, options = {}) {
     method: 'POST',
     headers: getFirecrawlHeaders(baseUrl, true),
     body: JSON.stringify({
-      url,
+      url: normalizeWebsiteUrl(url),
       ...buildScrapeOptions(options),
     }),
   });
@@ -363,9 +492,16 @@ async function scrapeWithBaseUrl(baseUrl, url, options) {
       `[firecrawlService] crawl failed for ${url} via ${baseUrl}; trying single-page scrape fallback. Reason: ${crawlError.message}`,
     );
 
-    const fallbackPages = await scrapeSinglePage(baseUrl, url, options);
-    console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s) for ${url} via ${baseUrl}`);
-    return fallbackPages;
+    try {
+      const fallbackPages = await scrapeSinglePage(baseUrl, url, options);
+      console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s) for ${url} via ${baseUrl}`);
+      return fallbackPages;
+    } catch (singlePageError) {
+      console.warn(
+        `[firecrawlService] single-page scrape fallback failed for ${url} via ${baseUrl}; trying direct HTML fallback. Reason: ${singlePageError.message}`,
+      );
+      return scrapeDirectHtml(url);
+    }
   }
 }
 
