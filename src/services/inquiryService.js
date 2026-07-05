@@ -7,6 +7,7 @@ const PHONE_RE = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const SIMPLE_VISITOR_MESSAGE_RE = /^(hi|hello|hey|hiya|yo|salam|assalam o alaikum|assalamu alaikum|good morning|good afternoon|good evening|test|testing|ok|okay|yes|no|thanks|thank you|thx|help)$/i;
 const GENERIC_INQUIRY_SUMMARY_RE = /\b(greet|greeting|hello|visitor said hello|visitor greeted|simple greeting|general inquiry|general enquiry|website visitor sent a general inquiry|asked how.*help|how can i help)\b/i;
 const ACTIONABLE_INQUIRY_TYPES = new Set(['support', 'complaint', 'human_handoff', 'partnership', 'career', 'supplier', 'billing', 'technical_support']);
+const OWNER_ACTION_RE = /\b(complaint|complain|not happy|refund|problem|issue|support|existing customer|billing|invoice|payment|call me|contact me|email me|reach me|get back to me|get in touch|speak to owner|talk to owner|speak to manager|talk to manager|speak to someone|speak to a person|human|real person|human agent|someone call|someone contact|follow up|partnership|partner|supplier|vendor|career|job)\b/i;
 
 const INQUIRY_TYPE_ALIASES = {
   support: 'support',
@@ -32,7 +33,7 @@ const INQUIRY_TYPE_ALIASES = {
   other: 'other',
 };
 
-const STRONG_INQUIRY_RE = /\b(contact|support|help|complaint|issue|problem|not happy|speak to someone|speak to a person|human|real person|human agent|call me|partnership|partner|career|job|supplier|general enquiry|general inquiry|billing|invoice|existing customer)\b/i;
+const STRONG_INQUIRY_RE = /\b(contact me|call me|email me|support|complaint|complain|issue|problem|not happy|refund|speak to someone|speak to a person|speak to owner|speak to manager|human|real person|human agent|partnership|partner|career|job|supplier|billing|invoice|existing customer)\b/i;
 const STRONG_SALES_RE = /\b(quote|estimate|pricing|price|demo|book a demo|book a call|consultation|appointment|viewing|buy|hire|project|website|crm|chatbot|software|renovation|construction work)\b/i;
 const URGENCY_RE = /\b(urgent|asap|emergency|immediately|today|legal action|not happy|complaint)\b/i;
 
@@ -256,6 +257,11 @@ function hasMeaningfulInquiryText(inquiryData = {}) {
   return !GENERIC_INQUIRY_SUMMARY_RE.test(text);
 }
 
+function hasOwnerActionRequest(inquiryData = {}, transcript = '') {
+  const text = `${JSON.stringify(inquiryData || {})}\n${transcript || ''}`;
+  return OWNER_ACTION_RE.test(text);
+}
+
 function shouldSaveInquiry(inquiryData = {}, transcript = '') {
   const text = String(transcript || '');
   const sourceText = `${JSON.stringify(inquiryData || {})}\n${text}`;
@@ -266,19 +272,20 @@ function shouldSaveInquiry(inquiryData = {}, transcript = '') {
   const hasContact = hasContactDetails(inquiryData, text);
   const isUrgent = Boolean(inquiryData.urgency_flag) || URGENCY_RE.test(sourceText);
   const hasActionableType = ACTIONABLE_INQUIRY_TYPES.has(normalizedType);
+  const hasOwnerAction = hasOwnerActionRequest(inquiryData, text);
   const lowSignalOnly = hasOnlyLowSignalVisitorMessages(text);
   const genericOnly = GENERIC_INQUIRY_SUMMARY_RE.test(sourceText) && !hasMeaningfulSummary;
 
-  if (hasStrongSalesIntent(text) && !hasExplicitInquiryData) return false;
+  if (hasStrongSalesIntent(text) && !hasOwnerAction && !hasActionableType) return false;
   if (lowSignalOnly && !hasContact && !isUrgent) return false;
-  if (genericOnly && !hasContact && !isUrgent && !hasActionableType) return false;
+  if (genericOnly && !hasContact && !isUrgent && !hasActionableType && !hasOwnerAction) return false;
 
   return Boolean(
-    hasContact
-    || isUrgent
-    || (hasInquiryIntent && !lowSignalOnly)
-    || (hasActionableType && hasMeaningfulSummary)
-    || (hasExplicitInquiryData && hasMeaningfulSummary)
+    isUrgent
+    || (hasOwnerAction && hasContact && !lowSignalOnly)
+    || (hasActionableType && hasMeaningfulSummary && !lowSignalOnly)
+    || (hasExplicitInquiryData && hasMeaningfulSummary && (hasContact || hasActionableType || hasOwnerAction))
+    || (hasInquiryIntent && hasContact && !lowSignalOnly)
   );
 }
 
