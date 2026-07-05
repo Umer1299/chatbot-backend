@@ -4,11 +4,92 @@ import requireAuth from '../middleware/jwtAuth.js';
 import { redisClient } from '../services/redis.js';
 
 const router = Router();
+let ensureInquiriesTablePromise = null;
 
 function parsePositiveInt(value, fallback, max) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(parsed, max);
+}
+
+async function ensureInquiriesTable() {
+  if (!ensureInquiriesTablePromise) {
+    ensureInquiriesTablePromise = (async () => {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS inquiries (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+          session_id TEXT,
+          inquiry_type TEXT NOT NULL DEFAULT 'general',
+          status TEXT NOT NULL DEFAULT 'new',
+          priority TEXT NOT NULL DEFAULT 'normal',
+          full_name TEXT,
+          phone TEXT,
+          email TEXT,
+          company_name TEXT,
+          preferred_contact_method TEXT,
+          contact_reason TEXT,
+          message_summary TEXT,
+          department_or_route TEXT,
+          existing_customer BOOLEAN DEFAULT false,
+          urgency_flag BOOLEAN DEFAULT false,
+          urgency_reason TEXT,
+          ai_summary TEXT,
+          raw_data JSONB DEFAULT '{}'::jsonb,
+          agents_used TEXT[] DEFAULT ARRAY[]::TEXT[],
+          source TEXT NOT NULL DEFAULT 'website_chatbot',
+          owner_notes TEXT,
+          assigned_to TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS session_id TEXT');
+      await pool.query("ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS inquiry_type TEXT NOT NULL DEFAULT 'general'");
+      await pool.query("ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'new'");
+      await pool.query("ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'");
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS full_name TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS phone TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS email TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS company_name TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS preferred_contact_method TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS contact_reason TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS message_summary TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS department_or_route TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS existing_customer BOOLEAN DEFAULT false');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS urgency_flag BOOLEAN DEFAULT false');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS urgency_reason TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS ai_summary TEXT');
+      await pool.query("ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS raw_data JSONB DEFAULT '{}'::jsonb");
+      await pool.query("ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS agents_used TEXT[] DEFAULT ARRAY[]::TEXT[]");
+      await pool.query("ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'website_chatbot'");
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS owner_notes TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS assigned_to TEXT');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()');
+      await pool.query('ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()');
+      await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_inquiries_business_session ON inquiries(business_id, session_id) WHERE session_id IS NOT NULL');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_inquiries_business_created ON inquiries(business_id, created_at DESC)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_inquiries_business_status ON inquiries(business_id, status)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_inquiries_business_type ON inquiries(business_id, inquiry_type)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_inquiries_business_priority ON inquiries(business_id, priority)');
+    })().catch((error) => {
+      ensureInquiriesTablePromise = null;
+      throw error;
+    });
+  }
+
+  return ensureInquiriesTablePromise;
+}
+
+function asyncHandler(handler) {
+  return async (req, res, next) => {
+    try {
+      await handler(req, res, next);
+    } catch (error) {
+      next(error);
+    }
+  };
 }
 
 async function requireInquiryReadAuth(req, res, next) {
@@ -37,7 +118,9 @@ async function requireInquiryReadAuth(req, res, next) {
   return next();
 }
 
-router.get('/', requireInquiryReadAuth, async (req, res) => {
+router.get('/', requireInquiryReadAuth, asyncHandler(async (req, res) => {
+  await ensureInquiriesTable();
+
   const page = parsePositiveInt(req.query.page || '1', 1, 100000);
   const limit = parsePositiveInt(req.query.limit || '50', 50, 200);
   const offset = (page - 1) * limit;
@@ -69,9 +152,11 @@ router.get('/', requireInquiryReadAuth, async (req, res) => {
 
   const total = countResult.rows[0]?.total || 0;
   return res.json({ inquiries: listResult.rows, total, page, pages: Math.ceil(total / limit) });
-});
+}));
 
-router.get('/analytics/summary', requireInquiryReadAuth, async (req, res) => {
+router.get('/analytics/summary', requireInquiryReadAuth, asyncHandler(async (req, res) => {
+  await ensureInquiriesTable();
+
   const days = parsePositiveInt(req.query.days || '30', 30, 365);
   const businessId = req.business.businessId;
   const [overviewResult, byTypeResult, byDayResult, recentResult] = await Promise.all([
@@ -87,9 +172,11 @@ router.get('/analytics/summary', requireInquiryReadAuth, async (req, res) => {
     byDay: byDayResult.rows,
     recentInquiries: recentResult.rows,
   });
-});
+}));
 
-router.get('/:inquiryId', requireInquiryReadAuth, async (req, res) => {
+router.get('/:inquiryId', requireInquiryReadAuth, asyncHandler(async (req, res) => {
+  await ensureInquiriesTable();
+
   const { inquiryId } = req.params;
   const businessId = req.business.businessId;
   const inquiryResult = await pool.query('SELECT * FROM inquiries WHERE id=$1 AND business_id=$2 LIMIT 1', [inquiryId, businessId]);
@@ -101,9 +188,11 @@ router.get('/:inquiryId', requireInquiryReadAuth, async (req, res) => {
     : { rows: [] };
 
   return res.json({ inquiry, messages: messagesResult.rows });
-});
+}));
 
-router.patch('/:inquiryId', requireAuth, async (req, res) => {
+router.patch('/:inquiryId', requireAuth, asyncHandler(async (req, res) => {
+  await ensureInquiriesTable();
+
   const allowedFields = ['status', 'priority', 'owner_notes', 'assigned_to'];
   const updates = [];
   const values = [req.params.inquiryId, req.business.businessId];
@@ -121,6 +210,6 @@ router.patch('/:inquiryId', requireAuth, async (req, res) => {
   const result = await pool.query(`UPDATE inquiries SET ${updates.join(', ')} WHERE id=$1 AND business_id=$2 RETURNING *`, values);
   if (!result.rows[0]) return res.status(404).json({ error: 'Inquiry not found' });
   return res.json({ inquiry: result.rows[0] });
-});
+}));
 
 export default router;
