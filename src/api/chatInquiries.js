@@ -69,7 +69,7 @@ async function loadConfig(botId) {
   return cfg.rows?.[0] || null;
 }
 
-async function saveInquiry(req, capture, config) {
+async function saveInquiry(req, capture, config, options = {}) {
   const { botId, sessionId, message } = req.body || {};
   if (!botId || !sessionId || !message || !config?.business_id) return null;
 
@@ -86,6 +86,7 @@ async function saveInquiry(req, capture, config) {
     assistantMessage: capture.assistantMessage || '',
     config,
     namespace: botId,
+    ...options,
   });
 }
 
@@ -101,7 +102,7 @@ router.use(async (req, res, next) => {
     });
 
     if (config) {
-      const inquiry = await saveInquiry(req, capture, config).catch((error) => {
+      const inquiry = await saveInquiry(req, capture, config, { notify: false }).catch((error) => {
         console.error('pre inquiry save failed:', error.message);
         return null;
       });
@@ -111,7 +112,7 @@ router.use(async (req, res, next) => {
 
   res.on('finish', () => {
     if (!config) return;
-    saveInquiry(req, capture, config)
+    saveInquiry(req, capture, config, { notify: true })
       .then((inquiry) => { if (inquiry?.id) rememberInquiryOnlySession(req.body.sessionId); })
       .catch((error) => console.error('post inquiry save failed:', error.message));
   });
