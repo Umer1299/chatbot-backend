@@ -13,6 +13,7 @@ import authRoutes from './api/auth.js';
 import scrapeRoutes from './api/scrape.js';
 import leadsRoutes from './api/leads.js';
 import businessRoutes from './api/business.js';
+import bubbleSaveRoutes from './api/bubbleSave.js';
 import { redisClient } from './services/redis.js';
 import { globalErrorHandler } from './middleware/errorHandler.js';
 
@@ -82,6 +83,7 @@ app.get('/ready', (req, res) => res.send('Ready'));
 app.get('/readyz', (req, res) => res.send('Ready'));
 
 app.use('/api/chat', widgetLimiter);
+app.use('/api/bubble-save', widgetLimiter);
 app.use('/api/upsert', widgetLimiter);
 app.use('/api/leads', dashboardLimiter);
 app.use('/api/business', dashboardLimiter);
@@ -90,6 +92,7 @@ app.use('/api/auth', dashboardLimiter);
 app.use('/api/moderate', widgetLimiter);
 
 app.use('/api/chat', chatRoutes);
+app.use('/api/bubble-save', bubbleSaveRoutes);
 app.use('/api/upsert', upsertRoutes);
 app.use('/api/chatbots', chatbotsRoutes);
 app.use('/api/moderate', moderateRoutes);
