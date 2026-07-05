@@ -4,6 +4,9 @@ import { sendInquiryAlert } from './emailService.js';
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_RE = /(?:\+?\d[\d\s().-]{7,}\d)/;
+const SIMPLE_VISITOR_MESSAGE_RE = /^(hi|hello|hey|hiya|yo|salam|assalam o alaikum|assalamu alaikum|good morning|good afternoon|good evening|test|testing|ok|okay|yes|no|thanks|thank you|thx|help)$/i;
+const GENERIC_INQUIRY_SUMMARY_RE = /\b(greet|greeting|hello|visitor said hello|visitor greeted|simple greeting|general inquiry|general enquiry|website visitor sent a general inquiry|asked how.*help|how can i help)\b/i;
+const ACTIONABLE_INQUIRY_TYPES = new Set(['support', 'complaint', 'human_handoff', 'partnership', 'career', 'supplier', 'billing', 'technical_support']);
 
 const INQUIRY_TYPE_ALIASES = {
   support: 'support',
@@ -207,21 +210,83 @@ function hasStrongSalesIntent(transcript = '') {
   return STRONG_SALES_RE.test(text) && !STRONG_INQUIRY_RE.test(text);
 }
 
+function getUserMessages(transcript = '') {
+  return String(transcript || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.toLowerCase().startsWith('user:'))
+    .map((line) => line.replace(/^user:\s*/i, '').trim())
+    .filter(Boolean);
+}
+
+function normalizeSimpleMessageText(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[!?.]+$/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function isSimpleVisitorMessage(value = '') {
+  const text = normalizeSimpleMessageText(value);
+  if (!text) return true;
+  if (text.length <= 3) return true;
+  return SIMPLE_VISITOR_MESSAGE_RE.test(text);
+}
+
+function hasOnlyLowSignalVisitorMessages(transcript = '') {
+  const userMessages = getUserMessages(transcript);
+  if (!userMessages.length) return true;
+  return userMessages.every(isSimpleVisitorMessage);
+}
+
+function hasContactDetails(inquiryData = {}, transcript = '') {
+  return Boolean(
+    cleanValue(inquiryData.email || inquiryData.email_address || inquiryData.contact_email)
+    || cleanValue(inquiryData.phone || inquiryData.phone_number || inquiryData.contact_phone)
+    || EMAIL_RE.test(String(transcript || ''))
+    || PHONE_RE.test(String(transcript || ''))
+  );
+}
+
+function hasMeaningfulInquiryText(inquiryData = {}) {
+  const text = cleanValue(inquiryData.contact_reason || inquiryData.message_summary || inquiryData.summary || inquiryData.message || inquiryData.reason || inquiryData.subject);
+  if (!text) return false;
+  if (isSimpleVisitorMessage(text)) return false;
+  return !GENERIC_INQUIRY_SUMMARY_RE.test(text);
+}
+
 function shouldSaveInquiry(inquiryData = {}, transcript = '') {
   const text = String(transcript || '');
+  const sourceText = `${JSON.stringify(inquiryData || {})}\n${text}`;
+  const normalizedType = normalizeInquiryType(inquiryData.inquiry_type || inquiryData.contact_reason || inquiryData.department_or_route, sourceText);
   const hasExplicitInquiryData = looksLikeInquiryData(inquiryData);
   const hasInquiryIntent = STRONG_INQUIRY_RE.test(text);
-  const hasMeaningfulSummary = Boolean(inquiryData.contact_reason || inquiryData.message_summary);
+  const hasMeaningfulSummary = hasMeaningfulInquiryText(inquiryData);
+  const hasContact = hasContactDetails(inquiryData, text);
+  const isUrgent = Boolean(inquiryData.urgency_flag) || URGENCY_RE.test(sourceText);
+  const hasActionableType = ACTIONABLE_INQUIRY_TYPES.has(normalizedType);
+  const lowSignalOnly = hasOnlyLowSignalVisitorMessages(text);
+  const genericOnly = GENERIC_INQUIRY_SUMMARY_RE.test(sourceText) && !hasMeaningfulSummary;
 
   if (hasStrongSalesIntent(text) && !hasExplicitInquiryData) return false;
-  return Boolean(hasExplicitInquiryData || hasInquiryIntent || hasMeaningfulSummary);
+  if (lowSignalOnly && !hasContact && !isUrgent) return false;
+  if (genericOnly && !hasContact && !isUrgent && !hasActionableType) return false;
+
+  return Boolean(
+    hasContact
+    || isUrgent
+    || (hasInquiryIntent && !lowSignalOnly)
+    || (hasActionableType && hasMeaningfulSummary)
+    || (hasExplicitInquiryData && hasMeaningfulSummary)
+  );
 }
 
 export function removeVisibleInquiryJson(text = '') {
   return String(text || '').replace(/INQUIRY_DATA:\s*({[\s\S]*})\s*(?:\n|$)/g, '').trim();
 }
 
-export async function saveInquiryFromConversation({ session, conversationHistory = [], userMessage = '', assistantMessage = '', config = {}, namespace = '' }) {
+export async function saveInquiryFromConversation({ session, conversationHistory = [], userMessage = '', assistantMessage = '', config = {}, namespace = '', notify = true }) {
   try {
     if (!config?.business_id || !session?.id && !session) {
       // `session` can be the DB row or a lightweight object; sessionId is passed separately through the closure in chat.js.
@@ -271,7 +336,7 @@ export async function saveInquiryFromConversation({ session, conversationHistory
     ]);
 
     const savedInquiry = result?.rows?.[0] || null;
-    if (savedInquiry?.id && !wasAlreadyNotified) {
+    if (notify && savedInquiry?.id && !wasAlreadyNotified) {
       await redisClient.setex(dedupeKey, 3600, '1').catch((e) => console.error(e.message));
       sendInquiryAlert(config, savedInquiry).catch((err) => console.error('Inquiry email alert failed:', err.message));
     }
