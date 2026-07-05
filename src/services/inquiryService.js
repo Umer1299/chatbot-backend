@@ -276,16 +276,19 @@ function shouldSaveInquiry(inquiryData = {}, transcript = '') {
   const lowSignalOnly = hasOnlyLowSignalVisitorMessages(text);
   const genericOnly = GENERIC_INQUIRY_SUMMARY_RE.test(sourceText) && !hasMeaningfulSummary;
 
+  // Do not save or email owner inquiries until the visitor provides a useful contact method.
+  if (!hasContact) return false;
+
   if (hasStrongSalesIntent(text) && !hasOwnerAction && !hasActionableType) return false;
-  if (lowSignalOnly && !hasContact && !isUrgent) return false;
-  if (genericOnly && !hasContact && !isUrgent && !hasActionableType && !hasOwnerAction) return false;
+  if (lowSignalOnly) return false;
+  if (genericOnly && !isUrgent && !hasActionableType && !hasOwnerAction) return false;
 
   return Boolean(
     isUrgent
-    || (hasOwnerAction && hasContact && !lowSignalOnly)
+    || (hasOwnerAction && !lowSignalOnly)
     || (hasActionableType && hasMeaningfulSummary && !lowSignalOnly)
-    || (hasExplicitInquiryData && hasMeaningfulSummary && (hasContact || hasActionableType || hasOwnerAction))
-    || (hasInquiryIntent && hasContact && !lowSignalOnly)
+    || (hasExplicitInquiryData && hasMeaningfulSummary && (hasActionableType || hasOwnerAction || hasInquiryIntent))
+    || (hasInquiryIntent && !lowSignalOnly)
   );
 }
 
@@ -343,7 +346,7 @@ export async function saveInquiryFromConversation({ session, conversationHistory
     ]);
 
     const savedInquiry = result?.rows?.[0] || null;
-    if (notify && savedInquiry?.id && !wasAlreadyNotified) {
+    if (notify && savedInquiry?.id && !wasAlreadyNotified && hasContactDetails(inquiryData, transcript)) {
       await redisClient.setex(dedupeKey, 3600, '1').catch((e) => console.error(e.message));
       sendInquiryAlert(config, savedInquiry).catch((err) => console.error('Inquiry email alert failed:', err.message));
     }
