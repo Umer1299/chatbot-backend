@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import requireAuth from '../middleware/jwtAuth.js';
+import { redisClient } from '../services/redis.js';
 
 const router = Router();
 
@@ -10,7 +11,33 @@ function parsePositiveInt(value, fallback, max) {
   return Math.min(parsed, max);
 }
 
-router.get('/', requireAuth, async (req, res) => {
+async function requireInquiryReadAuth(req, res, next) {
+  const chatbotToken = req.headers['x-chatbot-token'];
+
+  if (!chatbotToken) {
+    return requireAuth(req, res, next);
+  }
+
+  const namespace = await redisClient.get(`chatbot_token:${chatbotToken}`);
+  if (!namespace) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
+
+  const businessResult = await pool.query('SELECT id FROM businesses WHERE bot_id=$1 LIMIT 1', [namespace]);
+  const business = businessResult.rows[0];
+
+  if (!business) {
+    return res.status(404).json({ error: 'Bot not configured' });
+  }
+
+  req.chatbotToken = chatbotToken;
+  req.namespace = namespace;
+  req.business = { ...(req.business || {}), businessId: business.id };
+
+  return next();
+}
+
+router.get('/', requireInquiryReadAuth, async (req, res) => {
   const page = parsePositiveInt(req.query.page || '1', 1, 100000);
   const limit = parsePositiveInt(req.query.limit || '50', 50, 200);
   const offset = (page - 1) * limit;
@@ -44,7 +71,7 @@ router.get('/', requireAuth, async (req, res) => {
   return res.json({ inquiries: listResult.rows, total, page, pages: Math.ceil(total / limit) });
 });
 
-router.get('/analytics/summary', requireAuth, async (req, res) => {
+router.get('/analytics/summary', requireInquiryReadAuth, async (req, res) => {
   const days = parsePositiveInt(req.query.days || '30', 30, 365);
   const businessId = req.business.businessId;
   const [overviewResult, byTypeResult, byDayResult, recentResult] = await Promise.all([
@@ -62,7 +89,7 @@ router.get('/analytics/summary', requireAuth, async (req, res) => {
   });
 });
 
-router.get('/:inquiryId', requireAuth, async (req, res) => {
+router.get('/:inquiryId', requireInquiryReadAuth, async (req, res) => {
   const { inquiryId } = req.params;
   const businessId = req.business.businessId;
   const inquiryResult = await pool.query('SELECT * FROM inquiries WHERE id=$1 AND business_id=$2 LIMIT 1', [inquiryId, businessId]);
