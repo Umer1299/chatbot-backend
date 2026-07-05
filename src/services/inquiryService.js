@@ -6,6 +6,7 @@ const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_RE = /(?:\+?\d[\d\s().-]{7,}\d)/;
 const SIMPLE_VISITOR_MESSAGE_RE = /^(hi|hello|hey|hiya|yo|salam|assalam o alaikum|assalamu alaikum|good morning|good afternoon|good evening|test|testing|ok|okay|yes|no|thanks|thank you|thx|help)$/i;
 const GENERIC_INQUIRY_SUMMARY_RE = /\b(greet|greeting|hello|visitor said hello|visitor greeted|simple greeting|general inquiry|general enquiry|website visitor sent a general inquiry|asked how.*help|how can i help)\b/i;
+const LOW_DETAIL_INQUIRY_TEXT_RE = /^(complaint|i have a complaint|issue|problem|support|i need help|please contact me|contact me|call me|email me|speak to someone|speak to a person|human|real person|i want to speak to someone|i want to speak to the owner|i want to talk to manager)$/i;
 const ACTIONABLE_INQUIRY_TYPES = new Set(['support', 'complaint', 'human_handoff', 'partnership', 'career', 'supplier', 'billing', 'technical_support']);
 const OWNER_ACTION_RE = /\b(complaint|complain|not happy|refund|problem|issue|support|existing customer|billing|invoice|payment|call me|contact me|email me|reach me|get back to me|get in touch|speak to owner|talk to owner|speak to manager|talk to manager|speak to someone|speak to a person|human|real person|human agent|someone call|someone contact|follow up|partnership|partner|supplier|vendor|career|job)\b/i;
 
@@ -254,6 +255,7 @@ function hasMeaningfulInquiryText(inquiryData = {}) {
   const text = cleanValue(inquiryData.contact_reason || inquiryData.message_summary || inquiryData.summary || inquiryData.message || inquiryData.reason || inquiryData.subject);
   if (!text) return false;
   if (isSimpleVisitorMessage(text)) return false;
+  if (LOW_DETAIL_INQUIRY_TEXT_RE.test(normalizeSimpleMessageText(text))) return false;
   return !GENERIC_INQUIRY_SUMMARY_RE.test(text);
 }
 
@@ -276,8 +278,9 @@ function shouldSaveInquiry(inquiryData = {}, transcript = '') {
   const lowSignalOnly = hasOnlyLowSignalVisitorMessages(text);
   const genericOnly = GENERIC_INQUIRY_SUMMARY_RE.test(sourceText) && !hasMeaningfulSummary;
 
-  // Do not save or email owner inquiries until the visitor provides a useful contact method.
+  // Owner inquiry emails must have both: a useful issue/request summary and a contact method.
   if (!hasContact) return false;
+  if (!hasMeaningfulSummary) return false;
 
   if (hasStrongSalesIntent(text) && !hasOwnerAction && !hasActionableType) return false;
   if (lowSignalOnly) return false;
@@ -286,8 +289,8 @@ function shouldSaveInquiry(inquiryData = {}, transcript = '') {
   return Boolean(
     isUrgent
     || (hasOwnerAction && !lowSignalOnly)
-    || (hasActionableType && hasMeaningfulSummary && !lowSignalOnly)
-    || (hasExplicitInquiryData && hasMeaningfulSummary && (hasActionableType || hasOwnerAction || hasInquiryIntent))
+    || (hasActionableType && !lowSignalOnly)
+    || (hasExplicitInquiryData && (hasActionableType || hasOwnerAction || hasInquiryIntent))
     || (hasInquiryIntent && !lowSignalOnly)
   );
 }
