@@ -1,12 +1,12 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import express from 'express';
 import multer from 'multer';
 import { fileQueue } from '../queues/fileQueue.js';
 import { isDuplicateContent } from '../services/recordManager.js';
-import { upsertSupplementalChunks } from '../db/vectorStore.js';
+import { deleteBusinessChunks, upsertSupplementalChunks } from '../db/vectorStore.js';
 import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
 import pool from '../db/pool.js';
-import { tokenAuth } from '../middleware/tokenAuth.js';
-import { domainRestriction } from '../middleware/domainRestriction.js';
+import { requireKnowledgeOwner } from '../middleware/knowledgeAuth.js';
 import { redisClient } from '../services/redis.js';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
@@ -16,7 +16,7 @@ import os from 'os';
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 3 } });
 
-router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (req, res) => {
+router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(async (req, res) => {
   const namespace = req.namespace;
   const text = req.body.text;
   const files = req.files || [];
@@ -58,20 +58,21 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
     const jobIds = [];
     for (const file of files) {
       const tempDir = os.tmpdir();
-      const uniqueName = `${uuidv4()}-${file.originalname}`;
+      const uniqueName = `${uuidv4()}-${path.basename(file.originalname)}`;
       const filePath = path.join(tempDir, uniqueName);
       await fs.writeFile(filePath, file.buffer);
 
       const jobId = uuidv4();
       await fileQueue.add('process-file', {
         namespace,
+        businessId: req.business.businessId,
         filePath,
         originalName: file.originalname,
         mimeType: file.mimetype,
         jobId,
       });
       jobIds.push(jobId);
-      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace }));
+      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace, businessId: req.business.businessId }));
       console.log(`File queued: ${file.originalname} for namespace ${namespace}, job ${jobId}`);
     }
     res.json({ success: true, queued: true, jobIds });
@@ -80,9 +81,9 @@ router.post('/', tokenAuth, domainRestriction, upload.array('files', 3), async (
     console.error('[upsert]', req.method, req.path, err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
-});
+}));
 
-router.get('/job/:jobId', tokenAuth, async (req, res) => {
+router.get('/job/:jobId', requireKnowledgeOwner, asyncHandler(async (req, res) => {
   const { jobId } = req.params;
   const raw = await redisClient.get(`job:${jobId}`);
   if (!raw) return res.status(404).json({ error: 'Job not found' });
@@ -103,14 +104,11 @@ router.get('/job/:jobId', tokenAuth, async (req, res) => {
   }
 
   res.json(job);
-});
+}));
 
-router.delete('/namespace/:namespace', tokenAuth, async (req, res) => {
-  const { namespace } = req.params;
-  const { client } = await initPinecone();
-  const index = client.Index(process.env.PINECONE_INDEX);
-  await index.namespace(namespace).deleteAll();
+router.delete('/namespace/:namespace', requireKnowledgeOwner, asyncHandler(async (req, res) => {
+  await deleteBusinessChunks(req.business.businessId);
   res.json({ success: true });
-});
+}));
 
 export default router;

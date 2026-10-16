@@ -1,7 +1,9 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import pool from '../db/pool.js';
+import { requireChatSession } from '../middleware/chatSession.js';
 import { getRelevantChunks } from '../db/vectorStore.js';
 import { buildMasterPrompt, generateProjectDetails } from '../agents/promptBuilder.js';
 import { sendLeadAlert, sendUrgentEscalation } from '../services/emailService.js';
@@ -324,7 +326,7 @@ function cleanAssistantResponse(text = '') {
 
 async function saveMessagePair({ sessionId, businessId, userMessage, assistantMessage, phase = 1, modelUsed = null }) {
   await pool.query('INSERT INTO messages (session_id,business_id,role,content,agent_phase,model_used,created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()),($1,$2,$7,$8,$5,$9,NOW())', [sessionId, businessId, 'user', userMessage, phase, null, 'assistant', assistantMessage, modelUsed]);
-  await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]);
+  await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1 AND business_id=$2', [sessionId, businessId]);
 }
 
 async function generateLeadSummary(leadData, industry) {
@@ -366,7 +368,7 @@ async function saveLead(config, sessionId, rawLeadData, namespace) {
       DO UPDATE SET full_name=COALESCE(EXCLUDED.full_name,leads.full_name), phone=COALESCE(EXCLUDED.phone,leads.phone), email=COALESCE(EXCLUDED.email,leads.email), company_name=COALESCE(EXCLUDED.company_name,leads.company_name), lead_score=EXCLUDED.lead_score, score_reasons=EXCLUDED.score_reasons, ai_summary=EXCLUDED.ai_summary, project_details=EXCLUDED.project_details, industry=EXCLUDED.industry, industry_data=EXCLUDED.industry_data, budget_range=EXCLUDED.budget_range, is_decision_maker=EXCLUDED.is_decision_maker, calendly_link_shown=EXCLUDED.calendly_link_shown, appointment_scheduled=EXCLUDED.appointment_scheduled, urgency_flag=EXCLUDED.urgency_flag, urgency_reason=EXCLUDED.urgency_reason, agents_used=EXCLUDED.agents_used, updated_at=NOW()
       RETURNING *`, [config.business_id, sessionId, leadData.name, leadData.phone, leadData.email, leadData.company_name || null, leadData.lead_score, leadData.score_reasons || [], aiSummary, projectDetails, config.industry, JSON.stringify(leadData.industry_data || leadData), leadData.budget_range, leadData.is_decision_maker, Boolean(config.calendly_link || config.calendlyLink), Boolean(leadData.appointment_scheduled) === true, leadData.urgency_flag || false, leadData.urgency_reason || null, leadData.agents_used || []]);
     const savedLead = result?.rows?.[0];
-    if (savedLead?.id) await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW(), collected_data=$3::jsonb WHERE id=$2", [savedLead.id, sessionId, JSON.stringify(leadData)]);
+    if (savedLead?.id) await pool.query("UPDATE sessions SET lead_id=$1, lead_captured=true, status='completed', completed_at=NOW(), collected_data=$3::jsonb WHERE id=$2 AND business_id=$4", [savedLead.id, sessionId, JSON.stringify(leadData), config.business_id]);
     if (!wasAlreadyNotified && process.env.BUBBLE_API_URL && process.env.BUBBLE_API_KEY && savedLead) {
       fetch(`${process.env.BUBBLE_API_URL}/api/1.1/obj/lead`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ full_name: leadData.name, phone: leadData.phone, email: leadData.email, company_name: leadData.company_name || null, lead_score: leadData.lead_score, status: 'new', industry: config.industry, ai_summary: aiSummary, project_details: projectDetails, budget_range: leadData.budget_range, budget_risk_level: leadData.budget_risk_level || null, budget_risk_reason: leadData.budget_risk_reason || null, is_decision_maker: leadData.is_decision_maker, decision_maker_role: leadData.decision_maker_role || null, other_stakeholders: leadData.other_stakeholders || null, has_appointment: Boolean(leadData.appointment_scheduled) === true, urgency_flag: leadData.urgency_flag || false, session_id: savedLead.id }) }).catch((err) => console.error('Bubble push failed:', err.message));
     }
@@ -378,9 +380,9 @@ async function saveLead(config, sessionId, rawLeadData, namespace) {
   } catch (error) { console.error('saveLead error:', error.message); return null; }
 }
 
-async function updateCollectedData(sessionId, leadData) { await pool.query('UPDATE sessions SET collected_data=$2::jsonb, last_activity_at=NOW() WHERE id=$1', [sessionId, JSON.stringify(leadData)]); }
+async function updateCollectedData(sessionId, leadData, businessId) { await pool.query('UPDATE sessions SET collected_data=$2::jsonb, last_activity_at=NOW() WHERE id=$1 AND business_id=$3', [sessionId, JSON.stringify(leadData), businessId]); }
 
-router.post('/', tokenAuth, domainRestriction, async (req, res) => {
+router.post('/', tokenAuth, domainRestriction, requireChatSession, asyncHandler(async (req, res) => {
   const isStreaming = req.query.stream === 'true';
   let { botId, sessionId, message } = req.body;
   if (!botId) return res.status(400).json({ error: 'botId required' });
@@ -399,6 +401,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     config = { ...cfg.rows[0], calendlyLink: cfg.rows[0].calendly_link, ownerPhone: cfg.rows[0].owner_phone };
     try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
   }
+  if (config?.business_id !== req.chatSession.business_id) return res.status(403).json({ error: 'Invalid bot scope' });
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
   if (config.is_disabled) {
     const disabledMsg = config.disabled_reason || 'This chatbot is temporarily unavailable. Please contact the business directly.';
@@ -412,16 +415,15 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const triageText = `This sounds urgent. Please call emergency services immediately or go to your nearest emergency room. Do not wait for a callback from us. If you need our direct line right now: ${config.owner_phone || config.ownerPhone || 'contact reception directly'}`;
     const usage = createStaticUsage(triageText, 'static-triage');
     await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]);
-    await Promise.allSettled([saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: triageText, phase: 1 }), pool.query("UPDATE sessions SET status = 'escalated', last_activity_at = NOW() WHERE id = $1", [sessionId])]);
+    await Promise.allSettled([saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: triageText, phase: 1 }), pool.query("UPDATE sessions SET status = 'escalated', last_activity_at = NOW() WHERE id = $1 AND business_id=$2", [sessionId, config.business_id])]);
     sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message));
     if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: triageText, token: triageText })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: triageText, creditsUsed: usage.creditsUsed, usage })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: triageText, creditsUsed: usage.creditsUsed, usage });
     return;
   }
 
   const escalationDetected = ['speak to someone', 'speak to a person', 'call me', 'real person', 'human agent', 'talk to someone', 'complaint', 'legal action', 'urgent help', 'want to speak'].some((kw) => message.toLowerCase().includes(kw));
-  let session = (await pool.query('SELECT * FROM sessions WHERE id=$1', [sessionId])).rows[0] || null;
-  if (!session) { await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]); session = { current_phase: 1, collected_data: {} }; }
-  const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at ASC LIMIT 30', [sessionId]);
+  const session = req.chatSession;
+  const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 AND business_id=$2 ORDER BY created_at ASC LIMIT 30', [sessionId, config.business_id]);
   const conversationHistory = historyRows.rows.map((row) => ({ role: row.role, content: row.content }));
   const currentPhase = session?.current_phase || 1;
 
@@ -429,7 +431,7 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     const greetingReply = `Hi — happy to help. What are you looking to get done${config.business_name ? ` with ${config.business_name}` : ''}?`;
     const usage = createStaticUsage(greetingReply, 'static-greeting');
     await saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: greetingReply, phase: currentPhase });
-    await updateCollectedData(sessionId, extractLeadDataFromConversation({ session, conversationHistory, userMessage: message, assistantMessage: greetingReply, config })).catch((e) => console.error('collected_data update failed:', e.message));
+    await updateCollectedData(sessionId, extractLeadDataFromConversation({ session, conversationHistory, userMessage: message, assistantMessage: greetingReply, config }), config.business_id).catch((e) => console.error('collected_data update failed:', e.message));
     if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: greetingReply, token: greetingReply })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: greetingReply, model: 'static-greeting', wasDowngraded: false, creditsUsed: usage.creditsUsed, usage })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: greetingReply, resolvedModel: { modelId: 'static-greeting', provider: 'static', wasDowngraded: false }, creditsUsed: usage.creditsUsed, usage });
     return;
   }
@@ -465,10 +467,10 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
   const processResponse = async (fullResponse, result) => {
     await saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: fullResponse, phase: currentPhase, modelUsed: result.resolvedModel.apiModelId });
     const phaseMatch = fullResponse.match(/PHASE_(\d+)_COMPLETE/);
-    if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1', [sessionId]);
-    if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1", [sessionId]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); }
+    if (phaseMatch) await pool.query('UPDATE sessions SET current_phase=$1,last_activity_at=NOW() WHERE id=$2 AND business_id=$3', [Number.parseInt(phaseMatch[1], 10) + 1, sessionId, config.business_id]); else await pool.query('UPDATE sessions SET last_activity_at=NOW() WHERE id=$1 AND business_id=$2', [sessionId, config.business_id]);
+    if (fullResponse.includes('ESCALATION_REQUIRED') || escalationDetected) { await pool.query("UPDATE sessions SET status = 'escalated' WHERE id=$1 AND business_id=$2", [sessionId, config.business_id]); sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message)); }
     const leadData = extractLeadDataFromConversation({ session, conversationHistory, userMessage: message, assistantMessage: fullResponse, config });
-    await updateCollectedData(sessionId, leadData);
+    await updateCollectedData(sessionId, leadData, config.business_id);
     if (isLeadReady(leadData)) await saveLead(config, sessionId, leadData, req.namespace);
     else console.log('Lead profile updated but not ready to save yet', { sessionId, keys: Object.keys(leadData).filter((key) => leadData[key]) });
   };
@@ -503,6 +505,6 @@ router.post('/', tokenAuth, domainRestriction, async (req, res) => {
     res.json({ reply: cleanResponse, calendlyUrl, resolvedModel: result.resolvedModel, creditsUsed: usage.creditsUsed, usage });
     processResponse(fullResponse, result).catch((e) => console.error('processResponse error:', e.message));
   } catch { res.status(500).json({ error: 'Something went wrong. Please try again.' }); }
-});
+}));
 
 export default router;

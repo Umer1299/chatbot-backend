@@ -1,3 +1,5 @@
+import { timingSafeEqual } from 'node:crypto';
+
 export function requireAdminKey(req, res, next) {
   if (!process.env.ADMIN_API_KEY) {
     console.error('[adminAuth] ADMIN_API_KEY not configured')
@@ -6,7 +8,8 @@ export function requireAdminKey(req, res, next) {
 
   const key = req.headers['x-admin-key']
 
-  if (!key || key !== process.env.ADMIN_API_KEY) {
+  if (typeof key !== 'string' || Buffer.byteLength(key) !== Buffer.byteLength(process.env.ADMIN_API_KEY) ||
+      !timingSafeEqual(Buffer.from(key), Buffer.from(process.env.ADMIN_API_KEY))) {
     console.warn('[adminAuth] Unauthorized attempt', {
       ip: req.ip,
       path: req.path,

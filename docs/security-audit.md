@@ -1,0 +1,60 @@
+# Authentication and tenant-boundary audit
+
+Scope: `feature/codex-update` at `e78715d8387e642b6b75fd02e7369847a996e156`.
+This change secures the existing **business** tenant boundary. It does not introduce agency membership, client management, multiple agents, WhatsApp, voice, OAuth, n8n, or a new billing system.
+
+## Findings and fixes
+
+| Severity | Finding | Resolution |
+| --- | --- | --- |
+| Critical | Anyone could submit a known Bubble user ID to `/api/auth/token` and receive that business's JWT. | Require existing `x-admin-key` on a trusted server-to-server bridge before any lookup/provisioning. Browser-supplied identity alone is never accepted. |
+| High | Issued JWTs had no expiration and verification accepted unspecified algorithms/issuer/audience and arbitrary claim shapes. | HS256 only, fixed issuer/audience, matching subject and UUID business ID, required `iat`/`exp`, maximum age one hour. Reload current business identity, active state, plan and bot ID from PostgreSQL. Reject old nonexpiring tokens. |
+| Critical | Chat selected and mutated sessions by caller-controlled session ID; concurrent inserts ignored conflicts without checking ownership. | Authenticate token and bot scope before inquiry processing. Atomically insert-if-absent, then select by both session ID and business ID. Reject collisions, including historical sessions without an owner. Scope all chat history/memory reads and session writes, including emergency and phase paths. Check cached config's business against the authorized session. |
+| High | Inquiry wrapper performed reads/writes before the inner router authenticated. | Outer authentication, domain checks and session ownership guard run before configuration, inquiry extraction, notification hooks or model calls. |
+| Critical | A public widget token could read all inquiries, transcripts and analytics for a business. | Inquiry reads require dashboard JWT. A widget header cannot override dashboard identity. Scope inquiry transcript query by business. |
+| High | Public widget tokens could upload/poison knowledge; namespace delete accepted a different tenant's namespace and used an undefined Pinecone initializer. | All upsert routes require owner JWT; resolve namespace from the current business and reject mismatched URL namespaces. Delete that business's pgvector chunks, matching the active storage implementation. |
+| High | Any authenticated user could read another tenant's scrape status, including generated prompts. | Add business ID predicate to scrape job status lookup. |
+| High | Lead detail's related messages/notifications lacked business predicates. | Scope related records and lead-to-session joins by business; preserve existing owner-scoped list/update APIs. |
+| High | Legacy lead webhook was unauthenticated and had no tenant-aware routing. | Restrict `/api/lead/capture` to trusted backend/admin key. Public chat's existing tenant-aware lead flow remains. |
+| High | `/api/billing/select-plan` directly granted paid entitlements with a dashboard JWT. | Require both owner JWT and server admin key until a payment-confirmed flow exists. |
+| Medium | Domain-check errors allowed requests; asynchronous Express 4 handlers could reject without reaching error middleware. | Fail closed on domain infrastructure errors and forward rejections on affected routes. Domain/Origin checks remain supplementary, not identity verification. |
+| Medium | File jobs overwrote JSON status with a Redis hash, or omitted namespace on duplicate/failure status. Polling could fail or deny the owner. | Keep JSON with namespace in all states. Queue current business ID and reject conflicting business resolution before writes. Retain compatibility with already queued namespace-only jobs. |
+
+## Required caller changes before rollout
+
+- `/api/auth/token` keeps its POST body and response fields. It is now **server-to-server only**. Configure Bubble's private/backend API workflow to derive `bubbleUserId` from its authenticated current user, then add the existing private `x-admin-key`. Do not accept an arbitrary client-supplied ID in that workflow. Never embed this key in Bubble page JavaScript, a public workflow parameter, or a widget.
+- Reissue dashboard tokens through that bridge on login/expiry. Previously issued JWTs are intentionally rejected. There is no insecure legacy-token compatibility switch.
+- Send `Authorization: Bearer <dashboard JWT>` to `/api/upsert`, its job/delete routes, and all inquiry routes. A public `x-chatbot-token` is insufficient for these operations.
+- Plan activation requires owner JWT plus private `x-admin-key`, invoked only after your backend verifies payment/admin approval. Legacy `/api/lead/capture` requires private `x-admin-key` and remains a global integration, not a public multi-tenant endpoint.
+- Public website chat retains its URL, body, widget header and JSON/SSE response shapes. Use high-entropy random visitor session IDs. The existing public session ID remains a bearer capability **within a business**; visitor identity and signed session capabilities are future work.
+- No production credentials were read or modified. If an admin key has previously been exposed in frontend code, treat it as compromised and rotate it through your operational process before enabling the bridge.
+
+## Schema inconsistencies
+
+| Existing inconsistency | Treatment |
+| --- | --- |
+| `messages.session_id` and `business_id` had independent foreign keys and nullable ownership, permitting cross-business relationships. `sessions.business_id` was nullable. | Add migration `005_security_boundaries.sql`: composite session/business reference and non-null checks, all `NOT VALID`, plus supporting indexes. New inserts/updates are checked; historical rows are retained without automatic cleanup. |
+| Lead PATCH allows `assigned_to`, but no migration defined it. | Add nullable `leads.assigned_to TEXT` in 005. |
+| Preview reads `bot_configs.is_disabled/disabled_reason`, but migrations define these on `businesses`. | Read the business columns. |
+| `bubble_user_id` is unique, `businesses` has one `bot_id`, and `bot_configs.business_id` is unique. | Existing one-business/one-bot model retained. These constraints do not support the proposed agency/client/multiple-agent hierarchy; redesign separately with membership/role rules. |
+| `leads.session_id`/`inquiries.session_id` have no tenant-coupled foreign keys; `sessions.lead_id` can reference a foreign business. | Reads are explicitly tenant-scoped. Included read-only preflight counts inconsistent historical relationships. Constraints/repair for these relationships require a separate reviewed migration. |
+| `src/db/migrate.js` reruns every SQL file with no migration ledger, two files share prefix 003, and global pipeline seeds use a nullable unique key. | Flagged, not rewritten here. Replaying 001 can duplicate global pipeline stages because NULLs do not conflict; automatic cleanup would be outside this non-destructive task. |
+| Runtime setup also adds/repairs quick-answer, inquiry and branding columns, so deployed schemas can differ from migrations. | Compare staging schema to migrations; do not assume runtime setup proves a clean migration. |
+
+### Database rollout
+
+1. Back up the database and run `docs/security-schema-preflight.sql` on a staging copy. No production SQL was executed for this work.
+2. Apply **only the new migration** to an already migrated database, for example `psql "$STAGING_DATABASE_URL" -v ON_ERROR_STOP=1 -f src/db/migrations/005_security_boundaries.sql`. The new script is transactional and repeatable. Avoid replaying the existing runner merely to install 005.
+3. `NOT VALID` retains old bad rows but rejects new inconsistent writes and updates to bad rows. Review/quarantine such records manually; no records are deleted or reassigned by this PR.
+4. After resolving preflight findings, validate `messages_session_business_fk`, `messages_tenant_required` and `sessions_tenant_required` using explicit `ALTER TABLE ... VALIDATE CONSTRAINT ...` commands in a separate operational change.
+5. Test the Bubble bridge, owner dashboard, uploads, public JSON/SSE chat, file worker and database constraints in staging, then deploy through the usual release process. Index creation and `ALTER TABLE` can lock tables; schedule accordingly. Do not roll back to the insecure auth flow.
+
+## Validation and limits
+
+`npm test` uses Node's built-in test runner with experimental module mocks; use Node 24 for tests (the existing production Render configuration remains unchanged). HTTP tests run real Express routers, JWT verification, chat wrappers/history optimization and ownership middleware against in-memory PostgreSQL/Redis/service doubles. Worker tests replace queue and I/O dependencies. Tests use dummy secrets, never load `.env`, and never contact live services.
+
+Coverage includes unauthorized JWT issuance, token expiry/claim/algorithm failures, inactive/deleted accounts, cross-tenant lead/inquiry read and update denial, positive owner access, public-widget management denial, knowledge namespace checks, scrape/file job isolation, entitlement/webhook protection, chat side-effect ordering, session collision and concurrent first requests, positive chat, input validation and cache failures. CI runs the same suite without production secrets.
+
+A mock suite does not prove real PostgreSQL locking, FK behavior, Redis durability or external integrations. No PostgreSQL server was available locally, so migration execution/constraint validation and real concurrent DB integration remain staging checks. Source syntax checks and `git diff --check` are also run.
+
+This is not a full production security certification. Separate reviews remain for scrape URL/SSRF policy, upload parsing limits and malware handling, dependency vulnerabilities (including committed `node_modules`), PostgreSQL TLS certificate verification, credential/rate-limit lifecycle, payment webhooks, and replacing global pool query monkey patches with explicit service calls. No new channel features were implemented.

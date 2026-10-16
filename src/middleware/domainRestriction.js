@@ -76,6 +76,6 @@ export async function domainRestriction(req, res, next) {
     return next();
   } catch (error) {
     console.error('[domainRestriction] Failed to validate domain:', error.message);
-    return next();
+    return next(error);
   }
 }

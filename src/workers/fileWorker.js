@@ -11,7 +11,7 @@ import fs from 'fs/promises';
 const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '2');
 
 const worker = new Worker('file-processing', async (job) => {
-  const { namespace, filePath, originalName, mimeType, jobId } = job.data;
+  const { namespace, businessId: expectedBusinessId, filePath, originalName, mimeType, jobId } = job.data;
   console.log(`Processing file ${originalName} for namespace ${namespace}, job ${jobId}`);
 
   try {
@@ -29,7 +29,7 @@ const worker = new Worker('file-processing', async (job) => {
     }
 
     if (newDocs.length === 0) {
-      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'completed', skipped: true }));
+      await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'completed', skipped: true, namespace, businessId: expectedBusinessId }));
       await fs.unlink(filePath).catch(() => {});
       return { skipped: true, message: 'All duplicates' };
     }
@@ -46,6 +46,7 @@ const worker = new Worker('file-processing', async (job) => {
       throw new Error('Business not found: ' + namespace);
     }
     const businessId = bizResult.rows[0].id;
+    if (expectedBusinessId && businessId !== expectedBusinessId) throw new Error('Invalid job business scope');
 
     const fakePages = [{
       content: extractedText,
@@ -56,18 +57,16 @@ const worker = new Worker('file-processing', async (job) => {
     const result = await upsertSupplementalChunks(businessId, chunks, 'owner_upload');
 
     await job.updateProgress(100);
-    await redisClient.hset('job:' + jobId, {
-      status: 'completed',
-      chunksAdded: result.inserted,
-      namespace
-    });
+    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({
+      status: 'completed', chunksAdded: result.inserted, namespace, businessId
+    }));
     await fs.unlink(filePath).catch(() => {});
     console.log(`Job ${jobId} completed, chunks: ${result.inserted}`);
 
     return { success: true, chunksUpserted: result.inserted };
   } catch (err) {
     console.error(`File worker error: ${err.message}`);
-    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: 'File processing failed. Please try again.' }));
+    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: 'File processing failed. Please try again.', namespace, businessId: expectedBusinessId }));
     await fs.unlink(filePath).catch(() => {});
     throw err;
   }

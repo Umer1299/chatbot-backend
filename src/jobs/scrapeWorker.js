@@ -83,7 +83,7 @@ function normalizeJobRow(row) {
   };
 }
 
-export async function getJobStatus(jobId) {
+export async function getJobStatus(jobId, businessId) {
   const { rows } = await pool.query(
     `SELECT id, status, progress_step, progress_percent,
             pages_scraped, chunks_created, detected_industry,
@@ -93,8 +93,8 @@ export async function getJobStatus(jobId) {
             system_prompt_draft, result,
             error_message, queued_at, started_at, completed_at
      FROM scrape_jobs
-     WHERE id = $1`,
-    [jobId],
+     WHERE id = $1 AND business_id = $2`,
+    [jobId, businessId],
   );
 
   return normalizeJobRow(rows[0] || null);

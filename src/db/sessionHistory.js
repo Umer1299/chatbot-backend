@@ -16,18 +16,19 @@ export async function setupSessionHistoryIndexes() {
   `);
 }
 
-export async function getRecentConversationHistory(sessionId, limit = getChatHistoryLimit()) {
+export async function getRecentConversationHistory(sessionId, businessId, limit = getChatHistoryLimit()) {
+  if (!businessId) throw new Error('businessId required for session history');
   const historyRows = await pool.query(
     `SELECT role, content
      FROM (
        SELECT role, content, created_at
        FROM messages
-       WHERE session_id = $1
+       WHERE session_id = $1 AND business_id = $2
        ORDER BY created_at DESC
-       LIMIT $2
+       LIMIT $3
      ) recent
      ORDER BY created_at ASC`,
-    [sessionId, limit],
+    [sessionId, businessId, limit],
   );
 
   return historyRows.rows.map((row) => ({

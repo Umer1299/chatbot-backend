@@ -1,3 +1,4 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { getKnowledgeAge } from '../db/vectorStore.js';
@@ -16,7 +17,7 @@ function toNumber(value) {
   return Number.isFinite(num) ? num : 0;
 }
 
-router.get('/', requireAuth, async (req, res) => {
+router.get('/', requireAuth, asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page || '1', 10);
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
   const offset = (page - 1) * limit;
@@ -43,9 +44,9 @@ router.get('/', requireAuth, async (req, res) => {
   ]);
   const total = countResult.rows[0]?.total || 0;
   return res.json({ leads: listResult.rows, total, page, pages: Math.ceil(total / limit) });
-});
+}));
 
-router.get('/analytics/summary', requireAuth, async (req, res) => {
+router.get('/analytics/summary', requireAuth, asyncHandler(async (req, res) => {
   const days = parseInt(req.query.days || '30', 10);
   const businessId = req.business.businessId;
   const [overviewResult, byDayResult, agentUsageResult, knowledgeAge] = await Promise.all([
@@ -55,9 +56,9 @@ router.get('/analytics/summary', requireAuth, async (req, res) => {
     getKnowledgeAge(businessId),
   ]);
   return res.json({ overview: overviewResult.rows[0] || {}, byDay: byDayResult.rows, agentUsage: agentUsageResult.rows, knowledgeAge });
-});
+}));
 
-router.get('/analytics/weekly', requireAuth, async (req, res) => {
+router.get('/analytics/weekly', requireAuth, asyncHandler(async (req, res) => {
   try {
     const businessId = req.business.businessId;
     const weeks = parsePositiveInt(req.query.weeks || '8', 8, 26);
@@ -71,7 +72,7 @@ router.get('/analytics/weekly', requireAuth, async (req, res) => {
       pool.query(`SELECT COUNT(*)::int AS total_messages FROM messages WHERE business_id=$1 AND created_at >= date_trunc('week', NOW())`, [businessId]),
       pool.query(`SELECT DATE(created_at) AS date, COUNT(*)::int AS total FROM messages WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) GROUP BY DATE(created_at) ORDER BY total DESC, date ASC LIMIT 1`, [businessId]),
       pool.query(`SELECT content AS question, COUNT(*)::int AS total FROM messages WHERE business_id=$1 AND role='user' AND created_at >= date_trunc('week', NOW()) AND length(trim(content)) > 3 GROUP BY content ORDER BY total DESC, max(created_at) DESC LIMIT 5`, [businessId]),
-      pool.query(`SELECT m.content AS question, COUNT(*)::int AS total FROM messages m WHERE m.business_id=$1 AND m.created_at >= date_trunc('week', NOW()) AND m.role='user' AND EXISTS (SELECT 1 FROM messages a WHERE a.session_id=m.session_id AND a.role='assistant' AND a.created_at > m.created_at AND (a.content ILIKE '%server error%' OR a.content ILIKE '%something went wrong%' OR a.content ILIKE '%no response%')) GROUP BY m.content ORDER BY total DESC LIMIT 5`, [businessId]),
+      pool.query(`SELECT m.content AS question, COUNT(*)::int AS total FROM messages m WHERE m.business_id=$1 AND m.created_at >= date_trunc('week', NOW()) AND m.role='user' AND EXISTS (SELECT 1 FROM messages a WHERE a.session_id=m.session_id AND a.business_id=m.business_id AND a.role='assistant' AND a.created_at > m.created_at AND (a.content ILIKE '%server error%' OR a.content ILIKE '%something went wrong%' OR a.content ILIKE '%no response%')) GROUP BY m.content ORDER BY total DESC LIMIT 5`, [businessId]),
       pool.query(`SELECT COALESCE(NULLIF(budget_range, ''), lead_score, 'General enquiry') AS category, COUNT(*)::int AS total FROM leads WHERE business_id=$1 AND created_at >= date_trunc('week', NOW()) GROUP BY category ORDER BY total DESC LIMIT 5`, [businessId]),
     ]);
     const currentWeek = currentLeadResult.rows[0] || {};
@@ -92,21 +93,21 @@ router.get('/analytics/weekly', requireAuth, async (req, res) => {
     console.error('LEADS_WEEKLY_ANALYTICS_ERROR:', error);
     return res.status(500).json({ error: 'Failed to load weekly lead analytics', detail: error.message });
   }
-});
+}));
 
-router.get('/:leadId', requireAuth, async (req, res) => {
+router.get('/:leadId', requireAuth, asyncHandler(async (req, res) => {
   const { leadId } = req.params;
   const businessId = req.business.businessId;
   const [leadResult, messagesResult, notificationsResult] = await Promise.all([
     pool.query(`SELECT l.*, ps.stage_label, ps.stage_color FROM leads l LEFT JOIN LATERAL (SELECT ps_inner.stage_label, ps_inner.stage_color FROM pipeline_stages ps_inner WHERE ps_inner.stage_key = l.status AND ps_inner.industry = l.industry AND (ps_inner.business_id = l.business_id OR ps_inner.business_id IS NULL) ORDER BY CASE WHEN ps_inner.business_id = l.business_id THEN 0 ELSE 1 END LIMIT 1) ps ON true WHERE l.id = $1 AND l.business_id = $2 LIMIT 1`, [leadId, businessId]),
-    pool.query(`SELECT * FROM messages WHERE session_id = (SELECT id FROM sessions WHERE lead_id = $1 LIMIT 1) ORDER BY created_at ASC`, [leadId]),
-    pool.query(`SELECT * FROM notifications WHERE lead_id = $1 ORDER BY sent_at DESC LIMIT 10`, [leadId]),
+    pool.query(`SELECT m.* FROM messages m JOIN leads l ON l.session_id=m.session_id AND l.business_id=m.business_id WHERE l.id=$1 AND l.business_id=$2 ORDER BY m.created_at ASC`, [leadId, businessId]),
+    pool.query(`SELECT * FROM notifications WHERE lead_id = $1 AND business_id=$2 ORDER BY sent_at DESC LIMIT 10`, [leadId, businessId]),
   ]);
   if (!leadResult.rows[0]) return res.status(404).json({ error: 'Lead not found' });
   return res.json({ lead: leadResult.rows[0], messages: messagesResult.rows, notifications: notificationsResult.rows });
-});
+}));
 
-router.patch('/:leadId', requireAuth, async (req, res) => {
+router.patch('/:leadId', requireAuth, asyncHandler(async (req, res) => {
   const allowedFields = ['status', 'owner_notes', 'follow_up_date', 'follow_up_note', 'estimated_value', 'actual_value', 'tags', 'assigned_to'];
   const updates = [];
   const values = [req.params.leadId, req.business.businessId];
@@ -123,6 +124,6 @@ router.patch('/:leadId', requireAuth, async (req, res) => {
   const result = await pool.query(query, values);
   if (!result.rows[0]) return res.status(404).json({ error: 'Lead not found' });
   return res.json({ lead: result.rows[0] });
-});
+}));
 
 export default router;

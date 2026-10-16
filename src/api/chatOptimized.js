@@ -3,7 +3,7 @@ import pool from '../db/pool.js';
 import { buildSessionMemoryBlock, getChatHistoryLimit } from '../db/sessionHistory.js';
 
 const originalQuery = pool.query.bind(pool);
-const ORIGINAL_HISTORY_QUERY = 'SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at ASC LIMIT 30';
+const ORIGINAL_HISTORY_QUERY = 'SELECT role, content FROM messages WHERE session_id=$1 AND business_id=$2 ORDER BY created_at ASC LIMIT 30';
 const BOT_CONFIG_QUERY_MARKER = 'FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1';
 
 const HAIKU_PRICING_USD_PER_1M = {
@@ -109,7 +109,7 @@ function patchResponsePricing(res) {
   };
 }
 
-async function getOptimizedHistory(sessionId) {
+async function getOptimizedHistory(sessionId, businessId) {
   const limit = getChatHistoryLimit();
 
   const [historyResult, sessionResult] = await Promise.all([
@@ -118,14 +118,14 @@ async function getOptimizedHistory(sessionId) {
        FROM (
          SELECT role, content, created_at
          FROM messages
-         WHERE session_id = $1
+         WHERE session_id = $1 AND business_id = $2
          ORDER BY created_at DESC
-         LIMIT $2
+         LIMIT $3
        ) recent
        ORDER BY created_at ASC`,
-      [sessionId, limit],
+      [sessionId, businessId, limit],
     ),
-    originalQuery('SELECT collected_data FROM sessions WHERE id = $1', [sessionId]).catch(() => ({ rows: [] })),
+    originalQuery('SELECT collected_data FROM sessions WHERE id = $1 AND business_id=$2', [sessionId, businessId]).catch(() => ({ rows: [] })),
   ]);
 
   const memoryBlock = buildSessionMemoryBlock(sessionResult.rows?.[0] || {});
@@ -142,7 +142,7 @@ async function getOptimizedHistory(sessionId) {
 
 pool.query = async function optimizedSessionHistoryQuery(text, params = [], ...rest) {
   if (normalizeQuery(text) === ORIGINAL_HISTORY_QUERY && params?.[0]) {
-    return getOptimizedHistory(params[0]);
+    return getOptimizedHistory(params[0], params[1]);
   }
 
   const result = await originalQuery(text, params, ...rest);
