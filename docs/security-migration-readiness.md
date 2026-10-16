@@ -36,3 +36,9 @@ Do not reset knowledge revisions or reuse a deleted business identifier: that co
 The suite applies the real baseline SQL, inserts historical mismatched/null fixtures, and runs 005/006/007. It checks new write constraints, retained history, domain policy validation/tombstones, revision triggers for bulk writes/tenant moves/rollback, real pgvector retrieval with stale Redis entries, upload/replacement/deletion, and repeat application without data loss. Local runs without that dedicated test database skip this suite explicitly. CI results must be checked before merging.
 
 Still requiring production-like staging validation: database size/DDL lock timing, existing schema drift, actual application-role permissions, backup/restore, domain import completeness, replica routing, concurrent workload behavior and the complete external frontend/integration flow. Passing disposable-database tests does not replace these operational checks.
+
+## Final hardening runtime check
+
+No additional migration was required for transactional replacement, supplemental error propagation, CORS or removal of global SQL patches. Re-check that the runtime role can lock its business row and update knowledge/revisions. Website replacement prepares embeddings outside the transaction, then holds a business-row lock through source replacement and commit; measure this window with realistic chunk counts in staging. Confirm failed replacements roll back the previous source and its revision, while confirmed supplemental partial commits remain retrievable and retryable. The CI database suite covers these correctness cases; it does not establish production lock timing.
+
+See `pr145-final-hardening.md` for CORS trust configuration, file-storage handoff constraints and all remaining release prerequisites.

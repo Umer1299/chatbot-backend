@@ -18,7 +18,7 @@ mock.module('../src/middleware/knowledgeAuth.js', { namedExports: { requireKnowl
   req.business = { businessId: 'business-a', botId: 'bot-a' }; req.namespace = 'bot-a'; next();
 } } });
 mock.module('../src/queues/fileQueue.js', { namedExports: { fileQueue: {} } });
-mock.module('../src/services/recordManager.js', { namedExports: { isDuplicateContent: async () => false } });
+mock.module('../src/services/recordManager.js', { namedExports: { markContentProcessed: async () => {}, isDuplicateContent: async () => false } });
 mock.module('../src/services/firecrawlService.js', { namedExports: { cleanAndChunkContent: () => [], shouldEmbedChunk: () => true } });
 const { deleteBusinessChunks } = await import('../src/db/vectorStore.js');
 const app = express();

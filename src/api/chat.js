@@ -1,3 +1,6 @@
+import { getRecentConversationHistory, buildSessionMemoryBlock } from '../db/sessionHistory.js';
+import { isInquiryOnlySession } from '../services/inquirySessions.js';
+import { applyChatEmailPolicy } from '../services/chatConfigPolicy.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
@@ -351,7 +354,7 @@ async function generateLeadSummary(leadData, industry) {
 
 async function saveLead(config, sessionId, rawLeadData, namespace) {
   try {
-    if (!config || !sessionId || !rawLeadData) return null;
+    if (!config || !sessionId || !rawLeadData || isInquiryOnlySession(config.business_id, sessionId)) return null;
     const leadData = normalizeLeadData(rawLeadData, config, JSON.stringify(rawLeadData));
     if (!isLeadReady(leadData)) {
       console.log('Lead not ready yet', { hasName: Boolean(leadData.name), hasEmail: Boolean(leadData.email), hasPhone: Boolean(leadData.phone), projectType: leadData.project_type });
@@ -401,6 +404,7 @@ router.post('/', tokenAuth, domainRestriction, requireChatSession, asyncHandler(
     config = { ...cfg.rows[0], calendlyLink: cfg.rows[0].calendly_link, ownerPhone: cfg.rows[0].owner_phone };
     try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
   }
+  config = applyChatEmailPolicy(config);
   if (config?.business_id !== req.chatSession.business_id) return res.status(403).json({ error: 'Invalid bot scope' });
   if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
   if (config.is_disabled) {
@@ -423,8 +427,9 @@ router.post('/', tokenAuth, domainRestriction, requireChatSession, asyncHandler(
 
   const escalationDetected = ['speak to someone', 'speak to a person', 'call me', 'real person', 'human agent', 'talk to someone', 'complaint', 'legal action', 'urgent help', 'want to speak'].some((kw) => message.toLowerCase().includes(kw));
   const session = req.chatSession;
-  const historyRows = await pool.query('SELECT role, content FROM messages WHERE session_id=$1 AND business_id=$2 ORDER BY created_at ASC LIMIT 30', [sessionId, config.business_id]);
-  const conversationHistory = historyRows.rows.map((row) => ({ role: row.role, content: row.content }));
+  const conversationHistory = await getRecentConversationHistory(sessionId, config.business_id);
+  const memory = buildSessionMemoryBlock(session);
+  if (memory) conversationHistory.unshift({ role: 'user', content: memory });
   const currentPhase = session?.current_phase || 1;
 
   if (isSimpleInitialGreeting(message, conversationHistory)) {

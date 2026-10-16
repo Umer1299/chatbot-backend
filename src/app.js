@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { createCorsPolicy } from './middleware/corsPolicy.js';
 import dotenv from 'dotenv';
 import { authRateLimiter, publicReadLimiter, adminRateLimiter, widgetLimiter, dashboardLimiter } from './middleware/rateLimiter.js';
 import requireAuth from './middleware/jwtAuth.js';
@@ -26,34 +27,16 @@ dotenv.config();
 
 const app = express();
 
-const allowedOriginsRaw = process.env.WIDGET_ALLOWED_ORIGINS || '';
-const allowedOrigins = allowedOriginsRaw
-  ? allowedOriginsRaw.split(',').map(s => s.trim()).filter(Boolean)
-  : [];
-
-if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
-  console.warn('[CORS] WIDGET_ALLOWED_ORIGINS not set — all origins allowed. Set in Render env vars.');
-}
-
-const corsOptions = {
-  origin(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.length === 0) return callback(null, true);
-    const isAllowed = allowedOrigins.some(a =>
-      a.startsWith('*.') ? origin.endsWith(a.slice(2)) : origin === a,
-    );
-    isAllowed ? callback(null, true) : callback(new Error('CORS: Origin not allowed'));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-chatbot-token', 'x-admin-key', 'Origin'],
-};
+const corsPolicy = createCorsPolicy({
+  widgetOriginsRaw: process.env.WIDGET_ALLOWED_ORIGINS || '',
+  dashboardOriginsRaw: process.env.DASHBOARD_ALLOWED_ORIGINS,
+});
 
 function authenticatedManagementQuota(req, res, next) {
   return requireAuth(req, res, () => dashboardLimiter(req, res, next));
 }
 
-app.use(cors(corsOptions));
+app.use(cors(corsPolicy));
 app.use(express.json());
 
 app.get('/health', (req, res) => res.send('OK'));

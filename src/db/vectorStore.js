@@ -1,3 +1,4 @@
+import { KnowledgeIngestionError, ingestionResult } from '../services/ingestionResult.js';
 import { createHash } from 'node:crypto';
 import pool from './pool.js';
 import { getEmbedding } from '../services/aiService.js';
@@ -6,42 +7,30 @@ import { redisClient } from '../services/redis.js';
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 200;
 
-async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) {
-  let inserted = 0;
-  let skipped = 0;
-  const totalBatches = Math.ceil(chunks.length / BATCH_SIZE);
-
-  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-    const batch = chunks.slice(i, i + BATCH_SIZE);
-
-    for (let j = 0; j < batch.length; j += 1) {
-      const chunk = batch[j];
-      const embedding = await getEmbedding(chunk);
-
-      if (!embedding) {
-        skipped += 1;
-        continue;
-      }
-
-      const chunkIndex = startIndex + i + j;
-      const wordCount = chunk.split(/\s+/).filter(Boolean).length;
-
-      await pool.query(
-        `INSERT INTO knowledge_chunks
-          (business_id, content, embedding, source_type, chunk_index, word_count)
-         VALUES ($1, $2, $3::vector, $4, $5, $6)`,
-        [businessId, chunk, JSON.stringify(embedding), sourceType, chunkIndex, wordCount],
-      );
-
-      inserted += 1;
-    }
-
-    const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-    console.log(`Embedded batch ${batchNumber} of ${totalBatches}`);
-    await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
+function validatedChunks(chunks) {
+  if (!Array.isArray(chunks) || chunks.some(chunk => typeof chunk !== 'string')) {
+    throw Object.assign(new Error('chunks must be an array of strings'), { status: 400 });
   }
+  return chunks.filter(chunk => chunk.trim());
+}
 
-  return { inserted, skipped };
+async function embedChunk(chunk) {
+  try {
+    const embedding = await getEmbedding(chunk);
+    if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every(Number.isFinite)) {
+      throw new Error('Embedding unavailable');
+    }
+    return embedding;
+  } catch (cause) {
+    throw new KnowledgeIngestionError(cause, { code: 'KNOWLEDGE_EMBEDDING_FAILED' });
+  }
+}
+
+async function insertChunk(client, businessId, chunk, embedding, sourceType, index) {
+  await client.query(`INSERT INTO knowledge_chunks
+    (business_id, content, embedding, source_type, chunk_index, word_count)
+    VALUES ($1, $2, $3::vector, $4, $5, $6)`,
+  [businessId, chunk, JSON.stringify(embedding), sourceType, index, chunk.split(/\s+/).filter(Boolean).length]);
 }
 
 async function ensureBrandColumns() {
@@ -84,35 +73,57 @@ export async function setupVectorTable() {
 }
 
 export async function upsertChunks(businessId, chunks, sourceType = 'website') {
+  const content = validatedChunks(chunks);
+  const skipped = chunks.length - content.length;
+  if (!content.length) return ingestionResult(0, skipped); // Never erase working data for empty input.
+  let client;
+  let inTransaction = false;
   try {
-    await pool.query(
-      'DELETE FROM knowledge_chunks WHERE business_id = $1 AND source_type = $2',
-      [businessId, sourceType],
-    );
-
-    const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, 0);
-
-    return { inserted, skipped };
-  } catch (error) {
-    console.error('Failed to upsert chunks:', error.message);
-    return { inserted: 0, skipped: chunks?.length || 0 };
-  }
+    // Prepare ALL embeddings before any destructive statement or database lock.
+    const embeddings = [];
+    for (const chunk of content) embeddings.push(await embedChunk(chunk));
+    client = await pool.connect();
+    await client.query('BEGIN'); inTransaction = true;
+    // Serialize replacement for this business; readers keep seeing committed knowledge.
+    const business = await client.query('SELECT id FROM businesses WHERE id=$1 FOR UPDATE', [businessId]);
+    if (!business.rows.length) throw new Error('Business not found');
+    await client.query('DELETE FROM knowledge_chunks WHERE business_id = $1 AND source_type = $2', [businessId, sourceType]);
+    for (let i = 0; i < content.length; i++) {
+      await insertChunk(client, businessId, content[i], embeddings[i], sourceType, i);
+    }
+    await client.query('COMMIT'); inTransaction = false;
+    return ingestionResult(content.length, skipped);
+  } catch (cause) {
+    if (inTransaction) await client.query('ROLLBACK').catch(() => {});
+    throw new KnowledgeIngestionError(cause, { skipped, failed: content.length,
+      code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
+  } finally { client?.release(); }
 }
 
 export async function upsertSupplementalChunks(businessId, chunks, sourceType = 'owner_upload') {
+  const content = validatedChunks(chunks);
+  let skipped = chunks.length - content.length;
+  let inserted = 0;
+  if (!content.length) return ingestionResult(0, skipped);
   try {
-    const existing = await pool.query(
-      'SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1',
-      [businessId],
-    );
-    const startIndex = existing.rows[0]?.total || 0;
-
-    const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, startIndex);
-
-    return { inserted, skipped };
-  } catch (error) {
-    console.error('Failed to upsert supplemental chunks:', error.message);
-    return { inserted: 0, skipped: chunks?.length || 0 };
+    // Recheck stored content on retries, independent of Redis dedup expiry/failures.
+    const existing = await pool.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 AND source_type=$2 AND content=ANY($3::text[])', [businessId, sourceType, content]);
+    const known = new Set(existing.rows.map(row => row.content));
+    const count = await pool.query('SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1', [businessId]);
+    const startIndex = count.rows[0]?.total || 0;
+    for (let i = 0; i < content.length; i++) {
+      const chunk = content[i];
+      if (known.has(chunk)) { skipped++; continue; }
+      const embedding = await embedChunk(chunk);
+      await insertChunk(pool, businessId, chunk, embedding, sourceType, startIndex + inserted);
+      inserted++; known.add(chunk);
+      if ((i + 1) % BATCH_SIZE === 0) await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+    }
+    return ingestionResult(inserted, skipped);
+  } catch (cause) {
+    // Successfully committed chunks (and their DB revisions) are preserved.
+    throw new KnowledgeIngestionError(cause, { inserted, skipped, failed: Math.max(0, chunks.length - inserted - skipped),
+      code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
   }
 }
 

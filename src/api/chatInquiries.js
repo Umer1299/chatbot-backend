@@ -1,3 +1,6 @@
+import { rememberInquiryOnlySession } from '../services/inquirySessions.js';
+import { applyChatEmailPolicy } from '../services/chatConfigPolicy.js';
+import { getRecentConversationHistory, buildSessionMemoryBlock } from '../db/sessionHistory.js';
 import express from 'express';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import pool from '../db/pool.js';
@@ -10,26 +13,6 @@ import { domainRestriction } from '../middleware/domainRestriction.js';
 
 const router = express.Router();
 router.use(tokenAuth, domainRestriction, requireChatSession);
-const originalQuery = pool.query.bind(pool);
-const inquiryOnlySessions = new Set();
-
-pool.query = async function inquiryAwareQuery(text, params = [], ...rest) {
-  const queryText = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
-  const sessionId = params?.[1];
-  if (queryText.includes('INSERT INTO leads') && sessionId && inquiryOnlySessions.has(`${params[0]}:${sessionId}`)) {
-    console.log('[inquiries] Lead insert skipped because this session was saved as an inquiry', { sessionId });
-    return { rows: [] };
-  }
-  return originalQuery(text, params, ...rest);
-};
-
-function rememberInquiryOnlySession(businessId, sessionId) {
-  if (!sessionId) return;
-  const key = `${businessId}:${sessionId}`;
-  inquiryOnlySessions.add(key);
-  setTimeout(() => inquiryOnlySessions.delete(key), 30 * 60 * 1000).unref?.();
-}
-
 function cleanPayload(payload, capture) {
   if (!payload || typeof payload !== 'object') return payload;
   if (typeof payload.reply === 'string') {
@@ -65,7 +48,7 @@ function patchResponse(res, capture) {
 }
 
 async function loadConfig(botId) {
-  const cfg = await originalQuery(
+  const cfg = await pool.query(
     `SELECT bc.selected_agents, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.bot_id, b.id as business_id, b.plan, b.is_disabled
      FROM bot_configs bc
      JOIN businesses b ON bc.business_id = b.id
@@ -73,7 +56,7 @@ async function loadConfig(botId) {
      LIMIT 1`,
     [botId],
   );
-  return cfg.rows?.[0] || null;
+  return applyChatEmailPolicy(cfg.rows?.[0] || null);
 }
 
 async function saveInquiry(req, capture, config, options = {}) {
@@ -81,12 +64,14 @@ async function saveInquiry(req, capture, config, options = {}) {
   if (!botId || !sessionId || !message || !config?.business_id) return null;
 
   const [sessionResult, historyResult] = await Promise.all([
-    originalQuery('SELECT * FROM sessions WHERE id=$1 AND business_id=$2', [sessionId, config.business_id]).catch(() => ({ rows: [] })),
-    originalQuery('SELECT role, content FROM messages WHERE session_id=$1 AND business_id=$2 ORDER BY created_at ASC LIMIT 30', [sessionId, config.business_id]).catch(() => ({ rows: [] })),
+    pool.query('SELECT * FROM sessions WHERE id=$1 AND business_id=$2', [sessionId, config.business_id]).catch(() => ({ rows: [] })),
+    getRecentConversationHistory(sessionId, config.business_id).then(rows => ({ rows })).catch(() => ({ rows: [] })),
   ]);
 
   const session = sessionResult.rows?.[0];
   if (!session) return null;
+  const memory = buildSessionMemoryBlock(session);
+  if (memory) historyResult.rows.unshift({ role: 'user', content: memory });
   return saveInquiryFromConversation({
     session: { ...session, id: sessionId },
     conversationHistory: historyResult.rows || [],

@@ -8,7 +8,7 @@ const testUrl = process.env.TEST_DATABASE_URL;
 let client;
 const cache = new Map();
 const embedding = [1, ...Array(1535).fill(0)];
-mock.module('../src/db/pool.js', { defaultExport: { query: (...args) => client.query(...args) } });
+mock.module('../src/db/pool.js', { defaultExport: { query: (...args) => client.query(...args), connect: async () => ({query: (...args) => client.query(...args), release() {}}) } });
 mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: async () => embedding } });
 mock.module('../src/services/redis.js', { namedExports: { redisClient: {
   get: async key => cache.get(key) || null,
@@ -82,6 +82,20 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
       const result = await getRelevantChunks(A,'current policy','bot-a');
       assert.ok(result.some(row => row.content==='new website info'));
       assert.ok(!result.some(row => row.content==='deleted customer knowledge'));
+    });
+    await t.test('atomic replacement rollback and partial supplemental failure preserve confirmed data/revisions', async () => {
+      const {upsertChunks,upsertSupplementalChunks}=await import('../src/db/vectorStore.js');
+      const before=(await client.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 ORDER BY content',[A])).rows;
+      const version=await revision(A);
+      await client.query("ALTER TABLE knowledge_chunks ADD CONSTRAINT test_ingestion_failure CHECK (content <> 'invalid test chunk') NOT VALID");
+      await assert.rejects(upsertChunks(A,['valid replacement','invalid test chunk']),e=>e.result.inserted===0);
+      assert.deepEqual((await client.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 ORDER BY content',[A])).rows,before);
+      assert.equal(await revision(A),version);
+      await assert.rejects(upsertSupplementalChunks(A,['confirmed partial','invalid test chunk']),e=>e.result.inserted===1 && e.result.status==='partial');
+      assert.equal(BigInt(await revision(A)),BigInt(version)+1n);
+      const retry=await upsertSupplementalChunks(A,['confirmed partial','retry succeeds']);
+      assert.equal(retry.inserted,1);assert.equal(retry.skipped,1);
+      assert.equal((await client.query("SELECT COUNT(*)::int AS n FROM knowledge_chunks WHERE business_id=$1 AND content='confirmed partial'",[A])).rows[0].n,1);
     });
     await t.test('reapplying 005/006/007 preserves policies, revisions, historical messages and customer rows', async () => {
       const original = await revision(A);

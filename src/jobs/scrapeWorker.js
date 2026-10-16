@@ -1,10 +1,11 @@
+import { assertIngestionResult } from '../services/ingestionResult.js';
 import pool from '../db/pool.js';
 import {
   scrapeWebsite,
   cleanAndChunkContent,
   shouldEmbedChunk,
 } from '../services/firecrawlService.js';
-import { upsertChunks, deleteBusinessChunks } from '../db/vectorStore.js';
+import { upsertChunks } from '../db/vectorStore.js';
 import { detectIndustry } from '../agents/industryDetector.js';
 import { validateWebsiteContent } from '../agents/contentValidator.js';
 import { generateChatbotContent } from '../agents/contentGenerator.js';
@@ -101,7 +102,6 @@ export async function getJobStatus(jobId, businessId) {
 }
 
 export async function refreshScrapeJob(businessId, url) {
-  await deleteBusinessChunks(businessId);
   return addScrapeJob(businessId, url);
 }
 
@@ -190,7 +190,7 @@ function getScrapedTextStats(pages = []) {
   return { rawCharacters, titles };
 }
 
-async function processScrapeJob(job) {
+export async function processScrapeJob(job) {
   try {
     await updateJobProgress(job.id, 'Scraping website', 10, {
       status: 'scraping',
@@ -225,7 +225,8 @@ async function processScrapeJob(job) {
       status: 'embedding',
     });
 
-    await upsertChunks(job.business_id, filtered, 'website');
+    const ingestion = await upsertChunks(job.business_id, filtered, 'website');
+    assertIngestionResult(ingestion, filtered.length);
 
     await updateJobProgress(job.id, 'Analysing business', 65, {
       status: 'analyzing',

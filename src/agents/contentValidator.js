@@ -1,3 +1,4 @@
+import { assertIngestionResult } from '../services/ingestionResult.js';
 import { claudeChat } from '../services/aiService.js';
 import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
 import { upsertSupplementalChunks } from '../db/vectorStore.js';
@@ -194,12 +195,13 @@ export async function processSupplementalInfo(businessId, content, industry) {
     return { success: false, message: 'Content too short or low quality' };
   }
 
-  await upsertSupplementalChunks(businessId, filtered, 'owner_upload');
+  const result = await upsertSupplementalChunks(businessId, filtered, 'owner_upload');
+  assertIngestionResult(result, filtered.length);
 
   return {
     success: true,
-    chunksAdded: filtered.length,
-    message: `Added ${filtered.length} knowledge chunks from your content`,
+    chunksAdded: result.inserted,
+    message: `Added ${result.inserted} knowledge chunks from your content`,
   };
 }
 

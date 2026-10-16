@@ -64,7 +64,7 @@ mock.module('../src/db/vectorStore.js', { namedExports: {
   deleteBusinessChunks: async id => { effects.deletions.push(id); return 1; },
 } });
 mock.module('../src/queues/fileQueue.js', { namedExports: { fileQueue: { add: async () => { effects.jobs++; } } } });
-mock.module('../src/services/recordManager.js', { namedExports: { isDuplicateContent: async () => false } });
+mock.module('../src/services/recordManager.js', { namedExports: { markContentProcessed: async () => {}, isDuplicateContent: async () => false } });
 mock.module('../src/services/firecrawlService.js', { namedExports: { scrapeWebsite: async () => [], cleanAndChunkContent: () => ['example chunk'], shouldEmbedChunk: () => true } });
 mock.module('../src/agents/industryDetector.js', { namedExports: { detectIndustry: async () => ({}) } });
 mock.module('../src/agents/contentValidator.js', { namedExports: { validateWebsiteContent: async () => ({}), processSupplementalInfo: async () => ({}) } });

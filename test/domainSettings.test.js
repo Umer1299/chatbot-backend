@@ -155,3 +155,14 @@ test('admin listing includes durable and surviving legacy settings without Redis
   clock += 31 * 86400;
   assert.equal((await admin('')).body.length, 2);
 });
+
+test('malformed Origin never falls back to Referer or an unrestricted policy',async()=>{
+  await saveChatbotSettings('bot-a',{allowedDomains:[]});
+  for(const origin of ['null','https://user:pass@trusted.example','https://trusted.example/path','not-a-url'])assert.equal(await widget(origin),403);
+});
+test('server-to-server without Origin remains supported but still requires durable policy',async()=>{
+  await saveChatbotSettings('bot-a',restricted());
+  const r=await fetch(base+'/widget',{headers:{'x-chatbot-token':'public'}});assert.equal(r.status,200);await r.text();
+  policies.clear();cache.clear();put('chatbot_token:public','bot-a',TOKEN_LIFETIME);
+  const missing=await fetch(base+'/widget',{headers:{'x-chatbot-token':'public'}});assert.equal(missing.status,503);await missing.text();
+});

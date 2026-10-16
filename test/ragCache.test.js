@@ -6,13 +6,14 @@ import express from 'express';
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
 const question = 'What is the warranty on this service?';
-let cache, chunks, revisions, sessions, reads, redisFailure, dbFailure, race, failInsert;
+let cache, chunks, revisions, sessions, reads, redisFailure, dbFailure, race, failInsert, modelReply, leadWrites;
 const prompts = [];
 const key = (id, revision, text = question, limit = 5) => `rag:v2:${id}:${revision}:${createHash('sha256').update(JSON.stringify([text, limit])).digest('hex')}`;
 const db = { query: async (sql, args = []) => {
   if (dbFailure) throw Error('PostgreSQL unavailable');
   const q = sql.replace(/\s+/g, ' ').trim();
   if (q.startsWith('SELECT knowledge_revision')) return { rows: [{ knowledge_revision: String(revisions.get(args[0])) }] };
+  if (q.startsWith('SELECT content FROM knowledge_chunks')) return { rows: chunks.filter(c => c.businessId===args[0] && c.type===args[1] && args[2].includes(c.content)).map(c=>({content:c.content})) };
   if (q.startsWith('SELECT content,')) {
     reads++;
     const rows = chunks.filter(c => c.businessId === args[0]).slice(0, args[2]).map(c => ({ content: c.content, similarity: 0.9 }));
@@ -31,6 +32,7 @@ const db = { query: async (sql, args = []) => {
     chunks.push({ businessId: args[0], content: args[1], type: args[3] }); revisions.set(args[0], revisions.get(args[0])+1);
     return { rows: [], rowCount: 1 };
   }
+  if (q.startsWith('INSERT INTO leads')) { leadWrites.push(args); return {rows:[{id:'saved-lead'}]}; }
   if (q.startsWith('SELECT id FROM businesses')) return { rows: [{ id: A }] };
   if (q.includes('FROM bot_configs')) return { rows: [{ business_id: A, business_name: 'Example', selected_agents: [], selected_model: 'test', plan: 'free', industry: 'other', active: true }] };
   if (q.startsWith('INSERT INTO sessions')) { if (!sessions.has(args[0])) sessions.set(args[0], { id: args[0], business_id: args[1], collected_data: {} }); return { rows: [] }; }
@@ -38,6 +40,12 @@ const db = { query: async (sql, args = []) => {
   if (q.includes('FROM messages') || q.startsWith('UPDATE sessions') || q.startsWith('INSERT INTO messages')) return { rows: [] };
   throw Error(`Unexpected query ${q}`);
 } };
+db.connect = async () => { let snapshot; return { release() {}, query: async (sql,args) => {
+  if (sql==='BEGIN') { snapshot={ chunks:structuredClone(chunks), revisions:new Map(revisions) }; return {rows:[]}; }
+  if (sql==='ROLLBACK') { chunks=snapshot.chunks; revisions=snapshot.revisions; return {rows:[]}; }
+  if (sql==='COMMIT') return {rows:[]};
+  return db.query(sql,args);
+} }; };
 mock.module('../src/db/pool.js', { defaultExport: db });
 mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: async () => [1,0,0] } });
 mock.module('../src/services/redis.js', { namedExports: { redisClient: {
@@ -53,11 +61,13 @@ mock.module('../src/agents/promptBuilder.js', { namedExports: { buildMasterPromp
 mock.module('openai', { defaultExport: class {
   chat = { completions: { create: async ({ messages, stream }) => {
     prompts.push(messages[0].content);
-    const content = 'Here is the current information.';
+    const content = modelReply || 'Here is the current information.';
     if (stream) return (async function* () { yield { choices: [{ delta: { content } }] }; })();
     return { choices: [{ message: { content } }], usage: { prompt_tokens: 10, completion_tokens: 6 } };
   } } };
 } });
+mock.module('@anthropic-ai/sdk', {defaultExport:class { messages={create:async()=>({content:[{text:'Test summary'}]})}; }});
+process.env.BUBBLE_API_URL=''; process.env.BUBBLE_API_KEY='';
 process.env.OPENAI_API_KEY = 'test-only-dummy';
 const { getRelevantChunks, deleteBusinessChunks, upsertChunks, upsertSupplementalChunks } = await import('../src/db/vectorStore.js');
 const app = express(); app.use(express.json()); app.use('/chat', (await import('../src/api/chat.js')).default);
@@ -66,7 +76,7 @@ const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1
 after(() => new Promise(resolve => server.close(resolve)));
 beforeEach(() => {
   cache = new Map(); chunks = [{ businessId: A, content: 'Deleted warranty detail', type: 'website' }, { businessId: B, content: 'Private tenant B detail', type: 'website' }];
-  revisions = new Map([[A,0], [B,0]]); sessions = new Map(); reads=0; redisFailure=false; dbFailure=false; race=undefined; failInsert=false; prompts.length=0;
+  revisions = new Map([[A,0], [B,0]]); sessions = new Map(); reads=0; redisFailure=false; dbFailure=false; race=undefined; failInsert=false; prompts.length=0; modelReply=undefined; leadWrites=[];
 });
 test('retrieval ignores old namespace keys and uses business-scoped versioned keys', async () => {
   cache.set('rag:bot-public-namespace:what-is-the-warranty-on-this-service?', JSON.stringify([{ content: 'stale namespace cache', similarity: 1 }]));
@@ -104,7 +114,7 @@ test('owner uploads and website re-scraping invalidate prior retrieval generatio
 });
 test('partial upload failures cannot keep an old retrieval generation valid', async () => {
   await getRelevantChunks(A, question, 'bot'); failInsert = true;
-  await upsertSupplementalChunks(A, ['partial upload', 'failed next chunk']);
+  await assert.rejects(upsertSupplementalChunks(A, ['partial upload', 'failed next chunk']), error => error.result.inserted===1 && error.result.status==='partial');
   assert.ok((await getRelevantChunks(A, question, 'bot')).some(c => c.content === 'partial upload'));
 });
 test('deletion during retrieval retries instead of caching stale results into the current generation', async () => {
@@ -132,4 +142,18 @@ test('JSON and streaming conversations after deletion do not receive deleted kno
   assert.doesNotMatch(prompts.at(-1), /Deleted warranty detail|Private tenant B detail/);
   const stream = await chat('stream-after',true); assert.match(stream, /data: \[DONE\]/);
   assert.doesNotMatch(prompts.at(-1), /Deleted warranty detail|Private tenant B detail/);
+});
+
+test('normal lead capture stays business-scoped after removing global query interception',async()=>{
+  modelReply='Thanks. LEAD_DATA: '+JSON.stringify({name:'Test Customer',email:'customer@example.test',needs:'new website',project_type:'website'});
+  const r=await fetch(`http://127.0.0.1:${server.address().port}/chat`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botId:'bot-public-namespace',sessionId:'lead-normal',message:'Please help me with a website project'})});
+  assert.equal(r.status,200);await r.json();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(leadWrites.length,1);assert.equal(leadWrites[0][0],A);assert.equal(leadWrites[0][1],'lead-normal');
+});
+test('inquiry-only classification suppresses only its own business/session lead',async()=>{
+  const {rememberInquiryOnlySession}=await import('../src/services/inquirySessions.js');
+  rememberInquiryOnlySession(A,'inquiry-only');
+  modelReply='Thanks. LEAD_DATA: '+JSON.stringify({name:'Test Customer',email:'customer@example.test',needs:'new website',project_type:'website'});
+  const r=await fetch(`http://127.0.0.1:${server.address().port}/chat`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botId:'bot-public-namespace',sessionId:'inquiry-only',message:'Please help me with a website project'})});
+  assert.equal(r.status,200);await r.json();await new Promise(resolve=>setImmediate(resolve));assert.equal(leadWrites.length,0);
 });
