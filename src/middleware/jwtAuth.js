@@ -5,9 +5,16 @@ import { normalizePlan } from '../services/planService.js';
 export const JWT_OPTIONS = {
   algorithm: 'HS256', issuer: 'chatflow-api', audience: 'chatflow-dashboard', expiresIn: '1h',
 };
+const VERIFIED = Symbol('verified-dashboard-identity');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function requireAuth(req, res, next) {
+  // App-level quota and route-level authorization share this request's verification.
+  if (req[VERIFIED] && req[VERIFIED].header === req.headers.authorization) {
+    req.business = req[VERIFIED].business;
+    req.auth = req[VERIFIED].identity;
+    return next();
+  }
   const match = /^Bearer ([^\s]+)$/i.exec(req.headers.authorization || '');
   if (!match) return res.status(401).json({ error: 'Bearer token required' });
   if (!process.env.JWT_SECRET) return res.status(503).json({ error: 'Authentication unavailable' });
@@ -39,6 +46,8 @@ export async function requireAuth(req, res, next) {
     }
     req.business = { businessId: business.id, bubbleUserId: business.bubble_user_id,
       industry: business.industry, plan: normalizePlan(business.plan), botId: business.bot_id };
+    req.auth = Object.freeze({ businessId: business.id });
+    req[VERIFIED] = { header: req.headers.authorization, business: req.business, identity: req.auth };
     return next();
   } catch (error) {
     return next(error);

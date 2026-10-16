@@ -1,8 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import RedisStore from 'rate-limit-redis';
+import { authRateLimiter, publicReadLimiter, adminRateLimiter, widgetLimiter, dashboardLimiter } from './middleware/rateLimiter.js';
+import requireAuth from './middleware/jwtAuth.js';
+import { tokenAuth } from './middleware/tokenAuth.js';
+import { requireAdminKey } from './middleware/adminAuth.js';
 
 import './agents/registerSaasSoftware.js';
 import './agents/registerUniversalContactRouter.js';
@@ -18,7 +20,6 @@ import leadsRoutes from './api/leads.js';
 import inquiriesRoutes from './api/inquiries.js';
 import businessRoutes from './api/businessPublic.js';
 import quickAnswersRoutes from './api/quickAnswers.js';
-import { redisClient } from './services/redis.js';
 import { globalErrorHandler } from './middleware/errorHandler.js';
 
 dotenv.config();
@@ -48,35 +49,9 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'x-chatbot-token', 'x-admin-key', 'Origin'],
 };
 
-const widgetLimiter = rateLimit({
-  store: new RedisStore({
-    sendCommand: (...args) => redisClient.call(...args),
-  }),
-  keyGenerator: (req) => {
-    const token = req.headers['x-chatbot-token'] || 'anon';
-    const ip = ipKeyGenerator(req.ip);
-    return token + ':' + ip;
-  },
-  windowMs: 60 * 1000,
-  max: 60,
-  message: { error: 'Too many requests' },
-  standardHeaders: true,
-});
-
-const dashboardLimiter = rateLimit({
-  store: new RedisStore({
-    sendCommand: (...args) => redisClient.call(...args),
-  }),
-  keyGenerator: (req) => {
-    const auth = req.headers.authorization || 'anon';
-    const ip = ipKeyGenerator(req.ip);
-    return auth + ':' + ip;
-  },
-  windowMs: 60 * 1000,
-  max: 120,
-  message: { error: 'Too many requests' },
-  standardHeaders: true,
-});
+function authenticatedManagementQuota(req, res, next) {
+  return requireAuth(req, res, () => dashboardLimiter(req, res, next));
+}
 
 app.use(cors(corsOptions));
 app.use(express.json());
@@ -96,16 +71,24 @@ app.get('/billing/select-plan', (req, res) => {
   return res.redirect(302, `${base}/billing/select-plan${query}`);
 });
 
-app.use('/api/chat', widgetLimiter);
-app.use('/api/upsert', dashboardLimiter);
-app.use('/api/leads', dashboardLimiter);
-app.use('/api/inquiries', dashboardLimiter);
-app.use('/api/business', dashboardLimiter);
-app.use('/api/billing', dashboardLimiter);
-app.use('/api/scrape', dashboardLimiter);
-app.use('/api/auth', dashboardLimiter);
-app.use('/api/quick-answers', dashboardLimiter);
-app.use('/api/moderate', widgetLimiter);
+app.use('/api/chat', tokenAuth, widgetLimiter);
+app.use('/api/upsert', authenticatedManagementQuota);
+app.use('/api/leads', authenticatedManagementQuota);
+app.use('/api/inquiries', authenticatedManagementQuota);
+// Existing preview exposes only public widget presentation fields.
+app.use('/api/business', (req, res, next) => {
+  if (['GET', 'HEAD'].includes(req.method) && /^\/bot-config\/[^/]+\/preview\/?$/.test(req.path)) {
+    return publicReadLimiter(req, res, next);
+  }
+  return authenticatedManagementQuota(req, res, next);
+});
+app.use('/api/billing', authenticatedManagementQuota);
+app.use('/api/scrape', authenticatedManagementQuota);
+app.use('/api/auth', authRateLimiter);
+app.use('/api/quick-answers', authenticatedManagementQuota);
+app.use('/api/moderate', tokenAuth, widgetLimiter);
+app.use('/api/chatbots', requireAdminKey, adminRateLimiter);
+app.use('/api/lead', requireAdminKey, adminRateLimiter);
 
 app.use('/api/chat', chatRoutes);
 app.use('/api/upsert', upsertRoutes);

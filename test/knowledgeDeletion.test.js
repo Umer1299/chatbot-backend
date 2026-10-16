@@ -38,11 +38,11 @@ test('knowledge deletion endpoint returns an error when PostgreSQL rejects delet
   assert.equal(response.status, 500); assert.equal((await response.json()).success, undefined);
   assert.deepEqual(queries[0].args, ['business-a']);
 });
-test('successful and empty knowledge deletion preserve success response and invalidate RAG cache', async () => {
+test('successful and empty knowledge deletion preserve success response without Redis scans', async () => {
   for (const count of [2, 0]) {
     deletedCount = count;
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/upsert/namespace/bot-a`, { method: 'DELETE' });
     assert.equal(response.status, 200); assert.deepEqual(await response.json(), { success: true });
   }
-  assert.equal(invalidations, 2);
+  assert.equal(invalidations, 0);
 });

@@ -1,23 +1,10 @@
+import { createHash } from 'node:crypto';
 import pool from './pool.js';
 import { getEmbedding } from '../services/aiService.js';
 import { redisClient } from '../services/redis.js';
 
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 200;
-
-async function clearRagCache(pattern, logLabel) {
-  if (!redisClient) return;
-
-  try {
-    const keys = await redisClient.keys(pattern);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
-    console.log(`Cleared RAG cache for ${logLabel}`);
-  } catch (error) {
-    console.warn('Failed to clear RAG cache:', error.message);
-  }
-}
 
 async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) {
   let inserted = 0;
@@ -104,7 +91,6 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
     );
 
     const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, 0);
-    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
 
     return { inserted, skipped };
   } catch (error) {
@@ -122,7 +108,6 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
     const startIndex = existing.rows[0]?.total || 0;
 
     const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, startIndex);
-    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
 
     return { inserted, skipped };
   } catch (error) {
@@ -131,46 +116,55 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
   }
 }
 
-export async function getRelevantChunks(businessId, queryText, namespace, limit = 5) {
-  const cacheKey = `rag:${namespace}:${queryText.substring(0, 40).replace(/\s+/g, '-').toLowerCase()}`;
+async function knowledgeRevision(businessId) {
+  const { rows } = await pool.query('SELECT knowledge_revision FROM businesses WHERE id=$1', [businessId]);
+  const revision = rows[0]?.knowledge_revision;
+  if (revision == null || !/^\d+$/.test(String(revision))) throw new Error('Knowledge revision unavailable');
+  return String(revision);
+}
 
-  if (redisClient) {
-    try {
-      const cached = await redisClient.get(cacheKey);
-      if (cached) return JSON.parse(cached);
-    } catch (error) {
-      console.warn('Redis read failed, using DB fallback:', error.message);
-    }
-  }
-
+// Keep the public call signature; namespace is legacy and never scopes this cache.
+export async function getRelevantChunks(businessId, queryText, _namespace, limit = 5) {
+  const queryHash = createHash('sha256').update(JSON.stringify([queryText, limit])).digest('hex');
   try {
-    const queryEmbedding = await getEmbedding(queryText);
-
-    if (!queryEmbedding) {
-      console.warn('Embedding failed for RAG query');
-      return [];
-    }
-
-    const result = await pool.query(
-      `SELECT content,
-              1 - (embedding <=> $2::vector) AS similarity
-       FROM knowledge_chunks
-       WHERE business_id = $1
-         AND 1 - (embedding <=> $2::vector) > 0.65
-       ORDER BY embedding <=> $2::vector
-       LIMIT $3`,
-      [businessId, JSON.stringify(queryEmbedding), limit],
-    );
-
-    if (redisClient) {
+    let queryEmbedding;
+    // Retry once if knowledge changed while embedding/retrieval was in progress.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const revision = await knowledgeRevision(businessId);
+      const cacheKey = `rag:v2:${businessId}:${revision}:${queryHash}`;
       try {
-        await redisClient.setex(cacheKey, 300, JSON.stringify(result.rows));
+        const cached = await redisClient?.get(cacheKey);
+        if (cached) {
+          const chunks = JSON.parse(cached);
+          if (Array.isArray(chunks) && chunks.length <= limit && chunks.every(chunk =>
+            typeof chunk?.content === 'string' && Number.isFinite(chunk.similarity))) return chunks;
+        }
+      } catch (error) {
+        console.warn('Redis read failed, using DB fallback:', error.message);
+      }
+
+      queryEmbedding ??= await getEmbedding(queryText);
+      if (!queryEmbedding) return [];
+      const result = await pool.query(
+        `SELECT content,
+                1 - (embedding <=> $2::vector) AS similarity
+         FROM knowledge_chunks
+         WHERE business_id = $1
+           AND 1 - (embedding <=> $2::vector) > 0.65
+         ORDER BY embedding <=> $2::vector
+         LIMIT $3`,
+        [businessId, JSON.stringify(queryEmbedding), limit],
+      );
+      if (revision !== await knowledgeRevision(businessId)) continue;
+      try {
+        await redisClient?.setex(cacheKey, 300, JSON.stringify(result.rows));
       } catch (error) {
         console.warn('Redis cache write failed:', error.message);
       }
+      return result.rows;
     }
-
-    return result.rows;
+    // Continuously changing knowledge must not return a stale generation.
+    return [];
   } catch (error) {
     console.error('Failed to fetch relevant chunks:', error.message);
     return [];
@@ -184,7 +178,6 @@ export async function deleteBusinessChunks(businessId) {
       [businessId],
     );
 
-    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
     return result.rowCount;
   } catch (error) {
     console.error('Failed to delete business chunks:', error.message);
