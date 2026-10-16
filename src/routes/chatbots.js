@@ -1,3 +1,5 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
+import { getChatbotSettings, saveChatbotSettings, listChatbotSettings, deleteChatbotSettings } from '../services/chatbotSettings.js';
 import express from 'express';
 import { redisClient } from '../services/redis.js';
 import { requireAdminKey } from '../middleware/adminAuth.js';
@@ -10,17 +12,34 @@ const router = express.Router();
 // All routes require admin key
 router.use(requireAdminKey);
 
-router.get('/:namespace', async (req, res) => {
-  const data = await redisClient.get(`chatbot:${req.params.namespace}`);
-  if (!data) return res.status(404).json({ error: 'Not found' });
-  res.json(JSON.parse(data));
-});
+router.get('/:namespace', asyncHandler(async (req, res) => {
+  try { return res.json(await getChatbotSettings(req.params.namespace)); }
+  catch (error) {
+    if (error.code === 'BOT_SETTINGS_MISSING') return res.status(404).json({ error: 'Not found' });
+    throw error;
+  }
+}));
 
-router.post('/:namespace', async (req, res) => {
+router.post('/:namespace', asyncHandler(async (req, res) => {
   const { namespace } = req.params;
-  const { model = process.env.DEFAULT_MODEL, systemPrompt = 'You are a helpful assistant.', allowedDomains = [] } = req.body;
+  const { model = process.env.DEFAULT_MODEL, systemPrompt = 'You are a helpful assistant.' } = req.body;
+  let allowedDomains = req.body.allowedDomains;
+  if (!Object.hasOwn(req.body, 'allowedDomains')) {
+    try { allowedDomains = (await getChatbotSettings(namespace)).allowedDomains; }
+    catch (error) {
+      if (error.code === 'BOT_SETTINGS_MISSING') {
+        return res.status(400).json({ error: 'allowedDomains is required for new bot settings (use [] for unrestricted access)' });
+      }
+      throw error;
+    }
+  }
   const settings = { model, systemPrompt, allowedDomains, updatedAt: new Date().toISOString() };
-  await redisClient.setex(`chatbot:${namespace}`, 86400 * 30, JSON.stringify(settings));
+  try {
+    await saveChatbotSettings(namespace, settings);
+  } catch (error) {
+    if (error.code === 'INVALID_BOT_SETTINGS') return res.status(400).json({ error: 'allowedDomains must be an array of nonempty strings' });
+    throw error;
+  }
 
   let token = await redisClient.get(`chatbot_namespace_token:${namespace}`);
   if (!token) {
@@ -29,25 +48,18 @@ router.post('/:namespace', async (req, res) => {
     await redisClient.setex(`chatbot_namespace_token:${namespace}`, 86400 * 365, token);
   }
   res.json({ success: true, namespace, settings, token });
-});
+}));
 
-router.get('/', async (req, res) => {
-  const keys = await redisClient.keys('chatbot:*');
-  const chatbots = [];
-  for (const key of keys) {
-    const namespace = key.replace('chatbot:', '');
-    const data = await redisClient.get(key);
-    chatbots.push({ namespace, settings: JSON.parse(data) });
-  }
-  res.json(chatbots);
-});
+router.get('/', asyncHandler(async (req, res) => {
+  res.json(await listChatbotSettings());
+}));
 
-router.delete('/:namespace', async (req, res) => {
+router.delete('/:namespace', asyncHandler(async (req, res) => {
   const { namespace } = req.params;
   const token = await redisClient.get(`chatbot_namespace_token:${namespace}`);
   if (token) await redisClient.del(`chatbot_token:${token}`);
   await redisClient.del(`chatbot_namespace_token:${namespace}`);
-  await redisClient.del(`chatbot:${namespace}`);
+  await deleteChatbotSettings(namespace);
 
   // Remove knowledge base chunks from pgvector
   const bizResult = await pool.query(
@@ -59,6 +71,6 @@ router.delete('/:namespace', async (req, res) => {
   }
 
   res.json({ success: true });
-});
+}));
 
 export default router;

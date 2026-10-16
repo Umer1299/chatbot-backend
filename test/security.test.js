@@ -11,9 +11,13 @@ process.env.ADMIN_API_KEY = 'test-only-admin-key';
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
 const businesses = [A, B].map((id, i) => ({ id, active: true, bubble_user_id: `user-${i}`, bot_id: `bot-${i}`, industry: 'other', plan: 'free' }));
-let calls, sessions, records, jobs, effects, redisFailure;
+let calls, sessions, records, jobs, effects, redisFailure, policies;
 const db = { async query(sql, args = []) {
   const q = sql.replace(/\s+/g, ' ').trim(); calls.push({ q, args });
+  if (q.includes('FROM chatbot_settings')) {
+    const settings = policies.get(args[0]);
+    return { rows: settings ? [{ settings, revision: 'test-policy', deleted: false }] : [] };
+  }
   if (q.startsWith('SELECT') && q.includes('FROM businesses')) {
     const b = businesses.find(b => q.includes('bubble_user_id = $1') ? b.bubble_user_id === args[0] : (/bot_id\s*=\s*\$1/.test(q)) ? b.bot_id === args[0] : b.id === args[0]);
     return { rows: b ? [{ ...b }] : [] };
@@ -95,6 +99,7 @@ async function request(path, method = 'GET', headers = {}, body) {
 }
 beforeEach(() => {
   calls = []; sessions = new Map(); records = []; jobs = []; effects = { messages: 0, sessions: 0, inquiries: 0, knowledge: 0, jobs: 0, webhook: 0, deletions: [] }; redisFailure = false;
+  policies = new Map([['bot-0', { allowedDomains: [] }], ['bot-1', { allowedDomains: [] }]]);
   cache.clear(); cache.set('chatbot_token:public-a', 'bot-0'); cache.set('chatbot_token:public-b', 'bot-1');
   businesses.forEach(b => { b.active = true; b.plan = 'free'; });
 });
@@ -185,7 +190,7 @@ test('chat rejects unauthenticated/wrong-bot requests before inquiry or database
   const body = { botId: 'bot-1', sessionId: 'new', message: 'Please call me' };
   assert.equal((await request('/api/chat', 'POST', {}, body)).status, 401);
   assert.equal((await request('/api/chat', 'POST', widget, body)).status, 403);
-  assert.equal(calls.length, 0); assert.equal(effects.inquiries, 0);
+  assert.ok(calls.every(call => call.q.includes('FROM chatbot_settings'))); assert.equal(effects.inquiries, 0);
 });
 test('foreign session collision is rejected before history, emergency, messages or inquiry side effects', async () => {
   sessions.set('private-b', { id: 'private-b', business_id: B, collected_data: { email: 'private@example.com' } });
@@ -209,7 +214,7 @@ test('new and existing own sessions continue to support normal chat', async () =
 });
 test('malformed chat inputs cannot create sessions', async () => {
   for (const body of [{}, { botId: 'bot-0', sessionId: {}, message: 'hello' }, { botId: 'bot-0', sessionId: 's', message: [] }]) assert.equal((await request('/api/chat', 'POST', widget, body)).status, 400);
-  assert.equal(calls.length, 0);
+  assert.ok(calls.every(call => call.q.includes('FROM chatbot_settings')));
 });
 test('Redis and origin validation failures fail closed', async () => {
   redisFailure = true;
@@ -228,13 +233,11 @@ test('foreign widget header cannot override valid dashboard identity on inquiry 
   const result = await request('/api/inquiries/foreign', 'GET', { ...owner(), 'x-chatbot-token': 'public-b' });
   assert.equal(result.status, 404);
 });
-test('origin denial and domain settings failure stop requests before session/inquiry effects', async () => {
+test('origin denial stops requests before session/inquiry effects', async () => {
   const body = { botId: 'bot-0', sessionId: 's', message: 'hello' };
-  cache.set('chatbot:bot-0', JSON.stringify({ allowedDomains: ['trusted.example'] }));
+  policies.set('bot-0', { allowedDomains: ['trusted.example'] });
   assert.equal((await request('/api/chat', 'POST', { ...widget, origin: 'https://attacker.example' }, body)).status, 403);
-  redisFailure = 'domain';
-  assert.equal((await request('/api/chat', 'POST', widget, body)).status, 503);
-  assert.equal(calls.length, 0); assert.equal(effects.inquiries, 0);
+  assert.ok(calls.every(call => call.q.includes('FROM chatbot_settings'))); assert.equal(effects.inquiries, 0);
 });
 test('public streaming chat keeps SSE response contract after authorization', async () => {
   const response = await fetch(base + '/api/chat?stream=true', { method: 'POST', headers: { ...widget, 'content-type': 'application/json' }, body: JSON.stringify({ botId: 'bot-0', sessionId: 'stream', message: 'hello' }) });

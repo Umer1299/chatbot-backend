@@ -1,4 +1,4 @@
-import { redisClient } from '../services/redis.js';
+import { getChatbotSettings } from '../services/chatbotSettings.js';
 
 function normalizeHostname(value = '') {
   const raw = String(value || '').trim().toLowerCase();
@@ -41,18 +41,12 @@ function isDomainAllowed(requestHost, allowedDomain) {
 
 export async function domainRestriction(req, res, next) {
   const requestHost = getRequestHost(req);
-  if (!requestHost) return next();
 
   const namespace = req.namespace;
 
   try {
-    const settingsRaw = await redisClient.get(`chatbot:${namespace}`);
-    if (!settingsRaw) return next();
-
-    const settings = JSON.parse(settingsRaw);
-    const allowedDomains = Array.isArray(settings.allowedDomains)
-      ? settings.allowedDomains
-      : [];
+    const settings = await getChatbotSettings(namespace);
+    const allowedDomains = settings.allowedDomains;
 
     if (allowedDomains.length === 0) return next();
 

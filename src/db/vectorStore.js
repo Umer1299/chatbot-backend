@@ -188,7 +188,7 @@ export async function deleteBusinessChunks(businessId) {
     return result.rowCount;
   } catch (error) {
     console.error('Failed to delete business chunks:', error.message);
-    return 0;
+    throw error;
   }
 }
 

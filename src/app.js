@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 
 import './agents/registerSaasSoftware.js';
@@ -54,7 +54,7 @@ const widgetLimiter = rateLimit({
   }),
   keyGenerator: (req) => {
     const token = req.headers['x-chatbot-token'] || 'anon';
-    const ip = req.ip;
+    const ip = ipKeyGenerator(req.ip);
     return token + ':' + ip;
   },
   windowMs: 60 * 1000,
@@ -69,7 +69,7 @@ const dashboardLimiter = rateLimit({
   }),
   keyGenerator: (req) => {
     const auth = req.headers.authorization || 'anon';
-    const ip = req.ip;
+    const ip = ipKeyGenerator(req.ip);
     return auth + ':' + ip;
   },
   windowMs: 60 * 1000,
@@ -97,7 +97,7 @@ app.get('/billing/select-plan', (req, res) => {
 });
 
 app.use('/api/chat', widgetLimiter);
-app.use('/api/upsert', widgetLimiter);
+app.use('/api/upsert', dashboardLimiter);
 app.use('/api/leads', dashboardLimiter);
 app.use('/api/inquiries', dashboardLimiter);
 app.use('/api/business', dashboardLimiter);
