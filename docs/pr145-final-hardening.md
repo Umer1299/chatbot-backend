@@ -31,9 +31,15 @@ Importing chat wrappers no longer changes `pool.query`. Recent scoped history an
 
 The existing short-lived inquiry classification is still process-local and is not a durable cross-worker workflow state. Moving it into a database-backed classification model belongs in a later workflow/data-model PR, without restoring global SQL interception.
 
+## Chat session admission
+
+Widget authentication and durable domain validation run before the session gate. The gate loads the current active business and active configuration from PostgreSQL once per request; the inquiry wrapper and chat handler reuse that snapshot instead of trusting the hour-long legacy config cache. Missing/inactive configurations return the existing 404 onboarding response. Disabled bots reach only the existing disabled JSON/SSE response, with zero credits and no session, inquiry, lead or message writes. No new requirement for prompt text or draft state is imposed on previously working active configurations.
+
+Only usable bots reach the primary-key-arbitrated session insert (`ON CONFLICT DO NOTHING`) and scoped read. Concurrent first requests retain one session owner; foreign collisions receive a generic 403 without another business's data. The redundant healthcare session insert is removed. Existing-session continuation, public JSON/SSE, token/domain ordering and query reuse have regression coverage; isolated PostgreSQL CI also exercises concurrent requests on separate database connections. This request snapshot does not serialize an administrator's concurrent configuration edit with an already-admitted chat; requests admitted after the edit load current state.
+
 ## Executed validation and outstanding release gate
 
-Local and clean-install suites passed 91 tests; the dedicated PostgreSQL suite was explicitly skipped locally because no local server was available. CI runs the complete suite against disposable PostgreSQL 16 + pgvector. Final exact CI totals and review status are recorded on PR #145. JavaScript syntax checks, whitespace checks, fresh `npm ci --ignore-scripts --no-audit --no-fund` and clean-install `npm ls --depth=0` are run; no lint script is configured.
+Local and clean-install suites passed 98 tests; the dedicated PostgreSQL suite was explicitly skipped locally because no local server was available. CI runs the complete suite against disposable PostgreSQL 16 + pgvector. Final exact CI totals and review status are recorded on PR #145. JavaScript syntax checks, whitespace checks, fresh `npm ci --ignore-scripts --no-audit --no-fund` and clean-install `npm ls --depth=0` are run; no lint script is configured.
 
 The real database suite now also checks atomic replacement rollback, preserved revisions/data, confirmed partial supplemental commits and sequential retry deduplication. Other tests cover public JSON/SSE, lead saving/classification, inquiry access, cross-business authorization, quota isolation, domain-policy persistence, file/scrape ingestion failure and CORS.
 

@@ -47,18 +47,6 @@ function patchResponse(res, capture) {
   };
 }
 
-async function loadConfig(botId) {
-  const cfg = await pool.query(
-    `SELECT bc.selected_agents, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.bot_id, b.id as business_id, b.plan, b.is_disabled
-     FROM bot_configs bc
-     JOIN businesses b ON bc.business_id = b.id
-     WHERE b.bot_id=$1 AND bc.active=true
-     LIMIT 1`,
-    [botId],
-  );
-  return applyChatEmailPolicy(cfg.rows?.[0] || null);
-}
-
 async function saveInquiry(req, capture, config, options = {}) {
   const { botId, sessionId, message } = req.body || {};
   if (!botId || !sessionId || !message || !config?.business_id) return null;
@@ -89,12 +77,9 @@ router.use(asyncHandler(async (req, res, next) => {
 
   let config = null;
   if (req.method === 'POST' && req.body?.botId && req.body?.sessionId && req.body?.message) {
-    config = await loadConfig(req.body.botId).catch((error) => {
-      console.error('inquiry config load failed:', error.message);
-      return null;
-    });
+    config = applyChatEmailPolicy(req.chatConfig);
 
-    if (config && !config.is_disabled && config.business_id === req.chatSession.business_id) {
+    if (config && !config.is_disabled && config.business_id === req.chatSession?.business_id) {
       const inquiry = await saveInquiry(req, capture, config, { notify: false }).catch((error) => {
         console.error('pre inquiry save failed:', error.message);
         return null;
@@ -104,7 +89,7 @@ router.use(asyncHandler(async (req, res, next) => {
   }
 
   res.on('finish', () => {
-    if (!config || config.is_disabled || config.business_id !== req.chatSession.business_id || res.statusCode >= 400) return;
+    if (!config || config.is_disabled || config.business_id !== req.chatSession?.business_id || res.statusCode >= 400) return;
     saveInquiry(req, capture, config, { notify: true })
       .then((inquiry) => { if (inquiry?.id) rememberInquiryOnlySession(config.business_id, req.body.sessionId); })
       .catch((error) => console.error('post inquiry save failed:', error.message));

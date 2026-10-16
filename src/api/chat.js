@@ -395,18 +395,7 @@ router.post('/', tokenAuth, domainRestriction, requireChatSession, asyncHandler(
   message = sanitizeMessage(message);
   if (message.length < 1) return res.status(400).json({ error: 'Message empty after sanitize' });
 
-  let config;
-  const redisBotKey = `chatbot_config:${req.namespace}`;
-  try { const cached = await redisClient.get(redisBotKey); if (cached) config = JSON.parse(cached); } catch (e) { console.error('Redis cache miss error', e.message); }
-  if (!config) {
-    const cfg = await pool.query(`SELECT bc.system_prompt, bc.selected_agents, bc.selected_model, bc.welcome_message, bc.starter_prompts, bc.is_draft, bc.detected_location, bc.detected_services, b.industry, b.business_name, b.owner_email, b.owner_phone, b.escalation_email, b.primary_color, b.calendly_link, b.availability_slots, b.bot_id, b.id as business_id, b.timezone, b.plan, b.is_disabled, b.disabled_reason FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1`, [botId]);
-    if (!cfg.rows[0]) return res.status(404).json({ error: 'Bot not configured', message: 'Please complete onboarding first' });
-    config = { ...cfg.rows[0], calendlyLink: cfg.rows[0].calendly_link, ownerPhone: cfg.rows[0].owner_phone };
-    try { await redisClient.setex(redisBotKey, 3600, JSON.stringify(config)); } catch (e) { console.error(e.message); }
-  }
-  config = applyChatEmailPolicy(config);
-  if (config?.business_id !== req.chatSession.business_id) return res.status(403).json({ error: 'Invalid bot scope' });
-  if (!config?.business_id) return res.status(500).json({ error: 'Invalid bot config' });
+  const config = applyChatEmailPolicy(req.chatConfig);
   if (config.is_disabled) {
     const disabledMsg = config.disabled_reason || 'This chatbot is temporarily unavailable. Please contact the business directly.';
     const usage = { ...createStaticUsage(disabledMsg, 'disabled'), creditsUsed: 0 };
@@ -414,11 +403,12 @@ router.post('/', tokenAuth, domainRestriction, requireChatSession, asyncHandler(
     return;
   }
 
+  if (config.business_id !== req.chatSession?.business_id) return res.status(403).json({ error: 'Invalid bot scope' });
+
   const triageKeywords = ['chest pain', 'cant breathe', 'cannot breathe', 'difficulty breathing', 'unconscious', 'overdose', 'stroke', 'severe bleeding', 'collapsed', 'heart attack', 'seizure', 'not responsive', 'dying', 'life threatening', 'emergency help', 'ambulance'];
   if (config.industry === 'healthcare' && triageKeywords.some((kw) => message.toLowerCase().includes(kw))) {
     const triageText = `This sounds urgent. Please call emergency services immediately or go to your nearest emergency room. Do not wait for a callback from us. If you need our direct line right now: ${config.owner_phone || config.ownerPhone || 'contact reception directly'}`;
     const usage = createStaticUsage(triageText, 'static-triage');
-    await pool.query("INSERT INTO sessions (id,business_id,current_phase,collected_data,status,started_at,last_activity_at) VALUES ($1,$2,1,'{}','active',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", [sessionId, config.business_id]);
     await Promise.allSettled([saveMessagePair({ sessionId, businessId: config.business_id, userMessage: message, assistantMessage: triageText, phase: 1 }), pool.query("UPDATE sessions SET status = 'escalated', last_activity_at = NOW() WHERE id = $1 AND business_id=$2", [sessionId, config.business_id])]);
     sendUrgentEscalation(config, sessionId, message).catch((e) => console.error(e.message));
     if (isStreaming) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.write('data: {"type":"ready"}\n\n'); res.write(`data: ${JSON.stringify({ text: triageText, token: triageText })}\n\n`); res.write(`data: ${JSON.stringify({ type: 'meta', reply: triageText, creditsUsed: usage.creditsUsed, usage })}\n\n`); res.write('data: [DONE]\n\n'); res.end(); } else res.json({ reply: triageText, creditsUsed: usage.creditsUsed, usage });

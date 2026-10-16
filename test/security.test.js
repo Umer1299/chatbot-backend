@@ -33,7 +33,7 @@ const db = { async query(sql, args = []) {
   }
   if (q.includes('FROM bot_configs')) {
     const b = businesses.find(b => b.bot_id === args[0]);
-    return { rows: b ? [{ ...b, business_id: b.id, selected_agents: [], business_name: 'Example', active: true }] : [] };
+    return { rows: b && b.active && !b.noConfig ? [{ ...b, business_id: b.id, selected_agents: [], business_name: 'Example', active: true }] : [] };
   }
   if (q.includes('FROM scrape_jobs')) {
     assert.match(q, /business_id = \$2/);
@@ -101,7 +101,7 @@ beforeEach(() => {
   calls = []; sessions = new Map(); records = []; jobs = []; effects = { messages: 0, sessions: 0, inquiries: 0, knowledge: 0, jobs: 0, webhook: 0, deletions: [] }; redisFailure = false;
   policies = new Map([['bot-0', { allowedDomains: [] }], ['bot-1', { allowedDomains: [] }]]);
   cache.clear(); cache.set('chatbot_token:public-a', 'bot-0'); cache.set('chatbot_token:public-b', 'bot-1');
-  businesses.forEach(b => { b.active = true; b.plan = 'free'; });
+  businesses.forEach(b => { b.active = true; b.plan = 'free'; b.is_disabled=false; b.noConfig=false; delete b.disabled_reason; });
 });
 
 test('token issuance rejects caller-supplied identity without trusted backend authentication', async () => {
@@ -198,7 +198,7 @@ test('foreign session collision is rejected before history, emergency, messages 
     assert.equal((await request('/api/chat?stream=true', 'POST', widget, { botId: 'bot-0', sessionId: 'private-b', message })).status, 403);
   }
   assert.equal(effects.messages, 0); assert.equal(effects.inquiries, 0); assert.equal(effects.sessions, 0);
-  assert.ok(!calls.some(c => c.q.includes('FROM messages') || c.q.includes('FROM bot_configs')));
+  assert.ok(!calls.some(c => c.q.includes('FROM messages')));
   assert.equal(sessions.get('private-b').business_id, B);
 });
 test('session ownership remains stable across concurrent first requests from two tenants', async () => {
@@ -243,4 +243,37 @@ test('public streaming chat keeps SSE response contract after authorization', as
   const response = await fetch(base + '/api/chat?stream=true', { method: 'POST', headers: { ...widget, 'content-type': 'application/json' }, body: JSON.stringify({ botId: 'bot-0', sessionId: 'stream', message: 'hello' }) });
   assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /text\/event-stream/);
   const stream = await response.text(); assert.match(stream, /data: \[DONE\]/); assert.match(stream, /Hi/);
+});
+
+for (const streaming of [false,true]) {
+  test(`disabled chatbot preserves ${streaming ? 'SSE' : 'JSON'} response without any persistent writes`, async () => {
+    businesses[0].is_disabled=true; businesses[0].disabled_reason='Paused by owner';
+    // A stale enabled cache must not bypass the durable gate.
+    cache.set('chatbot_config:bot-0',JSON.stringify({business_id:A,is_disabled:false}));
+    const response=await fetch(base+`/api/chat?stream=${streaming}`,{method:'POST',headers:{...widget,'content-type':'application/json'},body:JSON.stringify({botId:'bot-0',sessionId:'disabled-new',message:'Please call me about chest pain'})});
+    assert.equal(response.status,200);
+    if(streaming){
+      assert.match(response.headers.get('content-type'),/text\/event-stream/);
+      const body=await response.text();assert.match(body,/"type":"ready"/);assert.match(body,/"isDisabled":true/);assert.match(body,/Paused by owner/);assert.match(body,/data: \[DONE\]/);
+    }else{
+      const body=await response.json();assert.equal(body.reply,'Paused by owner');assert.equal(body.isDisabled,true);assert.equal(body.creditsUsed,0);
+    }
+    assert.equal(sessions.size,0);assert.equal(effects.inquiries,0);assert.equal(effects.messages,0);
+    assert.ok(!calls.some(({q})=>/^(INSERT|UPDATE|DELETE)/.test(q)));
+    assert.equal(calls.filter(({q})=>q.includes('FROM bot_configs')).length,1);
+  });
+  for(const mode of ['inactive','unconfigured']) test(`${mode} bot rejects ${streaming ? 'SSE' : 'JSON'} before any persistent writes`,async()=>{
+    if(mode==='inactive') businesses[0].active=false; else businesses[0].noConfig=true;
+    cache.set('chatbot_config:bot-0',JSON.stringify({business_id:A,is_disabled:false}));
+    const response=await request(`/api/chat?stream=${streaming}`,'POST',widget,{botId:'bot-0',sessionId:'rejected-new',message:'Please call me'});
+    assert.equal(response.status,404);assert.equal(response.body.error,'Bot not configured');
+    assert.equal(sessions.size,0);assert.equal(effects.inquiries,0);assert.equal(effects.messages,0);
+    assert.ok(!calls.some(({q})=>/^(INSERT|UPDATE|DELETE)/.test(q)));
+  });
+}
+test('concurrent first requests to the same valid bot share one owned session',async()=>{
+  const body={botId:'bot-0',sessionId:'same-race',message:'hello'};
+  const results=await Promise.all(Array.from({length:4},()=>request('/api/chat','POST',widget,body)));
+  assert.ok(results.every(r=>r.status===200));assert.equal(sessions.size,1);assert.equal(sessions.get('same-race').business_id,A);
+  assert.equal(calls.filter(({q})=>q.includes('FROM bot_configs')).length,4);
 });

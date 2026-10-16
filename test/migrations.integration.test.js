@@ -5,10 +5,10 @@ import { randomUUID } from 'node:crypto';
 
 // This suite NEVER reads DATABASE_URL or .env. CI provides a disposable database.
 const testUrl = process.env.TEST_DATABASE_URL;
-let client;
+let client, sessionPool;
 const cache = new Map();
 const embedding = [1, ...Array(1535).fill(0)];
-mock.module('../src/db/pool.js', { defaultExport: { query: (...args) => client.query(...args), connect: async () => ({query: (...args) => client.query(...args), release() {}}) } });
+mock.module('../src/db/pool.js', { defaultExport: { query: (...args) => (sessionPool || client).query(...args), connect: async () => ({query: (...args) => client.query(...args), release() {}}) } });
 mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: async () => embedding } });
 mock.module('../src/services/redis.js', { namedExports: { redisClient: {
   get: async key => cache.get(key) || null,
@@ -96,6 +96,38 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
       const retry=await upsertSupplementalChunks(A,['confirmed partial','retry succeeds']);
       assert.equal(retry.inserted,1);assert.equal(retry.skipped,1);
       assert.equal((await client.query("SELECT COUNT(*)::int AS n FROM knowledge_chunks WHERE business_id=$1 AND content='confirmed partial'",[A])).rows[0].n,1);
+    });
+    await t.test('durable chat gate and concurrent session ownership use real PostgreSQL constraints', async () => {
+      const { requireChatSession } = await import('../src/middleware/chatSession.js');
+      sessionPool = new pg.Pool({ connectionString: testUrl, max: 6, options: `-c search_path=${schema},public` });
+      const gate = async (botId, sessionId) => {
+        const req = { namespace: botId, body: {botId, sessionId, message:'hello'} };
+        let status=200, payload, continued=false;
+        const res={status(code){status=code;return this;},json(value){payload=value;return this;}};
+        await requireChatSession(req,res,error=>{if(error)throw error;continued=true;});
+        return {req,status,payload,continued};
+      };
+      try {
+        await client.query('INSERT INTO bot_configs(business_id,active) VALUES ($1,true),($2,true)',[A,B]);
+        await client.query("UPDATE businesses SET is_disabled=true WHERE id=$1",[A]);
+        const disabled=await gate('bot-a','disabled-pg');
+        assert.equal(disabled.req.chatConfig.is_disabled,true);assert.equal(disabled.req.chatSession,undefined);
+        assert.equal((await client.query("SELECT count(*)::int n FROM sessions WHERE id='disabled-pg'")).rows[0].n,0);
+        await client.query('UPDATE businesses SET is_disabled=false,active=false WHERE id=$1',[A]);
+        assert.equal((await gate('bot-a','inactive-pg')).status,404);
+        await client.query('UPDATE businesses SET active=true WHERE id=$1',[A]);
+        await client.query('UPDATE bot_configs SET active=false WHERE business_id=$1',[A]);
+        assert.equal((await gate('bot-a','unconfigured-pg')).status,404);
+        await client.query('UPDATE bot_configs SET active=true WHERE business_id=$1',[A]);
+        const firsts=await Promise.all(Array.from({length:6},()=>gate('bot-a','concurrent-pg')));
+        assert.ok(firsts.every(r=>r.continued && r.req.chatSession.business_id===A));
+        assert.equal((await client.query("SELECT count(*)::int n FROM sessions WHERE id='concurrent-pg'")).rows[0].n,1);
+        assert.equal((await gate('bot-a','concurrent-pg')).req.chatSession.business_id,A);
+        const collision=await gate('bot-b','concurrent-pg');
+        assert.equal(collision.status,403);assert.deepEqual(collision.payload,{error:'Invalid session scope'});
+        assert.equal((await client.query("SELECT business_id FROM sessions WHERE id='concurrent-pg'")).rows[0].business_id,A);
+        assert.equal((await client.query("SELECT count(*)::int n FROM sessions WHERE id IN ('inactive-pg','unconfigured-pg')")).rows[0].n,0);
+      } finally { await sessionPool.end(); sessionPool=undefined; }
     });
     await t.test('reapplying 005/006/007 preserves policies, revisions, historical messages and customer rows', async () => {
       const original = await revision(A);
