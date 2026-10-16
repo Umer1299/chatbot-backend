@@ -68,9 +68,10 @@ const worker = new Worker('file-processing', async (job) => {
     return { success: true, chunksUpserted: result.inserted };
   } catch (err) {
     console.error(`File worker error: ${err.message}`);
-    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', error: 'File processing failed. Please try again.', namespace, businessId: expectedBusinessId, ...(err.result ? { ingestion: err.result } : {}) })).catch(() => {});
+    const finalAttempt = (job.attemptsMade || 0) + 1 >= (job.opts?.attempts || 1);
+    await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: finalAttempt ? 'failed' : 'queued', error: 'File processing failed. Please try again.', namespace, businessId: expectedBusinessId, ...(err.result ? { ingestion: err.result } : {}) })).catch(() => {});
     // Keep source bytes while BullMQ can retry; remove them on the final attempt.
-    if (Number.isInteger(job.opts?.attempts) && job.attemptsMade + 1 >= job.opts.attempts) {
+    if (finalAttempt) {
       await fs.unlink(filePath).catch(() => {});
     }
     throw err;

@@ -29,13 +29,13 @@ test('queued ownership cannot be rebound to a different business', async () => {
   await assert.rejects(processor(forged), /Invalid job business scope/); assert.equal(writes, 0);
 });
 
-test('database/embedding/partial ingestion failures reject BullMQ processing and preserve retry source bytes', async () => {
+test('database/embedding/partial ingestion failures reject BullMQ processing with confirmed counts', async () => {
   for (const result of [{inserted:0,skipped:0,failed:1,status:'failed'}, {inserted:1,skipped:0,failed:1,status:'partial'}]) {
     ingestError=Object.assign(new Error('Ingestion failed'),{result});
     await assert.rejects(processor(job()));
     assert.equal(statuses.at(-1).status,'failed');assert.deepEqual(statuses.at(-1).ingestion,result);
   }
-  assert.equal(marked,0);assert.equal(unlinked,0);
+  assert.equal(marked,0);assert.equal(unlinked,2);
 });
 test('a swallowed zero or partial helper result cannot become a completed job', async () => {
   for (const result of [{inserted:0},{inserted:1,failed:1,status:'partial'}]) {
@@ -52,4 +52,15 @@ test('legitimate empty extraction completes as skipped; forged ownership is chec
 test('source files are removed on the final failed attempt instead of leaking indefinitely', async () => {
   fail=true;const final=job();final.opts={attempts:3};final.attemptsMade=2;
   await assert.rejects(processor(final));assert.equal(unlinked,1);
+});
+
+test('retryable failures stay queued until the final attempt and preserve source bytes', async () => {
+  fail=true;
+  const retry=job();retry.opts={attempts:3};retry.attemptsMade=0;
+  await assert.rejects(processor(retry));
+  assert.equal(statuses.at(-1).status,'queued');assert.equal(unlinked,0);
+  retry.attemptsMade=1;await assert.rejects(processor(retry));
+  assert.equal(statuses.at(-1).status,'queued');assert.equal(unlinked,0);
+  retry.attemptsMade=2;await assert.rejects(processor(retry));
+  assert.equal(statuses.at(-1).status,'failed');assert.equal(unlinked,1);
 });

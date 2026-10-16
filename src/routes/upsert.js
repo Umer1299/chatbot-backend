@@ -68,10 +68,12 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
       await fs.writeFile(filePath, file.buffer);
 
       const jobId = uuidv4();
+      let enqueueAttempted = false;
       try {
         // Publish queued status first: a fast worker must not have its terminal
         // status overwritten by the HTTP request after add() returns.
         await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace, businessId: req.business.businessId }));
+        enqueueAttempted = true;
         await fileQueue.add('process-file', {
           namespace,
           businessId: req.business.businessId,
@@ -79,8 +81,13 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
           originalName: file.originalname,
           mimeType: file.mimetype,
           jobId,
-        });
+        }, { jobId });
       } catch (error) {
+        if (enqueueAttempted) {
+          // Redis may have accepted the job before its acknowledgement was lost.
+          // Keep source bytes and the prepublished/worker status intact.
+          return res.status(503).json({ success: false, acceptanceUnknown: true, jobIds: [...jobIds, jobId], error: 'File queue acknowledgement unavailable. Check job status before retrying.' });
+        }
         await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', namespace, businessId: req.business.businessId, error: 'File queue unavailable. Please retry.' })).catch(() => {});
         await fs.unlink(filePath).catch(() => {});
         throw error;

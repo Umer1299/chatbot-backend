@@ -101,14 +101,15 @@ mock.module('../src/middleware/knowledgeAuth.js', {
 mock.module('../src/queues/fileQueue.js', {
   namedExports: {
     fileQueue: {
-      add: async (name, data) => {
+      add: async (name, data, options) => {
+        assert.equal(options.jobId, data.jobId);
         queued.push(data);
         assert.equal(
           JSON.parse(cache.get(`job:${data.jobId}`)).status,
           'queued',
         );
         if (queueMode === 'reject') throw Error('Queue unavailable');
-        if (queueMode === 'fast-failure')
+        if (queueMode.startsWith('fast-failure'))
           cache.set(
             `job:${data.jobId}`,
             JSON.stringify({
@@ -117,6 +118,7 @@ mock.module('../src/queues/fileQueue.js', {
               businessId: data.businessId,
             }),
           );
+        if (queueMode === 'fast-failure-reject') throw Error('Lost acknowledgement');
       },
     },
   },
@@ -301,7 +303,7 @@ test('queued status is published before worker execution and cannot overwrite fa
   assert.equal(JSON.parse(cache.get(`job:${body.jobIds[0]}`)).status, 'failed');
   await fs.unlink(queued[0].filePath);
 });
-test('file queue failures return non-success and clean the unaccepted source file', async () => {
+test('ambiguous queue acknowledgement returns non-success and preserves an accepted job source', async () => {
   queueMode = 'reject';
   const form = new FormData();
   form.append(
@@ -313,11 +315,28 @@ test('file queue failures return non-success and clean the unaccepted source fil
     method: 'POST',
     body: form,
   });
-  assert.equal(r.status, 500);
-  assert.equal((await r.json()).success, false);
+  assert.equal(r.status, 503);
+  const body = await r.json();
+  assert.equal(body.success, false);
+  assert.equal(body.acceptanceUnknown, true);
+  assert.deepEqual(body.jobIds, [queued[0].jobId]);
   assert.equal(
     JSON.parse(cache.get(`job:${queued[0].jobId}`)).status,
-    'failed',
+    'queued',
   );
-  await assert.rejects(fs.access(queued[0].filePath));
+  await fs.access(queued[0].filePath);
+  await fs.unlink(queued[0].filePath);
+});
+
+test('lost queue acknowledgement cannot overwrite a fast worker terminal status', async () => {
+  queueMode = 'fast-failure-reject';
+  const form = new FormData();
+  form.append('files', new Blob(['file contents'], {type:'text/plain'}), 'test.txt');
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/upsert`, {method:'POST',body:form});
+  assert.equal(response.status,503);
+  const body = await response.json();
+  assert.equal(body.acceptanceUnknown,true);
+  assert.equal(JSON.parse(cache.get(`job:${body.jobIds[0]}`)).status,'failed');
+  await fs.access(queued[0].filePath);
+  await fs.unlink(queued[0].filePath);
 });
