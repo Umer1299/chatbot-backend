@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import express from "express";
+import jwt from "jsonwebtoken";
 mock.module("../src/db/pool.js", { defaultExport: {} });
 const { createAccountAuth } = await import("../src/auth/accountAuth.js");
 const { accountHandler, accountIdentity } =
@@ -851,6 +852,21 @@ test(
             401,
           );
           assert.equal((await call("/api/v1/agencies")).status, 401);
+          const legacyToken = jwt.sign(
+            { businessId: legacy, bubbleUserId: "verified-legacy-subject" },
+            "isolated-legacy-signing-secret",
+            {
+              algorithm: "HS256",
+              issuer: "chatflow-api",
+              audience: "chatflow-dashboard",
+              subject: legacy,
+              expiresIn: "1h",
+            },
+          );
+          const legacyOnly = await fetch(base + "/api/v1/agencies", {
+            headers: { origin: base, authorization: "Bearer " + legacyToken },
+          });
+          assert.equal(legacyOnly.status, 401);
           await db.query(
             "UPDATE chatflow_user SET status='disabled' WHERE id=$1",
             [client.id],
@@ -959,6 +975,49 @@ test(
               })
             ).status,
             403,
+          );
+        },
+      );
+      await t.test(
+        "native session revocation cannot revoke another user's session",
+        async () => {
+          const login = await call("/api/account/sign-in/email", {
+            method: "POST",
+            body: { email: client.email, password: "New-long-passphrase-98!" },
+          });
+          assert.equal(login.status, 200);
+          const cookie = login.headers
+            .getSetCookie()
+            .map((c) => c.split(";")[0])
+            .join("; ");
+          const ownerSession = await call("/api/account/get-session", {
+            cookie: owner.cookie,
+          });
+          assert.equal(ownerSession.status, 200);
+          await call("/api/account/revoke-session", {
+            method: "POST",
+            cookie,
+            body: { token: ownerSession.body.session.token },
+          });
+          assert.equal(
+            (await call("/api/account/get-session", { cookie: owner.cookie }))
+              .status,
+            200,
+          );
+          const ownSession = await call("/api/account/get-session", { cookie });
+          assert.equal(
+            (
+              await call("/api/account/revoke-session", {
+                method: "POST",
+                cookie,
+                body: { token: ownSession.body.session.token },
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (await call("/api/v1/businesses", { cookie })).status,
+            401,
           );
         },
       );

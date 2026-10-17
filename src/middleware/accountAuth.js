@@ -79,6 +79,7 @@ export function accountIdentity(getAuth = getAccountAuth) {
   return async (req, res, next) => {
     try {
       const auth = getAuth();
+      req.headers["x-chatflow-client-ip"] = req.ip;
       checkAccountOrigin(req, auth);
       const identity = await readAccountIdentity(auth, req.headers);
       // New namespace only: never use req.business/req.auth from legacy JWTs.

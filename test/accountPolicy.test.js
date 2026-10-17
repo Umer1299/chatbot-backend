@@ -106,6 +106,7 @@ test("new identity comes from live library session lookup, never client-supplied
     options: { trustedOrigins: [] },
     api: {
       getSession: async (args) => {
+        assert.equal(args.headers.get("x-chatflow-client-ip"), "203.0.113.1");
         assert.deepEqual(args.query, {
           disableCookieCache: true,
           disableRefresh: true,
@@ -119,7 +120,8 @@ test("new identity comes from live library session lookup, never client-supplied
   };
   const req = {
     method: "GET",
-    headers: {},
+    headers: { "x-chatflow-client-ip": "forged" },
+    ip: "203.0.113.1",
     body: { userId: "attacker", role: "owner" },
   };
   let error;
