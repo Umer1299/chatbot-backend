@@ -40,11 +40,17 @@ test(
     const modelCalls = [],
       ragCache = new Map();
     let redisDown = false,
-      embeddingDown = false;
+      embeddingDown = false,
+      duringCompletion = null;
     const fakeEmbed = async () =>
       embeddingDown ? null : [1, ...Array(1535).fill(0)];
     const fakeComplete = async (input) => {
       modelCalls.push(input);
+      if (duringCompletion) {
+        const action = duringCompletion;
+        duringCompletion = null;
+        await action();
+      }
       return input.systemPrompt.includes("Sales assistant")
         ? "Sales response"
         : "Support response";
@@ -1575,6 +1581,26 @@ test(
             403,
           );
           assert.equal((await chat(sales, "new-token", "Hello")).status, 200);
+          duringCompletion = async () => {
+            const rotatedDuringGeneration = await call(
+              sales.root + "/deployments/" + sales.deployment + "/rotate",
+              { method: "POST", cookie: owner.cookie, body: {} },
+            );
+            assert.equal(rotatedDuringGeneration.status, 200);
+            sales.token = rotatedDuringGeneration.body.token;
+          };
+          assert.equal(
+            (await chat(sales, "in-flight-revocation", "Hello")).status,
+            403,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_chat_sessions WHERE id='in-flight-revocation'",
+              )
+            ).rows[0].n,
+            0,
+          );
           assert.equal(
             (
               await call(sales.root, {
@@ -1613,6 +1639,7 @@ test(
             "new-origin",
             "paused-agent",
             "revoked",
+            "in-flight-revocation",
           ])
             assert.equal(
               (
@@ -1787,6 +1814,32 @@ test(
             200,
           );
           assert.equal((await readKnowledge(sales)).length, 0);
+          const simultaneous = await Promise.all([
+            add(sales, "retry", "One retry-safe source."),
+            add(sales, "retry", "One retry-safe source."),
+          ]);
+          assert.deepEqual(
+            simultaneous.map((r) => r.status).sort(),
+            [200, 201],
+          );
+          const retryRows = await db.query(
+            `SELECT s.id,count(c.id)::int AS chunks FROM agent_knowledge_sources s
+             JOIN agent_knowledge_chunks c ON c.source_id=s.id AND c.agent_id=s.agent_id
+             WHERE s.business_id=$1 AND s.agent_id=$2 AND s.source_key='retry'
+             GROUP BY s.id`,
+            [business.id, sales.id],
+          );
+          assert.equal(retryRows.rows.length, 1);
+          assert.equal(retryRows.rows[0].chunks, 1);
+          assert.equal(
+            (
+              await call(sales.root + "/knowledge/" + retryRows.rows[0].id, {
+                method: "DELETE",
+                cookie: owner.cookie,
+              })
+            ).status,
+            200,
+          );
           assert.ok(
             (await readKnowledge(support)).some((row) =>
               row.content.includes("Support returns"),

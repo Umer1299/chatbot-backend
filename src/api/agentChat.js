@@ -137,6 +137,33 @@ export function createAgentChatRouter({
         throw Object.assign(new Error("Model unavailable"), { status: 502 });
       // Session, message pair, lead and inquiry either commit together or not at all.
       await inTransaction(async (client) => {
+        // Generation happens outside the transaction. Recheck mutable admission
+        // state under row locks before committing a reply: a rotation, pause or
+        // model deactivation during generation must revoke this in-flight write.
+        const ready = await client.query(
+          `SELECT a.id FROM agents a JOIN businesses b ON b.id=a.business_id
+          JOIN agent_configs c ON c.agent_id=a.id AND c.business_id=a.business_id
+          JOIN model_configs m ON m.model_id=c.model_id AND m.provider=c.provider
+          WHERE a.id=$1 AND a.business_id=$2 AND a.status='active' AND b.active=true
+          AND c.status='active' AND length(trim(c.system_prompt))>0 AND m.is_active=true
+          AND c.provider=$3 AND c.model_id=$4
+          FOR SHARE OF a,b,c,m`,
+          [scope.agent_id, scope.business_id, scope.provider, scope.model_id],
+        );
+        if (!ready.rows[0]) throw denied();
+        const credential = await client.query(
+          `SELECT id FROM website_deployments WHERE id=$1 AND business_id=$2
+          AND agent_id=$3 AND credential_hash=$4 AND status='active'
+          AND allowed_origins @> $5::jsonb FOR SHARE`,
+          [
+            scope.deployment_id,
+            scope.business_id,
+            scope.agent_id,
+            hash,
+            JSON.stringify([origin.origin]),
+          ],
+        );
+        if (!credential.rows[0]) throw denied();
         await client.query(
           `INSERT INTO agent_chat_sessions(id,business_id,agent_id,deployment_id) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`,
           [sessionId, scope.business_id, scope.agent_id, scope.deployment_id],
