@@ -17,6 +17,7 @@ export async function completeAgent({
       model: apiModelId,
       max_tokens,
       temperature: settings.temperature ?? 0.7,
+      ...(settings.top_p === undefined ? {} : { top_p: settings.top_p }),
       messages: [{ role: "system", content: systemPrompt }, ...messages],
     });
     return answer.choices[0].message.content;
@@ -30,6 +31,7 @@ export async function completeAgent({
       model: apiModelId,
       max_tokens,
       temperature: Math.min(1, settings.temperature ?? 0.7),
+      ...(settings.top_p === undefined ? {} : { top_p: settings.top_p }),
       system: systemPrompt,
       messages,
     });

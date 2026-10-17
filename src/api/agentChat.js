@@ -189,11 +189,17 @@ export function createAgentChatRouter({
             ],
           );
         const lead = detectLead(message);
+        const selected = new Set(scope.lead_capture?.fields || []);
+        const captured = {
+          name: selected.has("name") ? lead.contactInfo.name : null,
+          email: selected.has("email") ? lead.contactInfo.email : null,
+          phone: selected.has("phone") ? lead.contactInfo.phone : null,
+        };
         if (
           scope.lead_capture?.enabled &&
           scope.capabilities?.includes("lead_capture") &&
           lead.isLead &&
-          (lead.contactInfo.email || lead.contactInfo.phone)
+          (captured.name || captured.email || captured.phone)
         ) {
           await client.query(
             `INSERT INTO agent_leads(session_id,business_id,agent_id,deployment_id,full_name,email,phone,source_message)
@@ -204,9 +210,9 @@ export function createAgentChatRouter({
               scope.business_id,
               scope.agent_id,
               scope.deployment_id,
-              lead.contactInfo.name,
-              lead.contactInfo.email,
-              lead.contactInfo.phone,
+              captured.name,
+              captured.email,
+              captured.phone,
               message,
             ],
           );

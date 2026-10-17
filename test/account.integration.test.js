@@ -1271,7 +1271,7 @@ test(
       await t.test(
         "Phase 3B: two website agents have isolated prompts, knowledge, conversations and outcomes",
         async () => {
-          const make = async (name, purpose, prompt, lead) => {
+          const make = async (name, purpose, prompt, lead, fields = ["name", "email", "phone"]) => {
             const a = await call(`/api/v1/businesses/${business.id}/agents`, {
               method: "POST",
               cookie: owner.cookie,
@@ -1285,7 +1285,7 @@ test(
               system_prompt: prompt,
               lead_capture: {
                 enabled: lead,
-                fields: ["name", "email", "phone"],
+                fields,
               },
               capabilities: lead ? ["lead_capture"] : [],
             };
@@ -1337,6 +1337,7 @@ test(
               "lead_generation",
               "Sales assistant",
               true,
+              ["email"],
             ),
             support = await make(
               "Support",
@@ -1464,6 +1465,46 @@ test(
               .leads.length,
             1,
           );
+          const emailLead = (
+            await call(sales.root + "/leads", { cookie: owner.cookie })
+          ).body.leads[0];
+          assert.equal(emailLead.email, "alex@example.test");
+          assert.equal(emailLead.full_name, null);
+          assert.equal(emailLead.phone, null);
+          assert.equal(
+            (await chat(sales, "unselected-name", "Alex Customer wants pricing"))
+              .status,
+            200,
+          );
+          assert.equal(
+            (await call(sales.root + "/leads", { cookie: owner.cookie })).body
+              .leads.length,
+            1,
+          );
+          const currentConfig = await call(sales.root + "/config", {
+            cookie: owner.cookie,
+          });
+          const nameConfig = await call(sales.root + "/config", {
+            method: "PUT",
+            cookie: owner.cookie,
+            body: {
+              ...configBody(currentConfig.body.config.version),
+              system_prompt: "Sales assistant",
+              lead_capture: { enabled: true, fields: ["name"] },
+            },
+          });
+          assert.equal(nameConfig.status, 200, JSON.stringify(nameConfig.body));
+          assert.equal(
+            (await chat(sales, "name-only", "Alex Customer wants pricing"))
+              .status,
+            200,
+          );
+          const namedLead = (
+            await call(sales.root + "/leads", { cookie: owner.cookie })
+          ).body.leads.find((row) => row.session_id === "name-only");
+          assert.equal(namedLead.full_name, "Alex Customer");
+          assert.equal(namedLead.email, null);
+          assert.equal(namedLead.phone, null);
           assert.equal(
             (await call(support.root + "/leads", { cookie: owner.cookie })).body
               .leads.length,
