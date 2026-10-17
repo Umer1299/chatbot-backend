@@ -34,7 +34,7 @@ export function createAgentRouter({ db = pool } = {}) {
       await client.query("SELECT id FROM businesses WHERE id=$1 FOR SHARE", [
         b.id,
       ]);
-      await businessAccess(req.accountUser.id, b.id, {
+      return businessAccess(req.accountUser.id, b.id, {
         db: client,
         edit: true,
       });

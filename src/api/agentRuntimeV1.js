@@ -51,8 +51,7 @@ async function mutation(req, client) {
     [b.agency_id],
   );
   await client.query("SELECT id FROM businesses WHERE id=$1 FOR SHARE", [b.id]);
-  await businessAccess(req.accountUser.id, b.id, { db: client, edit: true });
-  return b;
+  return businessAccess(req.accountUser.id, b.id, { db: client, edit: true });
 }
 async function deployment(req, client, lock = false) {
   businessId(req.params.deploymentId);
