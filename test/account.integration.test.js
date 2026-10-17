@@ -1406,7 +1406,7 @@ test(
             (
               await db.query(
                 "SELECT id,knowledge_revision FROM agents WHERE id=ANY($1::uuid[])",
-                [sales.id, support.id],
+                [[sales.id, support.id]],
               )
             ).rows;
           const initialRevisions = await revisions();
@@ -1729,7 +1729,7 @@ test(
             (row) => row.id === sales.id,
           ).knowledge_revision;
           await db.query(
-            `CREATE FUNCTION reject_agent_chunk() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'isolated write failure'; END$$`,
+            `CREATE FUNCTION reject_agent_chunk() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'isolated write failure'; END;$$`,
           );
           await db.query(
             "CREATE TRIGGER reject_agent_chunk BEFORE INSERT ON agent_knowledge_chunks FOR EACH ROW EXECUTE FUNCTION reject_agent_chunk()",
@@ -2134,7 +2134,7 @@ test(
         },
       );
       await t.test(
-        "008/009/010 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
+        "008/009/010/011 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
         async () => {
           for (const file of [
             "008_account_auth.sql",
