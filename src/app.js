@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { createCorsPolicy } from './middleware/corsPolicy.js';
+import { configureTrustedProxy } from './middleware/trustedProxy.js';
 import dotenv from 'dotenv';
 import { accountHandler, accountIdentity } from './middleware/accountAuth.js';
 import agenciesV1 from './api/agenciesV1.js';
@@ -29,6 +30,7 @@ import { globalErrorHandler } from './middleware/errorHandler.js';
 dotenv.config();
 
 const app = express();
+configureTrustedProxy(app);
 
 const corsPolicy = createCorsPolicy({
   widgetOriginsRaw: process.env.WIDGET_ALLOWED_ORIGINS || '',

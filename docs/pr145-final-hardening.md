@@ -1,5 +1,7 @@
 # PR #145 final hardening and release gate
 
+**Scope note:** This document records the security baseline through 4bc42d9. The same working branch now also contains the separately requested Phase 2 user/agency/business foundation. See [the current Phase 2 contract and 008/009 rollout](phase2-identity-foundation.md); statements below about features not implemented refer to the earlier security phase.
+
 This PR secures the existing business boundary. The future dashboard is custom-coded Next.js/React/TypeScript; Bubble remains a private legacy bridge/export integration only. No custom login, agency hierarchy, channels or dashboard were implemented. No production credentials, data, migrations or deployments were touched.
 
 ## Ingestion outcomes and data preservation

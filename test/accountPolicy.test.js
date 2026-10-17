@@ -11,12 +11,15 @@ const valid = {
   ACCOUNT_AUTH_SECRET: secret,
   ACCOUNT_TRUSTED_ORIGINS: "https://app.example.test,https://api.example.test",
   NODE_ENV: "production",
+  ACCOUNT_PROXY_MODE: "direct",
 };
 
 test("account configuration requires a separate secret and exact HTTPS production origins", () => {
   assert.equal(accountSettings(valid).production, true);
   for (const changes of [
     { ACCOUNT_AUTH_SECRET: "" },
+    { ACCOUNT_PROXY_MODE: undefined },
+    { ACCOUNT_PROXY_MODE: "trusted", TRUSTED_PROXY_CIDRS: "" },
     { ACCOUNT_TRUSTED_ORIGINS: "" },
     { ACCOUNT_TRUSTED_ORIGINS: "https://*.example.test" },
     { ACCOUNT_AUTH_URL: "http://api.example.test" },

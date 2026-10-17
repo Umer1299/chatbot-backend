@@ -1,5 +1,7 @@
 # Security migration readiness and rollout
 
+**Scope note:** This document records the security baseline through 4bc42d9. The same working branch now also contains the separately requested Phase 2 user/agency/business foundation. See [the current Phase 2 contract and 008/009 rollout](phase2-identity-foundation.md); statements below about features not implemented refer to the earlier security phase.
+
 Scope: migrations 005, 006 and the cache fix's additive migration 007. No production migrations, deployments, credentials or customer-data cleanup are part of this work.
 
 ## Ordering and integrity

@@ -1,5 +1,7 @@
 # Authentication and tenant-boundary audit
 
+**Scope note:** This document records the security baseline through 4bc42d9. The same working branch now also contains the separately requested Phase 2 user/agency/business foundation. See [the current Phase 2 contract and 008/009 rollout](phase2-identity-foundation.md); statements below about features not implemented refer to the earlier security phase.
+
 **Dashboard decision:** the future dashboard is custom-coded Next.js/React/TypeScript; Bubble is legacy only. See [authentication transition](custom-dashboard-auth-transition.md) and [migration readiness](security-migration-readiness.md).
 
 Scope: `feature/codex-update` at `e78715d8387e642b6b75fd02e7369847a996e156`.

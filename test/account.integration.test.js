@@ -74,6 +74,8 @@ test(
         options: `-c search_path=${schema},public`,
       });
       const app = express();
+      // This loopback peer represents the platform-sanitized ingress in this test.
+      app.set("trust proxy", ["127.0.0.1/32"]);
       server = await new Promise((resolve) => {
         const s = app.listen(0, "127.0.0.1", () => resolve(s));
       });
@@ -246,6 +248,39 @@ test(
             );
           assert.ok(statuses.includes(401));
           assert.equal(statuses.at(-1), 429);
+        },
+      );
+      await t.test(
+        "native auth quotas isolate clients behind the configured trusted ingress",
+        async () => {
+          const request = async (ip, password, spoof) => {
+            const response = await fetch(base + "/api/account/sign-in/email", {
+              method: "POST",
+              headers: {
+                origin: base,
+                "content-type": "application/json",
+                "x-forwarded-for": ip,
+                "x-chatflow-client-ip": spoof,
+              },
+              body: JSON.stringify({ email: owner.email, password }),
+            });
+            await response.text();
+            return response.status;
+          };
+          for (let i = 0; i < 5; i++)
+            await request(
+              "198.51.100.10",
+              "wrong-password-attempt",
+              "forged-" + i,
+            );
+          assert.equal(
+            await request("198.51.100.10", owner.password, "another-forged"),
+            429,
+          );
+          assert.equal(
+            await request("198.51.100.11", owner.password, "another-forged"),
+            200,
+          );
         },
       );
       await t.test(

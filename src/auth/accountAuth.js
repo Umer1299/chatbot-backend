@@ -2,8 +2,14 @@ import { betterAuth } from "better-auth";
 import { organization } from "better-auth/plugins";
 import { APIError } from "better-auth/api";
 import { parseHttpOrigin } from "../middleware/corsPolicy.js";
+import { trustedProxySettings } from "../middleware/trustedProxy.js";
 
 export function accountSettings(env = process.env) {
+  const proxy = trustedProxySettings(env);
+  if (env.NODE_ENV === "production" && !proxy.mode)
+    throw new Error(
+      "Production account authentication requires explicit proxy mode",
+    );
   const base = parseHttpOrigin(env.ACCOUNT_AUTH_URL);
   const origins = (env.ACCOUNT_TRUSTED_ORIGINS || "")
     .split(",")
