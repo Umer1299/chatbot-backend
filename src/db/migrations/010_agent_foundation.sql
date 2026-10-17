@@ -30,7 +30,7 @@ BEGIN
     starter_prompts jsonb NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(starter_prompts)='array'),
     provider text CHECK (provider IN ('openai','anthropic')),
     model_id text REFERENCES model_configs(model_id) ON DELETE RESTRICT,
-    temperature numeric NOT NULL DEFAULT 0.7 CHECK (temperature BETWEEN 0 AND 2),
+    temperature double precision NOT NULL DEFAULT 0.7 CHECK (temperature BETWEEN 0 AND 2),
     generation_settings jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(generation_settings)='object'),
     capabilities jsonb NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(capabilities)='array'),
     lead_capture jsonb NOT NULL DEFAULT '{"enabled":false,"fields":[]}' CHECK (jsonb_typeof(lead_capture)='object'),

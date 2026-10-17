@@ -59,6 +59,41 @@ test(
         `INSERT INTO bot_configs(business_id,active) VALUES ($1,true)`,
         [legacy],
       );
+      await admin.query(
+        "INSERT INTO sessions(id,business_id) VALUES ('legacy-history',$1)",
+        [legacy],
+      );
+      await admin.query(
+        "INSERT INTO messages(session_id,business_id,role,content,agent_id) VALUES ('legacy-history',$1,'user','Retain customer history','legacy-phase-label')",
+        [legacy],
+      );
+      await admin.query(
+        "INSERT INTO knowledge_chunks(business_id,content) VALUES ($1,'Retain customer knowledge')",
+        [legacy],
+      );
+      await admin.query(
+        "INSERT INTO leads(business_id,session_id,industry) VALUES ($1,'legacy-history','other')",
+        [legacy],
+      );
+      await admin.query(
+        "INSERT INTO inquiries(business_id,session_id) VALUES ($1,'legacy-history')",
+        [legacy],
+      );
+      const historyTables = [
+        "businesses",
+        "bot_configs",
+        "sessions",
+        "messages",
+        "knowledge_chunks",
+        "leads",
+        "inquiries",
+        "chatbot_settings",
+      ];
+      const historicSnapshot = {};
+      for (const table of historyTables)
+        historicSnapshot[table] = (
+          await admin.query(`SELECT * FROM ${table}`)
+        ).rows;
       for (const file of [
         "008_account_auth.sql",
         "009_agency_business_access.sql",
@@ -69,6 +104,12 @@ test(
             new URL("../src/db/migrations/" + file, import.meta.url),
             "utf8",
           ),
+        );
+      for (const table of historyTables)
+        assert.deepEqual(
+          (await admin.query(`SELECT * FROM ${table}`)).rows,
+          historicSnapshot[table],
+          table + " preserved by identity/agent migrations",
         );
       db = new pg.Pool({
         connectionString: testUrl,
@@ -1138,6 +1179,45 @@ test(
             ).rows,
             before,
           );
+        },
+      );
+      await t.test(
+        "legacy JWTs and inactive businesses cannot use agent APIs",
+        async () => {
+          const response = await fetch(base + agentsPath(), {
+            headers: {
+              origin: base,
+              authorization:
+                "Bearer " +
+                jwt.sign(
+                  { business_id: business.id, sub: business.id },
+                  "legacy-test-key",
+                ),
+            },
+          });
+          assert.equal(response.status, 401);
+          await db.query("UPDATE businesses SET active=false WHERE id=$1", [
+            second.id,
+          ]);
+          try {
+            for (const method of ["GET", "POST"])
+              assert.equal(
+                (
+                  await call(`/api/v1/businesses/${second.id}/agents`, {
+                    cookie: owner.cookie,
+                    method,
+                    ...(method === "POST"
+                      ? { body: { name: "Inactive" } }
+                      : {}),
+                  })
+                ).status,
+                404,
+              );
+          } finally {
+            await db.query("UPDATE businesses SET active=true WHERE id=$1", [
+              second.id,
+            ]);
+          }
         },
       );
       await t.test(
