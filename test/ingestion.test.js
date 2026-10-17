@@ -103,6 +103,12 @@ mock.module("../src/queues/fileQueue.js", {
     fileQueue: {
       getJob: async (id) => {
         if (
+          queueMode === "second-preflight-outage" &&
+          queued.length >= 1 &&
+          !queued.some((job) => job.jobId === id)
+        )
+          throw Error("Queue unavailable");
+        if (
           queueMode === "preflight-outage" ||
           (queueMode === "reject" && queued.some((job) => job.jobId === id))
         )
@@ -117,6 +123,8 @@ mock.module("../src/queues/fileQueue.js", {
       add: async (name, data, options) => {
         assert.equal(options.jobId, data.jobId);
         queued.push(data);
+        if (queueMode === "second-reject" && queued.length === 2)
+          throw Error("Queue unavailable");
         assert.equal(
           JSON.parse(cache.get(`job:${data.jobId}`)).status,
           "queued",
@@ -412,3 +420,34 @@ test("confirmed acceptance after lost acknowledgement preserves source and retur
   await fs.access(queued[0].filePath);
   await fs.unlink(queued[0].filePath);
 });
+
+for (const mode of ["second-reject", "second-preflight-outage"])
+  test(`multi-file ${mode} returns prior accepted IDs without removing their sources`, async () => {
+    queueMode = mode;
+    const form = new FormData();
+    form.append("files", new Blob(["first customer upload"]), "first.txt");
+    form.append("files", new Blob(["second customer upload"]), "second.txt");
+    const response = await fetch(
+      `http://127.0.0.1:${server.address().port}/upsert`,
+      { method: "POST", body: form },
+    );
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.success, false);
+    assert.equal(body.partial, true);
+    assert.deepEqual(body.jobIds, [queued[0].jobId]);
+    assert.equal(
+      JSON.parse(cache.get(`job:${queued[0].jobId}`)).status,
+      "queued",
+    );
+    await fs.access(queued[0].filePath);
+    if (mode === "second-reject") {
+      assert.equal(queued.length, 2);
+      assert.equal(
+        JSON.parse(cache.get(`job:${queued[1].jobId}`)).status,
+        "failed",
+      );
+      await assert.rejects(fs.access(queued[1].filePath));
+    } else assert.equal(queued.length, 1);
+    await fs.unlink(queued[0].filePath);
+  });

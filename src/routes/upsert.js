@@ -20,6 +20,7 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
   const namespace = req.namespace;
   const text = req.body.text;
   const files = req.files || [];
+  const jobIds = [];
 
   try {
     if (text != null && typeof text !== 'string') return res.status(400).json({ error: 'text must be a string' });
@@ -59,7 +60,6 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
 
     if (!files.length) return res.status(400).json({ error: 'No files or text provided' });
 
-    const jobIds = [];
     for (const file of files) {
       const jobId = uuidv4();
       // Read-only preflight before writing bytes prevents persistent queue
@@ -100,7 +100,7 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
   } catch (err) {
     console.error('Upsert error:', err);
     console.error('[upsert]', req.method, req.path, err.message);
-    res.status(err.status || 500).json(ingestionErrorPayload(err));
+    res.status(err.status || 500).json({ ...ingestionErrorPayload(err), ...(jobIds.length ? { partial: true, jobIds } : {}) });
   }
 }));
 
