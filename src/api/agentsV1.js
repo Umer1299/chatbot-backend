@@ -13,6 +13,7 @@ import {
   configInput,
   validate,
 } from "../services/agentValidation.js";
+import { agentModelAllowed } from "../services/agentModelAccess.js";
 const conflict = () =>
   Object.assign(new Error("Agent state or configuration version conflict"), {
     status: 409,
@@ -99,15 +100,15 @@ export function createAgentRouter({ db = pool } = {}) {
     asyncHandler(async (req, res) => {
       const data = validate(agentPatch, req.body);
       const row = await inTransaction(async (client) => {
-        await access(req, client, true);
+        const business = await access(req, client, true);
         const current = await agent(req, client, true);
         if (current.status === "archived") throw conflict();
         if (data.status === "active") {
           const { rows } = await client.query(
-            `SELECT c.agent_id FROM agent_configs c JOIN model_configs m ON m.model_id=c.model_id AND m.provider=c.provider AND m.is_active=true WHERE c.agent_id=$1 AND c.business_id=$2 AND c.status='active'`,
+            `SELECT m.min_plan FROM agent_configs c JOIN model_configs m ON m.model_id=c.model_id AND m.provider=c.provider AND m.is_active=true WHERE c.agent_id=$1 AND c.business_id=$2 AND c.status='active'`,
             [current.id, current.business_id],
           );
-          if (!rows.length) throw conflict();
+          if (!rows.length || !agentModelAllowed(business.plan, rows[0].min_plan)) throw conflict();
         }
         const keys = Object.keys(data);
         return (
@@ -142,15 +143,15 @@ export function createAgentRouter({ db = pool } = {}) {
     asyncHandler(async (req, res) => {
       const { expected_version, ...data } = validate(configInput, req.body);
       const row = await inTransaction(async (client) => {
-        await access(req, client, true);
+        const business = await access(req, client, true);
         const current = await agent(req, client, true);
         if (current.status === "archived") throw conflict();
         if (data.model_id) {
           const result = await client.query(
-            "SELECT model_id FROM model_configs WHERE model_id=$1 AND provider=$2 AND is_active=true FOR SHARE",
+            "SELECT model_id,min_plan FROM model_configs WHERE model_id=$1 AND provider=$2 AND is_active=true FOR SHARE",
             [data.model_id, data.provider],
           );
-          if (!result.rows.length)
+          if (!result.rows.length || !agentModelAllowed(business.plan, result.rows[0].min_plan))
             throw Object.assign(new Error("Unsupported model/provider"), {
               status: 400,
             });

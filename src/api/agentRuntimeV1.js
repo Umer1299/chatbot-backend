@@ -16,6 +16,7 @@ import {
   validateOrigins,
 } from "../services/websiteDeployment.js";
 import { getEmbedding } from "../services/aiService.js";
+import { agentModelAllowed } from "../services/agentModelAccess.js";
 const bad = () => Object.assign(new Error("Invalid request"), { status: 400 });
 const clash = () =>
   Object.assign(new Error("Agent not ready"), { status: 409 });
@@ -51,6 +52,7 @@ async function mutation(req, client) {
   );
   await client.query("SELECT id FROM businesses WHERE id=$1 FOR SHARE", [b.id]);
   await businessAccess(req.accountUser.id, b.id, { db: client, edit: true });
+  return b;
 }
 async function deployment(req, client, lock = false) {
   businessId(req.params.deploymentId);
@@ -171,17 +173,17 @@ export function createAgentRuntimeRouter({
           ? undefined
           : validateOrigins(body.allowed_origins);
       const result = await inTransaction(async (client) => {
-        await mutation(req, client);
+        const business = await mutation(req, client);
         const agent = await check(req, client);
         const current = await deployment(req, client, true);
         if (body.status === "active") {
           if (agent.status !== "active") throw clash();
           const valid = await client.query(
-            `SELECT c.agent_id FROM agent_configs c JOIN model_configs m ON m.model_id=c.model_id
+            `SELECT m.min_plan FROM agent_configs c JOIN model_configs m ON m.model_id=c.model_id
           WHERE c.agent_id=$1 AND c.business_id=$2 AND c.status='active' AND m.provider=c.provider AND m.is_active=true`,
             [agent.id, req.params.businessId],
           );
-          if (!valid.rows.length) throw clash();
+          if (!valid.rows.length || !agentModelAllowed(business.plan, valid.rows[0].min_plan)) throw clash();
         }
         const r = await client.query(
           `UPDATE website_deployments SET status=$1,allowed_origins=$2::jsonb,updated_at=now() WHERE id=$3 AND business_id=$4 AND agent_id=$5 RETURNING ${view}`,

@@ -42,7 +42,7 @@ export async function businessAccess(
   businessId(id);
   const { rows } = await db.query(
     `SELECT b.id,b.business_name,b.industry,b.website_url,b.bot_id,b.owner_email,
-      b.owner_phone,b.timezone,b.primary_color,b.active,ab.agency_id,
+      b.owner_phone,b.timezone,b.primary_color,b.active,b.plan,ab.agency_id,
       am.role AS agency_role,bm.role AS business_role
     FROM businesses b JOIN agency_businesses ab ON ab.business_id=b.id
     LEFT JOIN chatflow_member am ON am."organizationId"=ab.agency_id AND am."userId"=$2

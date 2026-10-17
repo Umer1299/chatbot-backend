@@ -20,7 +20,7 @@ export async function completeAgent({
       ...(settings.top_p === undefined ? {} : { top_p: settings.top_p }),
       messages: [{ role: "system", content: systemPrompt }, ...messages],
     });
-    return answer.choices[0].message.content;
+    return { reply: answer.choices[0].message.content, rawUsage: answer.usage };
   }
   if (provider === "anthropic") {
     if (!process.env.ANTHROPIC_API_KEY)
@@ -35,7 +35,7 @@ export async function completeAgent({
       system: systemPrompt,
       messages,
     });
-    return answer.content.find((c) => c.type === "text")?.text || "";
+    return { reply: answer.content.find((c) => c.type === "text")?.text || "", rawUsage: answer.usage };
   }
   throw new Error("Unsupported provider");
 }

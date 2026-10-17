@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import express from "express";
+import cors from "cors";
+import { createCorsPolicy } from "../src/middleware/corsPolicy.js";
 import jwt from "jsonwebtoken";
 mock.module("../src/db/pool.js", { defaultExport: {} });
 mock.module("../src/services/redis.js", {
@@ -172,6 +174,7 @@ test(
           outbox.push(email);
         },
       });
+      app.use(cors(createCorsPolicy({ dashboardOriginsRaw: base })));
       app.all(
         "/api/account/*",
         accountHandler(() => auth),
@@ -224,6 +227,12 @@ test(
           headers: response.headers,
         };
       };
+      const preflight = await fetch(base + "/api/account/sign-in/email", {
+        method: "OPTIONS",
+        headers: { origin: base, "access-control-request-method": "POST" },
+      });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers.get("access-control-allow-origin"), base);
       // Each fixture is an independent user/IP scenario. Keep production library
       // throttles enabled; reset only this disposable schema's quota rows.
       t.beforeEach(async () => {
@@ -1345,6 +1354,16 @@ test(
               "Support assistant",
               false,
             );
+          assert.equal(
+            (
+              await call(sales.root + "/config", {
+                method: "PUT",
+                cookie: owner.cookie,
+                body: { ...configBody(2), provider: "anthropic", model_id: "claude-sonnet" },
+              })
+            ).status,
+            400,
+          );
           const chat = async (
             agent,
             sessionId,
@@ -1449,6 +1468,9 @@ test(
           );
           assert.equal(resultA.status, 200, JSON.stringify(resultA));
           assert.equal(resultA.body.reply, "Sales response");
+          assert.ok(resultA.body.usage.inputTokens > 0);
+          assert.ok(resultA.body.usage.outputTokens > 0);
+          assert.equal(resultA.body.creditsUsed, resultA.body.usage.creditsUsed);
           assert.equal(resultB.status, 200, resultB.raw);
           assert.match(resultB.raw, /Support response/);
           assert.match(resultB.raw, /data: \[DONE\]/);
@@ -1705,6 +1727,43 @@ test(
             200,
           );
           redisDown = false;
+          await db.query("UPDATE businesses SET plan='professional' WHERE id=$1", [business.id]);
+          const beforePlanChange = await call(support.root + "/config", { cookie: owner.cookie });
+          const planConfig = (version, provider, model_id) => ({
+            ...configBody(version),
+            system_prompt: "Support assistant",
+            provider,
+            model_id,
+            lead_capture: { enabled: false, fields: [] },
+            capabilities: [],
+          });
+          assert.equal(
+            (
+              await call(support.root + "/config", {
+                method: "PUT",
+                cookie: owner.cookie,
+                body: planConfig(beforePlanChange.body.config.version, "anthropic", "claude-sonnet"),
+              })
+            ).status,
+            200,
+          );
+          await db.query("UPDATE businesses SET plan='trial' WHERE id=$1", [business.id]);
+          assert.equal((await chat(support, "downgraded-plan", "Hello")).status, 403);
+          assert.equal(
+            (await db.query("SELECT count(*)::int n FROM agent_chat_sessions WHERE id='downgraded-plan'")).rows[0].n,
+            0,
+          );
+          const currentPlanConfig = await call(support.root + "/config", { cookie: owner.cookie });
+          assert.equal(
+            (
+              await call(support.root + "/config", {
+                method: "PUT",
+                cookie: owner.cookie,
+                body: planConfig(currentPlanConfig.body.config.version, "openai", "gpt-4o-mini"),
+              })
+            ).status,
+            200,
+          );
           embeddingDown = true;
           const status = await chat(
             support,
