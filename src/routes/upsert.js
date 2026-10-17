@@ -11,8 +11,7 @@ import { requireKnowledgeOwner } from '../middleware/knowledgeAuth.js';
 import { redisClient } from '../services/redis.js';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
-import path from 'path';
-import os from 'os';
+import { lookupUploadJob, stageUpload, enqueueOutcome, holdStagedUpload } from '../services/uploadStaging.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 3 } });
@@ -62,14 +61,14 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
 
     const jobIds = [];
     for (const file of files) {
-      const tempDir = os.tmpdir();
-      const uniqueName = `${uuidv4()}-${path.basename(file.originalname)}`;
-      const filePath = path.join(tempDir, uniqueName);
-      await fs.writeFile(filePath, file.buffer);
-
       const jobId = uuidv4();
-      let enqueueAttempted = false;
+      // Read-only preflight before writing bytes prevents persistent queue
+      // outages from producing a new orphan on every upload attempt.
+      if (await lookupUploadJob(fileQueue, jobId)) throw Object.assign(new Error('File queue unavailable'), { status: 503 });
+      let filePath, enqueueAttempted = false;
+      const releaseUpload = holdStagedUpload(jobId);
       try {
+        filePath = await stageUpload(file, jobId);
         // Publish queued status first: a fast worker must not have its terminal
         // status overwritten by the HTTP request after add() returns.
         await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'queued', namespace, businessId: req.business.businessId }));
@@ -84,14 +83,16 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
         }, { jobId });
       } catch (error) {
         if (enqueueAttempted) {
-          // Redis may have accepted the job before its acknowledgement was lost.
-          // Keep source bytes and the prepublished/worker status intact.
-          return res.status(503).json({ success: false, acceptanceUnknown: true, jobIds: [...jobIds, jobId], error: 'File queue acknowledgement unavailable. Check job status before retrying.' });
+          const outcome = await enqueueOutcome(fileQueue, redisClient, jobId);
+          if (outcome === 'accepted') { jobIds.push(jobId); continue; }
+          if (outcome === 'unknown') {
+            return res.status(503).json({ success: false, acceptanceUnknown: true, jobIds: [...jobIds, jobId], error: 'File queue acknowledgement unavailable. Check job status before retrying.' });
+          }
         }
         await redisClient.setex(`job:${jobId}`, 86400, JSON.stringify({ status: 'failed', namespace, businessId: req.business.businessId, error: 'File queue unavailable. Please retry.' })).catch(() => {});
-        await fs.unlink(filePath).catch(() => {});
-        throw error;
-      }
+        if (filePath) await fs.unlink(filePath).catch(() => {});
+        throw Object.assign(error, { status: 503 });
+      } finally { releaseUpload(); }
       jobIds.push(jobId);
       console.log(`File queued: ${file.originalname} for namespace ${namespace}, job ${jobId}`);
     }

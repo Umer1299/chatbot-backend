@@ -4,11 +4,15 @@ import { setupVectorTable } from './db/vectorStore.js';
 import { setupSessionHistoryIndexes } from './db/sessionHistory.js';
 import { startScrapeWorker } from './jobs/scrapeWorker.js';
 import { startReminderJobs } from './jobs/paidPlanReminders.js';
+import { startUploadCleanup } from './services/uploadStaging.js';
+import { fileQueue } from './queues/fileQueue.js';
+import { redisClient } from './services/redis.js';
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  startUploadCleanup(fileQueue, redisClient);
 
   async function initializeNewServices() {
     try {
