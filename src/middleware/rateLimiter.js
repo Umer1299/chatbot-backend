@@ -37,6 +37,9 @@ export const sessionRateLimiter = limiter('session', 30, verifiedWidgetKey);
 
 // Independent account namespace: IP before authentication, verified user after it.
 export const accountIpLimiter = limiter('account-ip', 120, ipQuotaKey);
+// Coarse pre-session abuse ceiling: 50 full user quotas per IP, separate from login.
+// This bounds invalid-cookie DB work without applying the 120/min user quota to a shared IP.
+export const accountLookupLimiter = limiter('account-lookup', 6000, ipQuotaKey);
 export const accountUserLimiter = limiter('account-user', 120, req => {
   if (!req.accountUser?.id) throw new Error('Account quota requires verified user');
   return req.accountUser.id;
