@@ -16,6 +16,8 @@ const { createAgentRouter } = await import("../src/api/agentsV1.js");
 const { createAgentRuntimeRouter } =
   await import("../src/api/agentRuntimeV1.js");
 const { createAgentChatRouter } = await import("../src/api/agentChat.js");
+const { retrieveAgentKnowledge } =
+  await import("../src/services/agentKnowledge.js");
 const testUrl = process.env.TEST_DATABASE_URL;
 
 test(
@@ -136,15 +138,7 @@ test(
         );
       for (const table of historyTables)
         assert.deepEqual(
-          (await admin.query(`SELECT * FROM ${table}`)).rows.map((row) =>
-            table === "businesses"
-              ? Object.fromEntries(
-                  Object.entries(row).filter(
-                    ([key]) => key !== "knowledge_revision",
-                  ),
-                )
-              : row,
-          ),
+          (await admin.query(`SELECT * FROM ${table}`)).rows,
           historicSnapshot[table],
           table + " preserved by identity/agent migrations",
         );
@@ -1659,6 +1653,52 @@ test(
             0,
           );
           embeddingDown = false;
+          embeddingDown = true;
+          assert.equal(
+            (await add(support, "unavailable", "This embedding should fail."))
+              .status,
+            502,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_knowledge_sources WHERE agent_id=$1 AND source_key='unavailable'",
+                [support.id],
+              )
+            ).rows[0].n,
+            0,
+          );
+          embeddingDown = false;
+          const keys = [...ragCache.keys()];
+          assert.ok(
+            keys.some((key) =>
+              key.startsWith(`rag:agent:v1:${business.id}:${sales.id}:`),
+            ),
+          );
+          assert.ok(
+            keys.some((key) =>
+              key.startsWith(`rag:agent:v1:${business.id}:${support.id}:`),
+            ),
+          );
+          const readKnowledge = (agent) =>
+            retrieveAgentKnowledge({
+              businessId: business.id,
+              agentId: agent.id,
+              query: "pricing",
+              db,
+              embed: fakeEmbed,
+              cache,
+            });
+          assert.ok(
+            (await readKnowledge(sales)).some((row) =>
+              row.content.includes("Sales pricing"),
+            ),
+          );
+          assert.ok(
+            (await readKnowledge(support)).every(
+              (row) => !row.content.includes("Sales pricing"),
+            ),
+          );
           const source = (
             await call(sales.root + "/knowledge", { cookie: owner.cookie })
           ).body.knowledge[0];
@@ -1684,6 +1724,39 @@ test(
               })
             ).status,
             404,
+          );
+          const beforeFailure = (await revisions()).find(
+            (row) => row.id === sales.id,
+          ).knowledge_revision;
+          await db.query(
+            `CREATE FUNCTION reject_agent_chunk() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'isolated write failure'; END$$`,
+          );
+          await db.query(
+            "CREATE TRIGGER reject_agent_chunk BEFORE INSERT ON agent_knowledge_chunks FOR EACH ROW EXECUTE FUNCTION reject_agent_chunk()",
+          );
+          try {
+            assert.equal(
+              (await add(sales, "pricing", "Replacement must roll back."))
+                .status,
+              500,
+            );
+          } finally {
+            await db.query(
+              "DROP TRIGGER reject_agent_chunk ON agent_knowledge_chunks",
+            );
+            await db.query("DROP FUNCTION reject_agent_chunk()");
+          }
+          assert.equal(
+            String(
+              (await revisions()).find((row) => row.id === sales.id)
+                .knowledge_revision,
+            ),
+            String(beforeFailure),
+          );
+          assert.ok(
+            (await readKnowledge(sales)).some((row) =>
+              row.content.includes("Sales pricing"),
+            ),
           );
           assert.equal(
             (
@@ -1712,6 +1785,12 @@ test(
               })
             ).status,
             200,
+          );
+          assert.equal((await readKnowledge(sales)).length, 0);
+          assert.ok(
+            (await readKnowledge(support)).some((row) =>
+              row.content.includes("Support returns"),
+            ),
           );
           assert.equal(
             (
