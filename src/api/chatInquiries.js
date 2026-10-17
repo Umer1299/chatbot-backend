@@ -4,15 +4,13 @@ import { getRecentConversationHistory, buildSessionMemoryBlock } from '../db/ses
 import express from 'express';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import pool from '../db/pool.js';
-import { requireChatSession } from '../middleware/chatSession.js';
+import { chatAdmission } from '../middleware/chatAdmission.js';
 import { removeVisibleInquiryJson, saveInquiryFromConversation } from '../services/inquiryService.js';
 import originalRouter from './chatOptimized.js';
 
-import { tokenAuth } from '../middleware/tokenAuth.js';
-import { domainRestriction } from '../middleware/domainRestriction.js';
 
 const router = express.Router();
-router.use(tokenAuth, domainRestriction, requireChatSession);
+router.use(chatAdmission);
 function cleanPayload(payload, capture) {
   if (!payload || typeof payload !== 'object') return payload;
   if (typeof payload.reply === 'string') {

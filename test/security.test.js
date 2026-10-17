@@ -11,12 +11,12 @@ process.env.ADMIN_API_KEY = 'test-only-admin-key';
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
 const businesses = [A, B].map((id, i) => ({ id, active: true, bubble_user_id: `user-${i}`, bot_id: `bot-${i}`, industry: 'other', plan: 'free' }));
-let calls, sessions, records, jobs, effects, redisFailure, policies;
+let calls, sessions, records, jobs, effects, redisFailure, policies, afterInquirySave, policyRevision;
 const db = { async query(sql, args = []) {
   const q = sql.replace(/\s+/g, ' ').trim(); calls.push({ q, args });
   if (q.includes('FROM chatbot_settings')) {
     const settings = policies.get(args[0]);
-    return { rows: settings ? [{ settings, revision: 'test-policy', deleted: false }] : [] };
+    return { rows: settings ? [{ settings, revision: policyRevision, deleted: false }] : [] };
   }
   if (q.startsWith('SELECT') && q.includes('FROM businesses')) {
     const b = businesses.find(b => q.includes('bubble_user_id = $1') ? b.bubble_user_id === args[0] : (/bot_id\s*=\s*\$1/.test(q)) ? b.bot_id === args[0] : b.id === args[0]);
@@ -75,7 +75,7 @@ mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: asyn
 mock.module('../src/services/emailService.js', { namedExports: { sendLeadAlert: async () => {}, sendUrgentEscalation: async () => {} } });
 mock.module('../src/services/inquiryService.js', { namedExports: {
   removeVisibleInquiryJson: text => text,
-  saveInquiryFromConversation: async ({ session, config }) => { assert.equal(session.business_id, config.business_id); effects.inquiries++; return null; },
+  saveInquiryFromConversation: async ({ session, config }) => { assert.equal(session.business_id, config.business_id); effects.inquiries++; afterInquirySave?.(); return null; },
 } });
 mock.module('../src/tools/leadCaptureTool.js', { namedExports: { leadCaptureTool: { func: async () => { effects.webhook++; return 'ok'; } } } });
 const { JWT_OPTIONS, requireAuth } = await import('../src/middleware/jwtAuth.js');
@@ -84,6 +84,7 @@ app.get('/identity', requireAuth, (req, res) => res.json(req.business));
 for (const [path, module] of [['auth','../src/api/auth.js'], ['leads','../src/api/leads.js'], ['inquiries','../src/api/inquiries.js'], ['upsert','../src/routes/upsert.js'], ['lead','../src/routes/lead.js'], ['quick-answers','../src/api/quickAnswers.js'], ['scrape','../src/api/scrape.js'], ['billing','../src/api/billing.js'], ['chat','../src/routes/chat.js']]) {
   app.use(`/api/${path}`, (await import(module)).default);
 }
+app.use('/direct-chat', (await import('../src/api/chat.js')).default);
 app.use((error, req, res, next) => res.status(503).json({ error: 'Service unavailable' }));
 const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
 after(() => new Promise(resolve => server.close(resolve)));
@@ -98,7 +99,7 @@ async function request(path, method = 'GET', headers = {}, body) {
   return { status: response.status, body: await response.json() };
 }
 beforeEach(() => {
-  calls = []; sessions = new Map(); records = []; jobs = []; effects = { messages: 0, sessions: 0, inquiries: 0, knowledge: 0, jobs: 0, webhook: 0, deletions: [] }; redisFailure = false;
+  calls = []; sessions = new Map(); records = []; jobs = []; effects = { messages: 0, sessions: 0, inquiries: 0, knowledge: 0, jobs: 0, webhook: 0, deletions: [] }; redisFailure = false; afterInquirySave = null; policyRevision = 'test-policy';
   policies = new Map([['bot-0', { allowedDomains: [] }], ['bot-1', { allowedDomains: [] }]]);
   cache.clear(); cache.set('chatbot_token:public-a', 'bot-0'); cache.set('chatbot_token:public-b', 'bot-1');
   businesses.forEach(b => { b.active = true; b.plan = 'free'; b.is_disabled=false; b.noConfig=false; delete b.disabled_reason; });
@@ -276,4 +277,39 @@ test('concurrent first requests to the same valid bot share one owned session',a
   const results=await Promise.all(Array.from({length:4},()=>request('/api/chat','POST',widget,body)));
   assert.ok(results.every(r=>r.status===200));assert.equal(sessions.size,1);assert.equal(sessions.get('same-race').business_id,A);
   assert.equal(calls.filter(({q})=>q.includes('FROM bot_configs')).length,4);
+});
+
+for (const change of ['token','domain']) for (const streaming of [false,true]) {
+  test(`chat admission is authoritative through inquiry writes when ${change} changes (${streaming?'SSE':'JSON'})`,async()=>{
+    let changed=false;
+    afterInquirySave=()=>{
+      if(changed) return;
+      changed=true;
+      if(change==='token') cache.delete('chatbot_token:public-a');
+      else { policies.set('bot-0',{allowedDomains:['blocked.example']}); policyRevision = 'updated-policy'; }
+    };
+    const headers={...widget,origin:'https://customer.example','content-type':'application/json'};
+    const body={botId:'bot-0',sessionId:'policy-snapshot',message:'hello'};
+    const response=await fetch(base+`/api/chat?stream=${streaming}`,{method:'POST',headers,body:JSON.stringify(body)});
+    const text=await response.text();
+    assert.equal(response.status,200,text);
+    assert.ok(changed);
+    if(streaming){assert.match(response.headers.get('content-type'),/text\/event-stream/);assert.match(text,/data: \[DONE\]/);}
+    else assert.equal(typeof JSON.parse(text).reply,'string');
+    assert.equal(calls.filter(c=>c.q.startsWith('SELECT revision, deleted FROM chatbot_settings')).length,1);
+    assert.equal(calls.filter(c=>c.q.includes('FROM bot_configs')).length,1);
+    assert.ok(effects.messages>0);
+    await new Promise(resolve=>setImmediate(resolve));
+    const before={...effects};const beforeSessions=sessions.size;
+    const denied=await fetch(base+`/api/chat?stream=${streaming}`,{method:'POST',headers,body:JSON.stringify({...body,sessionId:'denied-after-change'})});
+    assert.equal(denied.status,403);await denied.text();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(sessions.size,beforeSessions);assert.deepEqual(effects,before);
+  });
+}
+test('direct chat handler retains its own admission and cannot trust forged headers',async()=>{
+  const body={botId:'bot-0',sessionId:'direct-gate',message:'hello'};
+  for(const headers of [{},{'x-chat-admitted':'true','x-chatbot-token':'invalid'}]) assert.equal((await request('/direct-chat','POST',headers,body)).status,headers['x-chatbot-token']?403:401);
+  assert.equal(calls.length,0);assert.equal(effects.inquiries,0);assert.equal(effects.messages,0);
+  assert.equal((await request('/direct-chat','POST',widget,body)).status,200);
 });

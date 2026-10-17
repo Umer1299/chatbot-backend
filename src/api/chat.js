@@ -6,13 +6,11 @@ import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import pool from '../db/pool.js';
-import { requireChatSession } from '../middleware/chatSession.js';
+import { chatAdmission } from '../middleware/chatAdmission.js';
 import { getRelevantChunks } from '../db/vectorStore.js';
 import { buildMasterPrompt, generateProjectDetails } from '../agents/promptBuilder.js';
 import { sendLeadAlert, sendUrgentEscalation } from '../services/emailService.js';
 import { sanitizeMessage } from '../middleware/sanitize.js';
-import { tokenAuth } from '../middleware/tokenAuth.js';
-import { domainRestriction } from '../middleware/domainRestriction.js';
 import { redisClient } from '../services/redis.js';
 import { getSafeModel } from '../services/modelService.js';
 
@@ -385,7 +383,7 @@ async function saveLead(config, sessionId, rawLeadData, namespace) {
 
 async function updateCollectedData(sessionId, leadData, businessId) { await pool.query('UPDATE sessions SET collected_data=$2::jsonb, last_activity_at=NOW() WHERE id=$1 AND business_id=$3', [sessionId, JSON.stringify(leadData), businessId]); }
 
-router.post('/', tokenAuth, domainRestriction, requireChatSession, asyncHandler(async (req, res) => {
+router.post('/', chatAdmission, asyncHandler(async (req, res) => {
   const isStreaming = req.query.stream === 'true';
   let { botId, sessionId, message } = req.body;
   if (!botId) return res.status(400).json({ error: 'botId required' });

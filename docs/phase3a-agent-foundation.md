@@ -65,3 +65,7 @@ Production prerequisites from prior phases remain: validated migrations/backup r
 6. Prove end-to-end with two agents in one business: distinct config/knowledge/cache, separate conversations/leads, token substitution rejection, independent activation and unchanged legacy JSON/SSE. Add migrations/backfill verification and concurrent ingestion/routing tests before enabling new deployments.
 
 No Next.js dashboard, agency hierarchy redesign, channel integration or provider credential storage is implemented here. Independent user/agency identity is already the Phase 2 foundation; subsequent work should build Phase 3B on those sessions and memberships.
+
+## Review follow-up: one public chat admission decision
+
+Fresh Codex review identified duplicate authentication/domain checks after the inquiry pre-save in the existing chat wrapper chain. A shared admission middleware now attests a successfully checked request in a private WeakSet. Both the inquiry wrapper and directly mounted chat handler invoke it; nested execution reuses the same decision and durable config snapshot. A token revocation or domain-policy edit during an admitted request takes effect on the next request, avoiding a late authorization rejection after a write. Direct handler entry still requires full admission; client fields cannot manufacture the attestation. JSON/SSE regressions mutate token/domain state during inquiry saving and prove the current request completes while the next request is rejected without writes. No authentication or policy result is cached across requests.
