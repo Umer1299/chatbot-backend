@@ -6,7 +6,9 @@ import dotenv from 'dotenv';
 import { accountHandler, accountIdentity } from './middleware/accountAuth.js';
 import agenciesV1 from './api/agenciesV1.js';
 import agentsV1 from './api/agentsV1.js';
-import { accountIpLimiter, accountLookupLimiter, accountUserLimiter } from './middleware/rateLimiter.js';
+import agentRuntimeV1 from './api/agentRuntimeV1.js';
+import agentChat from './api/agentChat.js';
+import { accountIpLimiter, accountLookupLimiter, accountUserLimiter, agentChatIpLimiter } from './middleware/rateLimiter.js';
 import { authRateLimiter, publicReadLimiter, adminRateLimiter, widgetLimiter, dashboardLimiter } from './middleware/rateLimiter.js';
 import requireAuth from './middleware/jwtAuth.js';
 import { tokenAuth } from './middleware/tokenAuth.js';
@@ -46,7 +48,7 @@ app.use(cors(corsPolicy));
 // Better Auth consumes the raw stream; mount before the JSON parser.
 app.all('/api/account/*', accountIpLimiter, accountHandler());
 app.use(express.json());
-app.use('/api/v1', accountLookupLimiter, accountIdentity(), accountUserLimiter, agenciesV1, agentsV1);
+app.use('/api/v1', accountLookupLimiter, accountIdentity(), accountUserLimiter, agenciesV1, agentsV1, agentRuntimeV1);
 
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/healthz', (req, res) => res.send('OK'));
@@ -64,6 +66,7 @@ app.get('/billing/select-plan', (req, res) => {
 });
 
 app.use('/api/chat', tokenAuth, widgetLimiter);
+app.use('/api/agent-chat', agentChatIpLimiter, agentChat);
 app.use('/api/upsert', authenticatedManagementQuota);
 app.use('/api/leads', authenticatedManagementQuota);
 app.use('/api/inquiries', authenticatedManagementQuota);

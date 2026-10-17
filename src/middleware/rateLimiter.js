@@ -44,3 +44,6 @@ export const accountUserLimiter = limiter('account-user', 120, req => {
   if (!req.accountUser?.id) throw new Error('Account quota requires verified user');
   return req.accountUser.id;
 });
+
+// Public agent chat has an independent pre-credential IP abuse ceiling.
+export const agentChatIpLimiter = limiter('agent-chat-ip', 300, ipQuotaKey);

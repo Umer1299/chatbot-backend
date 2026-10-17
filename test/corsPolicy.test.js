@@ -159,3 +159,12 @@ test('unconfigured widgets remain noncredentialed; absent dashboard trust never 
     (e) => assert.equal(e.status, 403),
   );
 });
+test('agent-chat CORS preflight admits valid deployment origins without dashboard credentials',async()=>{
+  const origin='https://client-outside-legacy-widget-rules.example';
+  const response=await request('/api/agent-chat',origin,'OPTIONS',{'access-control-request-method':'POST','access-control-request-headers':'x-agent-token,content-type'});
+  assert.equal(response.status,204);
+  assert.equal(response.headers.get('access-control-allow-origin'),origin);
+  assert.equal(response.headers.get('access-control-allow-credentials'),null);
+  assert.match(response.headers.get('access-control-allow-headers'),/x-agent-token/);
+  assert.equal((await request('/api/business/settings',origin)).status,403);
+});

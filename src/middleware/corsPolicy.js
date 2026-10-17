@@ -58,7 +58,7 @@ export function matchesOrigin(origin, configuredRule) {
 
 function publicWidgetPath(req) {
   return (
-    /^\/api\/(chat|moderate)(\/|$)/i.test(req.path) ||
+    /^\/api\/(chat|agent-chat|moderate)(\/|$)/i.test(req.path) ||
     (['GET', 'HEAD', 'OPTIONS'].includes(req.method) &&
       /^\/api\/business\/bot-config\/[^/]+\/preview\/?$/i.test(req.path))
   );
@@ -88,6 +88,7 @@ export function createCorsPolicy({
         'Content-Type',
         'Authorization',
         'x-chatbot-token',
+        'x-agent-token',
         'x-admin-key',
         'Origin',
       ],
@@ -99,10 +100,12 @@ export function createCorsPolicy({
         Object.assign(new Error('CORS: Invalid origin'), { status: 403 }),
       );
     const publicWidget = publicWidgetPath(req);
-    const permitted = publicWidget
-      ? widgetRules.length === 0 ||
-        widgetRules.some((rule) => matchesOrigin(origin, rule))
-      : dashboardRules.some((rule) => matchesOrigin(origin, rule));
+    // Deployment policy is checked against PostgreSQL after the preflight.
+    // This route never uses browser credentials and does not inherit legacy widget rules.
+    const permitted = /^\/api\/agent-chat(\/|$)/i.test(req.path) ||
+      (publicWidget
+        ? widgetRules.length === 0 || widgetRules.some((rule) => matchesOrigin(origin, rule))
+        : dashboardRules.some((rule) => matchesOrigin(origin, rule)));
     if (!permitted)
       return callback(
         Object.assign(new Error('CORS: Origin not allowed'), { status: 403 }),

@@ -5,11 +5,17 @@ import { readFile } from "node:fs/promises";
 import express from "express";
 import jwt from "jsonwebtoken";
 mock.module("../src/db/pool.js", { defaultExport: {} });
+mock.module("../src/services/redis.js", {
+  namedExports: { redisClient: null },
+});
 const { createAccountAuth } = await import("../src/auth/accountAuth.js");
 const { accountHandler, accountIdentity } =
   await import("../src/middleware/accountAuth.js");
 const { createAgencyRouter } = await import("../src/api/agenciesV1.js");
 const { createAgentRouter } = await import("../src/api/agentsV1.js");
+const { createAgentRuntimeRouter } =
+  await import("../src/api/agentRuntimeV1.js");
+const { createAgentChatRouter } = await import("../src/api/agentChat.js");
 const testUrl = process.env.TEST_DATABASE_URL;
 
 test(
@@ -29,6 +35,28 @@ test(
     const schema = `identity_test_${randomUUID().replaceAll("-", "")}`;
     let db, server;
     const outbox = [];
+    const modelCalls = [],
+      ragCache = new Map();
+    let redisDown = false,
+      embeddingDown = false;
+    const fakeEmbed = async () =>
+      embeddingDown ? null : [1, ...Array(1535).fill(0)];
+    const fakeComplete = async (input) => {
+      modelCalls.push(input);
+      return input.systemPrompt.includes("Sales assistant")
+        ? "Sales response"
+        : "Support response";
+    };
+    const cache = {
+      get: async (key) => {
+        if (redisDown) throw Error("Redis down");
+        return ragCache.get(key) || null;
+      },
+      setex: async (key, ttl, value) => {
+        if (redisDown) throw Error("Redis down");
+        ragCache.set(key, value);
+      },
+    };
     try {
       await admin.query("CREATE EXTENSION IF NOT EXISTS pgcrypto");
       await admin.query("CREATE EXTENSION IF NOT EXISTS vector");
@@ -98,6 +126,7 @@ test(
         "008_account_auth.sql",
         "009_agency_business_access.sql",
         "010_agent_foundation.sql",
+        "011_agent_runtime.sql",
       ])
         await admin.query(
           await readFile(
@@ -107,7 +136,15 @@ test(
         );
       for (const table of historyTables)
         assert.deepEqual(
-          (await admin.query(`SELECT * FROM ${table}`)).rows,
+          (await admin.query(`SELECT * FROM ${table}`)).rows.map((row) =>
+            table === "businesses"
+              ? Object.fromEntries(
+                  Object.entries(row).filter(
+                    ([key]) => key !== "knowledge_revision",
+                  ),
+                )
+              : row,
+          ),
           historicSnapshot[table],
           table + " preserved by identity/agent migrations",
         );
@@ -145,6 +182,17 @@ test(
         accountIdentity(() => auth),
         createAgencyRouter({ db }),
         createAgentRouter({ db }),
+        createAgentRuntimeRouter({ db, embed: fakeEmbed }),
+      );
+      app.use(
+        "/api/agent-chat",
+        createAgentChatRouter({
+          db,
+          embed: fakeEmbed,
+          complete: fakeComplete,
+          cache,
+          enabled: true,
+        }),
       );
       app.use((error, req, res, next) =>
         res.status(error.status || 500).json({ error: "Operation rejected" }),
@@ -1221,6 +1269,470 @@ test(
         },
       );
       await t.test(
+        "Phase 3B: two website agents have isolated prompts, knowledge, conversations and outcomes",
+        async () => {
+          const make = async (name, purpose, prompt, lead) => {
+            const a = await call(`/api/v1/businesses/${business.id}/agents`, {
+              method: "POST",
+              cookie: owner.cookie,
+              body: { name, purpose },
+            });
+            assert.equal(a.status, 201, JSON.stringify(a.body));
+            const id = a.body.agent.id,
+              root = `/api/v1/businesses/${business.id}/agents/${id}`;
+            const config = {
+              ...configBody(),
+              system_prompt: prompt,
+              lead_capture: {
+                enabled: lead,
+                fields: ["name", "email", "phone"],
+              },
+              capabilities: lead ? ["lead_capture"] : [],
+            };
+            assert.equal(
+              (
+                await call(root + "/config", {
+                  method: "PUT",
+                  cookie: owner.cookie,
+                  body: config,
+                })
+              ).status,
+              200,
+            );
+            assert.equal(
+              (
+                await call(root, {
+                  method: "PATCH",
+                  cookie: owner.cookie,
+                  body: { status: "active" },
+                })
+              ).status,
+              200,
+            );
+            const dep = await call(root + "/deployments", {
+              method: "POST",
+              cookie: owner.cookie,
+              body: { allowed_origins: [base] },
+            });
+            assert.equal(dep.status, 201, JSON.stringify(dep.body));
+            assert.equal(
+              (
+                await call(root + "/deployments/" + dep.body.deployment.id, {
+                  method: "PATCH",
+                  cookie: owner.cookie,
+                  body: { status: "active" },
+                })
+              ).status,
+              200,
+            );
+            return {
+              id,
+              root,
+              token: dep.body.token,
+              deployment: dep.body.deployment.id,
+            };
+          };
+          const sales = await make(
+              "Sales",
+              "lead_generation",
+              "Sales assistant",
+              true,
+            ),
+            support = await make(
+              "Support",
+              "customer_support",
+              "Support assistant",
+              false,
+            );
+          const chat = async (
+            agent,
+            sessionId,
+            message,
+            stream = false,
+            token = agent.token,
+            origin = base,
+          ) => {
+            const response = await fetch(
+              base + `/api/agent-chat?stream=${stream}`,
+              {
+                method: "POST",
+                headers: {
+                  origin,
+                  "x-agent-token": token,
+                  "content-type": "application/json",
+                },
+                body: JSON.stringify({ sessionId, message }),
+              },
+            );
+            const raw = await response.text();
+            return {
+              status: response.status,
+              raw,
+              body: stream ? raw : JSON.parse(raw),
+            };
+          };
+          const beforeLegacy = {};
+          for (const table of [
+            "sessions",
+            "messages",
+            "knowledge_chunks",
+            "leads",
+            "inquiries",
+          ])
+            beforeLegacy[table] = (
+              await db.query(`SELECT count(*)::int n FROM ${table}`)
+            ).rows[0].n;
+          const add = async (agent, source_key, text) =>
+            call(agent.root + "/knowledge", {
+              method: "POST",
+              cookie: owner.cookie,
+              body: { source_key, text },
+            });
+          assert.equal(
+            (
+              await add(
+                sales,
+                "pricing",
+                "Sales pricing is 250 pounds; we build websites and CRM systems.",
+              )
+            ).status,
+            201,
+          );
+          assert.equal(
+            (
+              await add(
+                support,
+                "returns",
+                "Support returns allow a refund in 14 days; troubleshoot login using reset.",
+              )
+            ).status,
+            201,
+          );
+          const revisions = async () =>
+            (
+              await db.query(
+                "SELECT id,knowledge_revision FROM agents WHERE id=ANY($1::uuid[])",
+                [sales.id, support.id],
+              )
+            ).rows;
+          const initialRevisions = await revisions();
+          const aRev = String(
+              initialRevisions.find((r) => r.id === sales.id)
+                .knowledge_revision,
+            ),
+            bRev = String(
+              initialRevisions.find((r) => r.id === support.id)
+                .knowledge_revision,
+            );
+          assert.ok(Number(aRev) > 0 && Number(bRev) > 0);
+          assert.equal(
+            (await call(sales.root + "/knowledge", { cookie: owner.cookie }))
+              .body.knowledge.length,
+            1,
+          );
+          assert.equal(
+            (await call(support.root + "/knowledge", { cookie: owner.cookie }))
+              .body.knowledge.length,
+            1,
+          );
+          const resultA = await chat(
+            sales,
+            "sales-visitor",
+            "Please quote me; I am Alex Customer, alex@example.test",
+          );
+          const resultB = await chat(
+            support,
+            "support-visitor",
+            "My return has a problem, please help with a refund",
+            true,
+          );
+          assert.equal(resultA.status, 200, JSON.stringify(resultA));
+          assert.equal(resultA.body.reply, "Sales response");
+          assert.equal(resultB.status, 200, resultB.raw);
+          assert.match(resultB.raw, /Support response/);
+          assert.match(resultB.raw, /data: \[DONE\]/);
+          assert.ok(modelCalls[0].systemPrompt.includes("Sales assistant"));
+          assert.ok(modelCalls[0].systemPrompt.includes("Sales pricing"));
+          assert.ok(!modelCalls[0].systemPrompt.includes("Support returns"));
+          assert.ok(modelCalls[1].systemPrompt.includes("Support assistant"));
+          assert.ok(modelCalls[1].systemPrompt.includes("Support returns"));
+          assert.ok(!modelCalls[1].systemPrompt.includes("Sales pricing"));
+          assert.equal(modelCalls[0].messages.length, 1);
+          assert.equal(modelCalls[1].messages.length, 1);
+          assert.equal(
+            (await call(sales.root + "/leads", { cookie: owner.cookie })).body
+              .leads.length,
+            1,
+          );
+          assert.equal(
+            (await call(support.root + "/leads", { cookie: owner.cookie })).body
+              .leads.length,
+            0,
+          );
+          assert.equal(
+            (await call(support.root + "/inquiries", { cookie: owner.cookie }))
+              .body.inquiries.length,
+            1,
+          );
+          assert.equal(
+            (await call(sales.root + "/inquiries", { cookie: owner.cookie }))
+              .body.inquiries.length,
+            0,
+          );
+          assert.equal(
+            (
+              await call(sales.root + "/conversations/sales-visitor", {
+                cookie: owner.cookie,
+              })
+            ).body.messages.length,
+            2,
+          );
+          assert.equal(
+            (
+              await call(support.root + "/conversations/sales-visitor", {
+                cookie: owner.cookie,
+              })
+            ).status,
+            404,
+          );
+          assert.equal(
+            (
+              await call(
+                `/api/v1/businesses/${second.id}/agents/${sales.id}/leads`,
+                { cookie: owner.cookie },
+              )
+            ).status,
+            404,
+          );
+          assert.equal(
+            (await call(sales.root + "/leads", { cookie: client.cookie }))
+              .status,
+            403,
+          );
+          assert.equal(
+            (
+              await chat(
+                support,
+                "sales-visitor",
+                "Support should not inherit sales",
+              )
+            ).status,
+            403,
+          );
+          assert.equal(
+            (
+              await chat(
+                sales,
+                "support-visitor",
+                "Sales should not inherit support",
+              )
+            ).status,
+            403,
+          );
+          assert.equal(
+            (
+              await chat(
+                sales,
+                "sales-visitor",
+                "Token substitution",
+                false,
+                support.token,
+              )
+            ).status,
+            403,
+          );
+          assert.equal(
+            (
+              await chat(
+                sales,
+                "new-origin",
+                "Hello",
+                false,
+                sales.token,
+                "https://attacker.test",
+              )
+            ).status,
+            403,
+          );
+          assert.equal(
+            (await chat(sales, "sales-visitor", "Follow up question")).status,
+            200,
+          );
+          assert.ok(
+            modelCalls
+              .at(-1)
+              .messages.some((m) => m.content === "Sales response"),
+          );
+          assert.ok(
+            !modelCalls
+              .at(-1)
+              .messages.some((m) => m.content === "Support response"),
+          );
+          const oldToken = sales.token;
+          const rotated = await call(
+            sales.root + "/deployments/" + sales.deployment + "/rotate",
+            { method: "POST", cookie: owner.cookie, body: {} },
+          );
+          assert.equal(rotated.status, 200);
+          sales.token = rotated.body.token;
+          assert.equal(
+            (await chat(sales, "expired-token", "Hello", false, oldToken))
+              .status,
+            403,
+          );
+          assert.equal((await chat(sales, "new-token", "Hello")).status, 200);
+          assert.equal(
+            (
+              await call(sales.root, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { status: "paused" },
+              })
+            ).status,
+            200,
+          );
+          const paused = await chat(sales, "paused-agent", "Hello", true);
+          assert.equal(paused.status, 200);
+          assert.match(paused.raw, /isDisabled/);
+          assert.equal(
+            (await chat(support, "still-support", "My return has an issue"))
+              .status,
+            200,
+          );
+          assert.equal(
+            (
+              await call(
+                sales.root + "/deployments/" + sales.deployment + "/revoke",
+                { method: "POST", cookie: owner.cookie, body: {} },
+              )
+            ).status,
+            200,
+          );
+          assert.equal((await chat(sales, "revoked", "Hello")).status, 403);
+          assert.equal(
+            (await chat(support, "still-active", "My return has an issue"))
+              .status,
+            200,
+          );
+          for (const id of [
+            "expired-token",
+            "new-origin",
+            "paused-agent",
+            "revoked",
+          ])
+            assert.equal(
+              (
+                await db.query(
+                  "SELECT count(*)::int n FROM agent_chat_sessions WHERE id=$1",
+                  [id],
+                )
+              ).rows[0].n,
+              0,
+            );
+          for (const table of Object.keys(beforeLegacy))
+            assert.equal(
+              (await db.query(`SELECT count(*)::int n FROM ${table}`)).rows[0]
+                .n,
+              beforeLegacy[table],
+              table + " legacy unchanged",
+            );
+          redisDown = true;
+          assert.equal(
+            (await chat(support, "redis-down", "My return has an issue"))
+              .status,
+            200,
+          );
+          redisDown = false;
+          embeddingDown = true;
+          const status = await chat(
+            support,
+            "embedding-down",
+            "Unique embedding failure prompt",
+          );
+          assert.ok(status.status >= 500);
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_chat_sessions WHERE id='embedding-down'",
+              )
+            ).rows[0].n,
+            0,
+          );
+          embeddingDown = false;
+          const source = (
+            await call(sales.root + "/knowledge", { cookie: owner.cookie })
+          ).body.knowledge[0];
+          await assert.rejects(
+            db.query(
+              "UPDATE agent_knowledge_chunks SET agent_id=$1 WHERE source_id=$2",
+              [support.id, source.id],
+            ),
+            { code: "23503" },
+          );
+          await assert.rejects(
+            db.query(
+              "UPDATE agent_chat_messages SET agent_id=$1 WHERE session_id=$2",
+              [support.id, "sales-visitor"],
+            ),
+            { code: "23503" },
+          );
+          assert.equal(
+            (
+              await call(support.root + "/knowledge/" + source.id, {
+                method: "DELETE",
+                cookie: owner.cookie,
+              })
+            ).status,
+            404,
+          );
+          assert.equal(
+            (
+              await add(
+                sales,
+                "pricing",
+                "Sales updated pricing is 300 pounds.",
+              )
+            ).status,
+            201,
+          );
+          const rev2 = await revisions();
+          assert.ok(
+            BigInt(rev2.find((r) => r.id === sales.id).knowledge_revision) >
+              BigInt(aRev),
+          );
+          assert.equal(
+            String(rev2.find((r) => r.id === support.id).knowledge_revision),
+            bRev,
+          );
+          assert.equal(
+            (
+              await call(sales.root + "/knowledge/" + source.id, {
+                method: "DELETE",
+                cookie: owner.cookie,
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_knowledge_chunks WHERE agent_id=$1",
+                [sales.id],
+              )
+            ).rows[0].n,
+            0,
+          );
+          assert.ok(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_knowledge_chunks WHERE agent_id=$1",
+                [support.id],
+              )
+            ).rows[0].n > 0,
+          );
+        },
+      );
+      await t.test(
         "concurrent grants retain one row; tenant-coupled foreign keys reject invalid ownership",
         async () => {
           const results = await Promise.all(
@@ -1549,6 +2061,7 @@ test(
             "008_account_auth.sql",
             "009_agency_business_access.sql",
             "010_agent_foundation.sql",
+            "011_agent_runtime.sql",
           ])
             await db.query(
               await readFile(
@@ -1590,7 +2103,7 @@ test(
                 "SELECT count(*)::int n FROM chatflow_schema_migrations",
               )
             ).rows[0].n,
-            3,
+            4,
           );
         },
       );
