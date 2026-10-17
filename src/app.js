@@ -2,6 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import { createCorsPolicy } from './middleware/corsPolicy.js';
 import dotenv from 'dotenv';
+import { accountHandler, accountIdentity } from './middleware/accountAuth.js';
+import agenciesV1 from './api/agenciesV1.js';
+import { accountIpLimiter, accountUserLimiter } from './middleware/rateLimiter.js';
 import { authRateLimiter, publicReadLimiter, adminRateLimiter, widgetLimiter, dashboardLimiter } from './middleware/rateLimiter.js';
 import requireAuth from './middleware/jwtAuth.js';
 import { tokenAuth } from './middleware/tokenAuth.js';
@@ -37,7 +40,10 @@ function authenticatedManagementQuota(req, res, next) {
 }
 
 app.use(cors(corsPolicy));
+// Better Auth consumes the raw stream; mount before the JSON parser.
+app.all('/api/account/*', accountIpLimiter, accountHandler());
 app.use(express.json());
+app.use('/api/v1', accountIdentity(), accountUserLimiter, agenciesV1);
 
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/healthz', (req, res) => res.send('OK'));
@@ -86,6 +92,11 @@ app.use('/api/inquiries', inquiriesRoutes);
 app.use('/api/business', businessRoutes);
 app.use('/api/quick-answers', quickAnswersRoutes);
 
+app.use((error, req, res, next) => {
+  if (!/^\/api\/(account|v1)(\/|$)/.test(req.path) || res.headersSent) return next(error);
+  const status = [400,401,403,404,409,415,429,503].includes(error.status) ? error.status : 500;
+  res.status(status).json({ error: status === 500 ? 'Account operation failed' : status === 503 ? 'Account service unavailable' : status === 404 ? 'Resource not found' : status === 409 ? 'Operation conflicts with current state' : status === 400 ? 'Invalid request' : status === 401 ? 'Authentication required' : 'Request not permitted' });
+});
 app.use(globalErrorHandler);
 
 export default app;

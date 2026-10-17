@@ -34,3 +34,10 @@ const verifiedWidgetKey = req => {
 };
 export const widgetLimiter = limiter('widget', 60, verifiedWidgetKey);
 export const sessionRateLimiter = limiter('session', 30, verifiedWidgetKey);
+
+// Independent account namespace: IP before authentication, verified user after it.
+export const accountIpLimiter = limiter('account-ip', 120, ipQuotaKey);
+export const accountUserLimiter = limiter('account-user', 120, req => {
+  if (!req.accountUser?.id) throw new Error('Account quota requires verified user');
+  return req.accountUser.id;
+});

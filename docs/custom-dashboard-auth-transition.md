@@ -1,5 +1,7 @@
 # Custom dashboard authentication transition
 
+**Phase 2 update:** Independent Better Auth sessions and agency/business foundations are now implemented on this working branch. See [phase2-identity-foundation.md](phase2-identity-foundation.md) for the active API contract, additive 008/009 migrations, permissions and deployment gate. The inventory and original staged plan below explain legacy compatibility; the final sentence refers to the preceding security-only baseline.
+
 Decision: the future dashboard is Next.js/React/TypeScript with the existing Express API, PostgreSQL/pgvector and Redis/BullMQ. Bubble is a legacy integration, not a new identity provider. This PR does not build login, agency membership, multiple agents or channel integrations.
 
 ## Legacy dependencies retained for compatibility
