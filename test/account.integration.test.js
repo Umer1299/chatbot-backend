@@ -129,7 +129,13 @@ test(
           headers: response.headers,
         };
       };
+      // Each fixture is an independent user/IP scenario. Keep production library
+      // throttles enabled; reset only this disposable schema's quota rows.
+      t.beforeEach(async () => {
+        await db.query("DELETE FROM chatflow_rate_limit");
+      });
       const register = async (name) => {
+        await db.query("DELETE FROM chatflow_rate_limit");
         const email = name + "@example.test",
           password = "Example-long-passphrase-43!";
         const signup = await call("/api/account/sign-up/email", {
@@ -219,6 +225,26 @@ test(
               })
             ).status >= 400,
           );
+        },
+      );
+      await t.test(
+        "native library sign-in throttle remains enabled",
+        async () => {
+          const statuses = [];
+          for (let i = 0; i < 5; i++)
+            statuses.push(
+              (
+                await call("/api/account/sign-in/email", {
+                  method: "POST",
+                  body: {
+                    email: owner.email,
+                    password: "wrong-password-attempt",
+                  },
+                })
+              ).status,
+            );
+          assert.ok(statuses.includes(401));
+          assert.equal(statuses.at(-1), 429);
         },
       );
       await t.test(
