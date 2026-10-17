@@ -1541,7 +1541,7 @@ test(
               assert.equal(
                 (
                   await db.query(
-                    `SELECT count(*)::int n FROM ${table} WHERE session_id=$1`,
+                    `SELECT count(*)::int n FROM ${table} WHERE ${table === "agent_chat_sessions" ? "id" : "session_id"}=$1`,
                     [sessionId],
                   )
                 ).rows[0].n,
