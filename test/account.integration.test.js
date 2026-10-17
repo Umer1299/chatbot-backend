@@ -1715,6 +1715,19 @@ test(
             0,
           );
           assert.equal(
+            (await chat(sales, "ambiguous-name-only", "I am Happy with the service"))
+              .status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_leads WHERE session_id='ambiguous-name-only'",
+              )
+            ).rows[0].n,
+            0,
+          );
+          assert.equal(
             (await call(support.root + "/leads", { cookie: owner.cookie })).body
               .leads.length,
             0,

@@ -18,7 +18,9 @@ const bad = () =>
 const configConflict = () =>
   Object.assign(new Error("Agent configuration changed"), { status: 409 });
 function explicitlyProvidedName(message) {
-  const marker = /\b(?:my name is|i am|i'm|this is)\s+(.+)/i.exec(message);
+  // “I am …” and “this is …” commonly describe sentiment or objects. Only
+  // the unambiguous introduction form can bypass generic lead scoring.
+  const marker = /\bmy name is\s+(.+)/i.exec(message);
   if (!marker) return null;
   return (
     /^([A-Z][A-Za-z'-]{1,49}(?:\s+[A-Z][A-Za-z'-]{1,49}){0,2})\b/.exec(
