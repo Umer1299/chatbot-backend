@@ -6,6 +6,21 @@ import { redisClient } from '../services/redis.js';
 
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 200;
+const KNOWLEDGE_LOCK_SALT = 145008;
+
+async function lockBusinessKnowledge(client, businessId) {
+  await client.query(
+    'SELECT pg_advisory_lock(hashtextextended($1::text,$2::bigint))',
+    [businessId, KNOWLEDGE_LOCK_SALT],
+  );
+}
+
+async function unlockBusinessKnowledge(client, businessId) {
+  await client.query(
+    'SELECT pg_advisory_unlock(hashtextextended($1::text,$2::bigint))',
+    [businessId, KNOWLEDGE_LOCK_SALT],
+  );
+}
 
 function validatedChunks(chunks) {
   if (!Array.isArray(chunks) || chunks.some(chunk => typeof chunk !== 'string')) {
@@ -77,12 +92,15 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
   const skipped = chunks.length - content.length;
   if (!content.length) return ingestionResult(0, skipped); // Never erase working data for empty input.
   let client;
+  let locked = false;
   let inTransaction = false;
   try {
-    // Prepare ALL embeddings before any destructive statement or database lock.
+    client = await pool.connect();
+    await lockBusinessKnowledge(client, businessId); locked = true;
+    // Prepare all embeddings before the destructive transaction. The advisory
+    // lock also serializes this complete mutation with deletion.
     const embeddings = [];
     for (const chunk of content) embeddings.push(await embedChunk(chunk));
-    client = await pool.connect();
     await client.query('BEGIN'); inTransaction = true;
     // Serialize replacement for this business; readers keep seeing committed knowledge.
     const business = await client.query('SELECT id FROM businesses WHERE id=$1 FOR UPDATE', [businessId]);
@@ -97,7 +115,10 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
     if (inTransaction) await client.query('ROLLBACK').catch(() => {});
     throw new KnowledgeIngestionError(cause, { skipped, failed: content.length,
       code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
-  } finally { client?.release(); }
+  } finally {
+    if (locked) await unlockBusinessKnowledge(client, businessId).catch(() => {});
+    client?.release();
+  }
 }
 
 export async function upsertSupplementalChunks(businessId, chunks, sourceType = 'owner_upload') {
@@ -105,17 +126,21 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
   let skipped = chunks.length - content.length;
   let inserted = 0;
   if (!content.length) return ingestionResult(0, skipped);
+  let client;
+  let locked = false;
   try {
+    client = await pool.connect();
+    await lockBusinessKnowledge(client, businessId); locked = true;
     // Recheck stored content on retries, independent of Redis dedup expiry/failures.
-    const existing = await pool.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 AND source_type=$2 AND content=ANY($3::text[])', [businessId, sourceType, content]);
+    const existing = await client.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 AND source_type=$2 AND content=ANY($3::text[])', [businessId, sourceType, content]);
     const known = new Set(existing.rows.map(row => row.content));
-    const count = await pool.query('SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1', [businessId]);
+    const count = await client.query('SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1', [businessId]);
     const startIndex = count.rows[0]?.total || 0;
     for (let i = 0; i < content.length; i++) {
       const chunk = content[i];
       if (known.has(chunk)) { skipped++; continue; }
       const embedding = await embedChunk(chunk);
-      await insertChunk(pool, businessId, chunk, embedding, sourceType, startIndex + inserted);
+      await insertChunk(client, businessId, chunk, embedding, sourceType, startIndex + inserted);
       inserted++; known.add(chunk);
       if ((i + 1) % BATCH_SIZE === 0) await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
     }
@@ -124,6 +149,9 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
     // Successfully committed chunks (and their DB revisions) are preserved.
     throw new KnowledgeIngestionError(cause, { inserted, skipped, failed: Math.max(0, chunks.length - inserted - skipped),
       code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
+  } finally {
+    if (locked) await unlockBusinessKnowledge(client, businessId).catch(() => {});
+    client?.release();
   }
 }
 
@@ -183,8 +211,12 @@ export async function getRelevantChunks(businessId, queryText, _namespace, limit
 }
 
 export async function deleteBusinessChunks(businessId) {
+  let client;
+  let locked = false;
   try {
-    const result = await pool.query(
+    client = await pool.connect();
+    await lockBusinessKnowledge(client, businessId); locked = true;
+    const result = await client.query(
       'DELETE FROM knowledge_chunks WHERE business_id = $1',
       [businessId],
     );
@@ -193,6 +225,9 @@ export async function deleteBusinessChunks(businessId) {
   } catch (error) {
     console.error('Failed to delete business chunks:', error.message);
     throw error;
+  } finally {
+    if (locked) await unlockBusinessKnowledge(client, businessId).catch(() => {});
+    client?.release();
   }
 }
 

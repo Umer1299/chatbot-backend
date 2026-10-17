@@ -12,6 +12,7 @@ const key = (id, revision, text = question, limit = 5) => `rag:v2:${id}:${revisi
 const db = { query: async (sql, args = []) => {
   if (dbFailure) throw Error('PostgreSQL unavailable');
   const q = sql.replace(/\s+/g, ' ').trim();
+  if (q.startsWith('SELECT pg_advisory_lock') || q.startsWith('SELECT pg_advisory_unlock')) return { rows: [{}] };
   if (q.startsWith('SELECT knowledge_revision')) return { rows: [{ knowledge_revision: String(revisions.get(args[0])) }] };
   if (q.startsWith('SELECT content FROM knowledge_chunks')) return { rows: chunks.filter(c => c.businessId===args[0] && c.type===args[1] && args[2].includes(c.content)).map(c=>({content:c.content})) };
   if (q.startsWith('SELECT content,')) {

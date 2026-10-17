@@ -6,10 +6,11 @@ import { randomUUID } from 'node:crypto';
 // This suite NEVER reads DATABASE_URL or .env. CI provides a disposable database.
 const testUrl = process.env.TEST_DATABASE_URL;
 let client, sessionPool;
+let embeddingBarrier;
 const cache = new Map();
 const embedding = [1, ...Array(1535).fill(0)];
-mock.module('../src/db/pool.js', { defaultExport: { query: (...args) => (sessionPool || client).query(...args), connect: async () => ({query: (...args) => client.query(...args), release() {}}) } });
-mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: async () => embedding } });
+mock.module('../src/db/pool.js', { defaultExport: { query: (...args) => (sessionPool || client).query(...args), connect: async () => sessionPool ? sessionPool.connect() : ({query: (...args) => client.query(...args), release() {}}) } });
+mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: async () => { if (embeddingBarrier) { const barrier=embeddingBarrier; barrier.started(); await barrier.release; } return embedding; } } });
 mock.module('../src/services/redis.js', { namedExports: { redisClient: {
   get: async key => cache.get(key) || null,
   setex: async (key, ttl, value) => cache.set(key, value),
@@ -96,6 +97,26 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
       const retry=await upsertSupplementalChunks(A,['confirmed partial','retry succeeds']);
       assert.equal(retry.inserted,1);assert.equal(retry.skipped,1);
       assert.equal((await client.query("SELECT COUNT(*)::int AS n FROM knowledge_chunks WHERE business_id=$1 AND content='confirmed partial'",[A])).rows[0].n,1);
+    });
+    await t.test('supplemental ingestion and deletion serialize for one business', async () => {
+      const {deleteBusinessChunks,upsertSupplementalChunks}=await import('../src/db/vectorStore.js');
+      sessionPool = new pg.Pool({ connectionString: testUrl, max: 3, options: `-c search_path=${schema},public` });
+      let startedResolve,releaseResolve;
+      const started=new Promise(resolve=>{startedResolve=resolve;});
+      const release=new Promise(resolve=>{releaseResolve=resolve;});
+      embeddingBarrier={started:startedResolve,release};
+      try {
+        const upload=upsertSupplementalChunks(A,['concurrent upload one','concurrent upload two']);
+        await started;
+        const deletion=deleteBusinessChunks(A);
+        releaseResolve();
+        await upload;
+        await deletion;
+        assert.equal((await sessionPool.query('SELECT count(*)::int n FROM knowledge_chunks WHERE business_id=$1',[A])).rows[0].n,0);
+      } finally {
+        embeddingBarrier=null;
+        await sessionPool.end();sessionPool=null;
+      }
     });
     await t.test('durable chat gate and concurrent session ownership use real PostgreSQL constraints', async () => {
       const { requireChatSession } = await import('../src/middleware/chatSession.js');

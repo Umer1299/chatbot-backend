@@ -4,12 +4,15 @@ import express from 'express';
 
 let failDelete, deletedCount, invalidations, queries;
 const databaseError = new Error('PostgreSQL unavailable');
-mock.module('../src/db/pool.js', { defaultExport: { query: async (sql, args) => {
+const deletionDb = { query: async (sql, args) => {
   queries.push({ sql, args });
+  if (sql.startsWith('SELECT pg_advisory_')) return { rows: [{}] };
   assert.match(sql, /^DELETE FROM knowledge_chunks WHERE business_id = \$1$/);
   if (failDelete) throw databaseError;
   return { rowCount: deletedCount };
-} } });
+} };
+deletionDb.connect = async () => ({ query: deletionDb.query, release() {} });
+mock.module('../src/db/pool.js', { defaultExport: deletionDb });
 mock.module('../src/services/aiService.js', { namedExports: { getEmbedding: async () => [] } });
 mock.module('../src/services/redis.js', { namedExports: { redisClient: {
   keys: async () => { invalidations++; return ['rag:business-a:cached']; }, del: async () => {},
@@ -36,7 +39,7 @@ test('knowledge deletion endpoint returns an error when PostgreSQL rejects delet
   failDelete = true;
   const response = await fetch(`http://127.0.0.1:${server.address().port}/api/upsert/namespace/bot-a`, { method: 'DELETE' });
   assert.equal(response.status, 500); assert.equal((await response.json()).success, undefined);
-  assert.deepEqual(queries[0].args, ['business-a']);
+  assert.deepEqual(queries.find(q => q.sql.startsWith('DELETE')).args, ['business-a']);
 });
 test('successful and empty knowledge deletion preserve success response without Redis scans', async () => {
   for (const count of [2, 0]) {

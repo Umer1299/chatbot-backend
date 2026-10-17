@@ -1667,7 +1667,13 @@ test(
           });
           assert.equal(nameConfig.status, 200, JSON.stringify(nameConfig.body));
           assert.equal(
-            (await chat(sales, "name-only", "Alex Customer wants pricing"))
+            (
+              await chat(
+                sales,
+                "name-only",
+                "My name is Alex Customer and I want pricing",
+              )
+            )
               .status,
             200,
           );
@@ -1677,6 +1683,24 @@ test(
           assert.equal(namedLead.full_name, "Alex Customer");
           assert.equal(namedLead.email, null);
           assert.equal(namedLead.phone, null);
+          assert.equal(
+            (
+              await chat(
+                sales,
+                "routine-name-only",
+                "What pricing options are available?",
+              )
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_leads WHERE session_id='routine-name-only'",
+              )
+            ).rows[0].n,
+            0,
+          );
           assert.equal(
             (await call(support.root + "/leads", { cookie: owner.cookie })).body
               .leads.length,

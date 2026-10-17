@@ -17,6 +17,15 @@ const bad = () =>
   Object.assign(new Error("Invalid chat request"), { status: 400 });
 const configConflict = () =>
   Object.assign(new Error("Agent configuration changed"), { status: 409 });
+function explicitlyProvidedName(message) {
+  const marker = /\b(?:my name is|i am|i'm|this is)\s+(.+)/i.exec(message);
+  if (!marker) return null;
+  return (
+    /^([A-Z][A-Za-z'-]{1,49}(?:\s+[A-Z][A-Za-z'-]{1,49}){0,2})\b/.exec(
+      marker[1],
+    )?.[1] || null
+  );
+}
 function send(req, res, reply, extra = {}, usage = { creditsUsed: extra.isDisabled ? 0 : 1 }) {
   if (req.query.stream === "true") {
     res.setHeader("Content-Type", "text/event-stream");
@@ -219,7 +228,7 @@ export function createAgentChatRouter({
         const lead = detectLead(message);
         const selected = new Set(scope.lead_capture?.fields || []);
         const captured = {
-          name: selected.has("name") ? lead.contactInfo.name : null,
+          name: selected.has("name") ? explicitlyProvidedName(message) : null,
           email: selected.has("email") ? lead.contactInfo.email : null,
           phone: selected.has("phone") ? lead.contactInfo.phone : null,
         };

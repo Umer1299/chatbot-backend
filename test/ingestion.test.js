@@ -19,6 +19,8 @@ const db = {
     const q = sql.replace(/\s+/g, " ").trim();
     calls.push({ q, args });
     if (failDb) throw Error("Database unavailable");
+    if (q.startsWith("SELECT pg_advisory_lock") || q.startsWith("SELECT pg_advisory_unlock"))
+      return { rows: [{}] };
     if (q.startsWith("SELECT id FROM businesses")) return { rows: [{ id: A }] };
     if (q.startsWith("SELECT content FROM knowledge_chunks"))
       return {
