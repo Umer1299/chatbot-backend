@@ -5,6 +5,7 @@ import { configureTrustedProxy } from './middleware/trustedProxy.js';
 import dotenv from 'dotenv';
 import { accountHandler, accountIdentity } from './middleware/accountAuth.js';
 import agenciesV1 from './api/agenciesV1.js';
+import agentsV1 from './api/agentsV1.js';
 import { accountIpLimiter, accountUserLimiter } from './middleware/rateLimiter.js';
 import { authRateLimiter, publicReadLimiter, adminRateLimiter, widgetLimiter, dashboardLimiter } from './middleware/rateLimiter.js';
 import requireAuth from './middleware/jwtAuth.js';
@@ -45,7 +46,7 @@ app.use(cors(corsPolicy));
 // Better Auth consumes the raw stream; mount before the JSON parser.
 app.all('/api/account/*', accountIpLimiter, accountHandler());
 app.use(express.json());
-app.use('/api/v1', accountIdentity(), accountUserLimiter, agenciesV1);
+app.use('/api/v1', accountIdentity(), accountUserLimiter, agenciesV1, agentsV1);
 
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/healthz', (req, res) => res.send('OK'));

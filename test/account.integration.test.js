@@ -9,6 +9,7 @@ const { createAccountAuth } = await import("../src/auth/accountAuth.js");
 const { accountHandler, accountIdentity } =
   await import("../src/middleware/accountAuth.js");
 const { createAgencyRouter } = await import("../src/api/agenciesV1.js");
+const { createAgentRouter } = await import("../src/api/agentsV1.js");
 const testUrl = process.env.TEST_DATABASE_URL;
 
 test(
@@ -61,6 +62,7 @@ test(
       for (const file of [
         "008_account_auth.sql",
         "009_agency_business_access.sql",
+        "010_agent_foundation.sql",
       ])
         await admin.query(
           await readFile(
@@ -101,6 +103,7 @@ test(
         "/api/v1",
         accountIdentity(() => auth),
         createAgencyRouter({ db }),
+        createAgentRouter({ db }),
       );
       app.use((error, req, res, next) =>
         res.status(error.status || 500).json({ error: "Operation rejected" }),
@@ -734,6 +737,409 @@ test(
           );
         },
       );
+      let firstAgent, otherAgent, agentConfig;
+      const agentsPath = () => `/api/v1/businesses/${business.id}/agents`;
+      await t.test(
+        "owner creates multiple independent agents; staff editor can create, ungranted staff cannot",
+        async () => {
+          const results = await Promise.all(
+            ["Lead agent", "Support agent"].map((name) =>
+              call(agentsPath(), {
+                method: "POST",
+                cookie: owner.cookie,
+                body: { name },
+              }),
+            ),
+          );
+          assert.deepEqual(
+            results.map((r) => r.status),
+            [201, 201],
+          );
+          firstAgent = results[0].body.agent;
+          otherAgent = results[1].body.agent;
+          assert.notEqual(firstAgent.public_id, otherAgent.public_id);
+          assert.equal(firstAgent.status, "draft");
+          const configs = (
+            await db.query("SELECT * FROM agent_configs WHERE business_id=$1", [
+              business.id,
+            ])
+          ).rows;
+          assert.equal(configs.length, 2);
+          assert.ok(
+            configs.every(
+              (c) =>
+                c.version === 1 &&
+                c.status === "draft" &&
+                c.system_prompt === "",
+            ),
+          );
+          assert.equal(
+            (
+              await call(agentsPath(), {
+                method: "POST",
+                cookie: staff.cookie,
+                body: { name: "Editor agent" },
+              })
+            ).status,
+            201,
+          );
+          assert.equal(
+            (
+              await call(`/api/v1/businesses/${second.id}/agents`, {
+                method: "POST",
+                cookie: staff.cookie,
+                body: { name: "Forbidden" },
+              })
+            ).status,
+            404,
+          );
+        },
+      );
+      await t.test(
+        "agent metadata viewers cannot create, edit or read/update configuration; strangers and foreign IDs are rejected",
+        async () => {
+          assert.equal(
+            (await call(agentsPath(), { cookie: client.cookie })).body.agents
+              .length,
+            3,
+          );
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + firstAgent.id, {
+                cookie: client.cookie,
+              })
+            ).status,
+            200,
+          );
+          for (const [path, method, body] of [
+            [agentsPath(), "POST", { name: "Forbidden" }],
+            [
+              agentsPath() + "/" + firstAgent.id,
+              "PATCH",
+              { name: "Forbidden" },
+            ],
+            [agentsPath() + "/" + firstAgent.id + "/config", "GET", undefined],
+            [agentsPath() + "/" + firstAgent.id + "/config", "PUT", {}],
+          ]) {
+            const r = await call(path, { cookie: client.cookie, method, body });
+            assert.ok([400, 403].includes(r.status));
+          }
+          for (const cookie of [outsider.cookie, undefined])
+            assert.equal(
+              (await call(agentsPath(), { cookie })).status,
+              cookie ? 404 : 401,
+            );
+          for (const suffix of ["", "/config"])
+            assert.equal(
+              (
+                await call(
+                  `/api/v1/businesses/${second.id}/agents/${firstAgent.id}${suffix}`,
+                  { cookie: owner.cookie },
+                )
+              ).status,
+              404,
+            );
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + firstAgent.id, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { business_id: second.id },
+              })
+            ).status,
+            400,
+          );
+          assert.equal(
+            (
+              await call(agentsPath(), {
+                method: "POST",
+                cookie: owner.cookie,
+                body: { name: "Bad", public_id: randomUUID() },
+              })
+            ).status,
+            400,
+          );
+        },
+      );
+      const configBody = (version = 1) => ({
+        expected_version: version,
+        status: "active",
+        system_prompt: "Only use this agent configuration.",
+        welcome_message: "Hello",
+        starter_prompts: ["Can you help?"],
+        provider: "openai",
+        model_id: "gpt-4o-mini",
+        temperature: 0.7,
+        generation_settings: { max_output_tokens: 1024 },
+        capabilities: ["lead_capture"],
+        lead_capture: { enabled: true, fields: ["email"] },
+        escalation: { enabled: false },
+      });
+      await t.test(
+        "configuration validates settings, secrets and model/provider; viewer writes cannot mutate data",
+        async () => {
+          const path = agentsPath() + "/" + firstAgent.id + "/config";
+          for (const changes of [
+            { api_key: "secret" },
+            { business_id: second.id },
+            { provider: "anthropic" },
+            { model_id: "gpt-4o" },
+            { generation_settings: { unknown: true } },
+            { lead_capture: { enabled: true, fields: ["password"] } },
+            { system_prompt: "", status: "active" },
+          ])
+            assert.equal(
+              (
+                await call(path, {
+                  method: "PUT",
+                  cookie: owner.cookie,
+                  body: { ...configBody(), ...changes },
+                })
+              ).status,
+              400,
+            );
+          assert.equal(
+            (
+              await call(path, {
+                method: "PUT",
+                cookie: client.cookie,
+                body: configBody(),
+              })
+            ).status,
+            403,
+          );
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + firstAgent.id, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { status: "active" },
+              })
+            ).status,
+            409,
+          );
+          const saved = await call(path, {
+            method: "PUT",
+            cookie: staff.cookie,
+            body: configBody(),
+          });
+          assert.equal(saved.status, 200, JSON.stringify(saved));
+          agentConfig = saved.body.config;
+          assert.equal(agentConfig.version, 2);
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + otherAgent.id + "/config", {
+                cookie: owner.cookie,
+              })
+            ).body.config.system_prompt,
+            "",
+          );
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + firstAgent.id, {
+                cookie: owner.cookie,
+              })
+            ).body.agent.status,
+            "draft",
+          );
+        },
+      );
+      await t.test(
+        "concurrent configuration saves use optimistic versions; activation is explicit and draft saves pause readiness",
+        async () => {
+          const path = agentsPath() + "/" + firstAgent.id + "/config";
+          const saves = await Promise.all(
+            ["A", "B"].map((system_prompt) =>
+              call(path, {
+                method: "PUT",
+                cookie: owner.cookie,
+                body: { ...configBody(2), system_prompt },
+              }),
+            ),
+          );
+          assert.deepEqual(saves.map((r) => r.status).sort(), [200, 409]);
+          assert.equal(
+            (await call(path, { cookie: owner.cookie })).body.config.version,
+            3,
+          );
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + firstAgent.id, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { status: "active" },
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await call(path, {
+                method: "PUT",
+                cookie: owner.cookie,
+                body: { ...configBody(3), status: "draft" },
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await call(agentsPath() + "/" + firstAgent.id, {
+                cookie: owner.cookie,
+              })
+            ).body.agent.status,
+            "paused",
+          );
+        },
+      );
+      await t.test(
+        "archival is non-destructive and terminal; config edits cannot reactivate archived agents",
+        async () => {
+          const path = agentsPath() + "/" + otherAgent.id;
+          assert.equal(
+            (
+              await call(path, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { status: "archived" },
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await call(path + "/config", {
+                method: "PUT",
+                cookie: owner.cookie,
+                body: configBody(),
+              })
+            ).status,
+            409,
+          );
+          assert.equal(
+            (
+              await call(path, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { status: "active" },
+              })
+            ).status,
+            409,
+          );
+          assert.equal(
+            (
+              await call(path, {
+                method: "PATCH",
+                cookie: owner.cookie,
+                body: { name: "Reactivation attempt" },
+              })
+            ).status,
+            409,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_configs WHERE agent_id=$1",
+                [otherAgent.id],
+              )
+            ).rows[0].n,
+            1,
+          );
+          await assert.rejects(
+            db.query("UPDATE agents SET status='active' WHERE id=$1", [
+              otherAgent.id,
+            ]),
+            { code: "23514" },
+          );
+        },
+      );
+      await t.test(
+        "tenant-coupled agent constraints reject cross-business config/mapping and immutable identity changes",
+        async () => {
+          await assert.rejects(
+            db.query(
+              "UPDATE agent_configs SET business_id=$1 WHERE agent_id=$2",
+              [second.id, firstAgent.id],
+            ),
+            { code: "23503" },
+          );
+          await assert.rejects(
+            db.query("UPDATE agents SET business_id=$1 WHERE id=$2", [
+              second.id,
+              firstAgent.id,
+            ]),
+            { code: "23514" },
+          );
+          await assert.rejects(
+            db.query("UPDATE agents SET public_id=$1 WHERE id=$2", [
+              randomUUID(),
+              firstAgent.id,
+            ]),
+            { code: "23514" },
+          );
+          await assert.rejects(
+            db.query(
+              "INSERT INTO legacy_agent_mappings(business_id,bot_id,agent_id) VALUES ($1,$2,$3)",
+              [second.id, second.bot_id, firstAgent.id],
+            ),
+            { code: "23503" },
+          );
+        },
+      );
+      await t.test(
+        "legacy mapping is draft and preserves bot config, IDs and revision without granting agency access",
+        async () => {
+          const row = (
+            await db.query(
+              "SELECT a.*,m.bot_id,c.version,c.system_prompt FROM legacy_agent_mappings m JOIN agents a ON a.id=m.agent_id JOIN agent_configs c ON c.agent_id=a.id WHERE m.business_id=$1",
+              [legacy],
+            )
+          ).rows[0];
+          assert.equal(row.bot_id, "legacy-bot");
+          assert.equal(row.status, "draft");
+          assert.equal(row.version, 1);
+          assert.equal(row.system_prompt, "");
+          assert.equal(
+            (
+              await call(`/api/v1/businesses/${legacy}/agents`, {
+                cookie: owner.cookie,
+              })
+            ).status,
+            404,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT active FROM bot_configs WHERE business_id=$1",
+                [legacy],
+              )
+            ).rows[0].active,
+            true,
+          );
+          const before = (
+            await db.query(
+              "SELECT * FROM legacy_agent_mappings ORDER BY business_id",
+            )
+          ).rows;
+          await db.query(
+            await readFile(
+              new URL(
+                "../src/db/migrations/010_agent_foundation.sql",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
+          );
+          assert.deepEqual(
+            (
+              await db.query(
+                "SELECT * FROM legacy_agent_mappings ORDER BY business_id",
+              )
+            ).rows,
+            before,
+          );
+        },
+      );
       await t.test(
         "concurrent grants retain one row; tenant-coupled foreign keys reject invalid ownership",
         async () => {
@@ -1057,11 +1463,12 @@ test(
         },
       );
       await t.test(
-        "008/009 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
+        "008/009/010 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
         async () => {
           for (const file of [
             "008_account_auth.sql",
             "009_agency_business_access.sql",
+            "010_agent_foundation.sql",
           ])
             await db.query(
               await readFile(
@@ -1103,7 +1510,7 @@ test(
                 "SELECT count(*)::int n FROM chatflow_schema_migrations",
               )
             ).rows[0].n,
-            2,
+            3,
           );
         },
       );
