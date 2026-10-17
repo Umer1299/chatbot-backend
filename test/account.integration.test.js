@@ -43,11 +43,17 @@ test(
       ragCache = new Map();
     let redisDown = false,
       embeddingDown = false,
-      duringCompletion = null;
+      duringCompletion = null,
+      completionBarrier = null;
     const fakeEmbed = async () =>
       embeddingDown ? null : [1, ...Array(1535).fill(0)];
     const fakeComplete = async (input) => {
       modelCalls.push(input);
+      if (completionBarrier) {
+        const barrier = completionBarrier;
+        barrier.started();
+        await barrier.release;
+      }
       if (duringCompletion) {
         const action = duringCompletion;
         duringCompletion = null;
@@ -1482,6 +1488,150 @@ test(
           assert.ok(!modelCalls[1].systemPrompt.includes("Sales pricing"));
           assert.equal(modelCalls[0].messages.length, 1);
           assert.equal(modelCalls[1].messages.length, 1);
+          const updateConfig = async (
+            agent,
+            system_prompt,
+            lead_capture,
+            capabilities,
+            extra = {},
+          ) => {
+            const current = await call(agent.root + "/config", {
+              cookie: owner.cookie,
+            });
+            assert.equal(current.status, 200);
+            return call(agent.root + "/config", {
+              method: "PUT",
+              cookie: owner.cookie,
+              body: {
+                ...configBody(current.body.config.version),
+                system_prompt,
+                lead_capture,
+                capabilities,
+                ...extra,
+              },
+            });
+          };
+          const race = async (agent, sessionId, message, stream, mutate) => {
+            let startedResolve, releaseResolve;
+            const started = new Promise((resolve) => {
+              startedResolve = resolve;
+            });
+            const release = new Promise((resolve) => {
+              releaseResolve = resolve;
+            });
+            completionBarrier = { started: startedResolve, release };
+            const pending = chat(agent, sessionId, message, stream);
+            await started;
+            try {
+              await mutate();
+            } finally {
+              releaseResolve();
+            }
+            const result = await pending;
+            completionBarrier = null;
+            return result;
+          };
+          const assertNoRuntimeWrites = async (sessionId) => {
+            for (const table of [
+              "agent_chat_sessions",
+              "agent_chat_messages",
+              "agent_leads",
+              "agent_inquiries",
+            ])
+              assert.equal(
+                (
+                  await db.query(
+                    `SELECT count(*)::int n FROM ${table} WHERE session_id=$1`,
+                    [sessionId],
+                  )
+                ).rows[0].n,
+                0,
+                `${table} rejects stale config`,
+              );
+          };
+          const disabledRace = await race(
+            sales,
+            "config-disabled-json",
+            "Please email me at stale@example.test about pricing",
+            false,
+            async () => {
+              const updated = await updateConfig(
+                sales,
+                "Sales assistant",
+                { enabled: false, fields: [] },
+                [],
+              );
+              assert.equal(updated.status, 200);
+            },
+          );
+          assert.equal(disabledRace.status, 409, JSON.stringify(disabledRace));
+          await assertNoRuntimeWrites("config-disabled-json");
+          assert.equal(
+            (
+              await updateConfig(
+                sales,
+                "Sales assistant",
+                { enabled: true, fields: ["email"] },
+                ["lead_capture"],
+              )
+            ).status,
+            200,
+          );
+          const fieldsRace = await race(
+            sales,
+            "config-fields-sse",
+            "Please call +44 7700 900123 or email fields@example.test about pricing",
+            true,
+            async () => {
+              const updated = await updateConfig(
+                sales,
+                "Sales assistant",
+                { enabled: true, fields: ["name"] },
+                ["lead_capture"],
+              );
+              assert.equal(updated.status, 200);
+            },
+          );
+          assert.equal(fieldsRace.status, 409, fieldsRace.raw);
+          assert.doesNotMatch(fieldsRace.raw, /data: \[DONE\]/);
+          assert.doesNotMatch(fieldsRace.raw, /Sales response/);
+          await assertNoRuntimeWrites("config-fields-sse");
+          assert.equal(
+            (
+              await updateConfig(
+                sales,
+                "Sales assistant",
+                { enabled: true, fields: ["email"] },
+                ["lead_capture"],
+              )
+            ).status,
+            200,
+          );
+          const unrelatedRace = await race(
+            sales,
+            "unrelated-config-update",
+            "A normal pricing question",
+            false,
+            async () => {
+              const updated = await updateConfig(
+                support,
+                "Support assistant",
+                { enabled: false, fields: [] },
+                [],
+                { welcome_message: "Updated support welcome" },
+              );
+              assert.equal(updated.status, 200);
+            },
+          );
+          assert.equal(unrelatedRace.status, 200, JSON.stringify(unrelatedRace));
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_chat_messages WHERE session_id='unrelated-config-update'",
+              )
+            ).rows[0].n,
+            2,
+          );
           assert.equal(
             (await call(sales.root + "/leads", { cookie: owner.cookie })).body
               .leads.length,

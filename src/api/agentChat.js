@@ -15,6 +15,8 @@ const denied = () =>
   Object.assign(new Error("Chat unavailable"), { status: 403 });
 const bad = () =>
   Object.assign(new Error("Invalid chat request"), { status: 400 });
+const configConflict = () =>
+  Object.assign(new Error("Agent configuration changed"), { status: 409 });
 function send(req, res, reply, extra = {}, usage = { creditsUsed: extra.isDisabled ? 0 : 1 }) {
   if (req.query.stream === "true") {
     res.setHeader("Content-Type", "text/event-stream");
@@ -65,7 +67,7 @@ export function createAgentChatRouter({
       const r = await db.query(
         `SELECT d.id AS deployment_id,d.business_id,d.agent_id,d.allowed_origins,d.status AS deployment_status,
       a.status AS agent_status,c.status AS config_status,c.system_prompt,c.welcome_message,c.provider,c.model_id,c.temperature,
-      c.generation_settings,c.capabilities,c.lead_capture,c.escalation,m.api_model_id,m.min_plan,b.active AS business_active,b.plan AS business_plan
+      c.version AS config_version,c.generation_settings,c.capabilities,c.lead_capture,c.escalation,m.api_model_id,m.min_plan,b.active AS business_active,b.plan AS business_plan
       FROM website_deployments d JOIN agents a ON a.id=d.agent_id AND a.business_id=d.business_id
       JOIN businesses b ON b.id=d.business_id
       JOIN agent_configs c ON c.agent_id=a.id AND c.business_id=a.business_id
@@ -152,16 +154,31 @@ export function createAgentChatRouter({
         // state under row locks before committing a reply: a rotation, pause or
         // model deactivation during generation must revoke this in-flight write.
         const ready = await client.query(
-          `SELECT a.id,b.plan,m.min_plan FROM agents a JOIN businesses b ON b.id=a.business_id
+          `SELECT a.id,a.status AS agent_status,b.active AS business_active,b.plan,
+          c.status AS config_status,c.version AS config_version,c.provider,c.model_id,
+          length(trim(c.system_prompt))>0 AS has_prompt,m.min_plan,m.is_active AS model_active
+          FROM agents a JOIN businesses b ON b.id=a.business_id
           JOIN agent_configs c ON c.agent_id=a.id AND c.business_id=a.business_id
           JOIN model_configs m ON m.model_id=c.model_id AND m.provider=c.provider
-          WHERE a.id=$1 AND a.business_id=$2 AND a.status='active' AND b.active=true
-          AND c.status='active' AND length(trim(c.system_prompt))>0 AND m.is_active=true
-          AND c.provider=$3 AND c.model_id=$4
+          WHERE a.id=$1 AND a.business_id=$2
           FOR SHARE OF a,b,c,m`,
-          [scope.agent_id, scope.business_id, scope.provider, scope.model_id],
+          [scope.agent_id, scope.business_id],
         );
-        if (!ready.rows[0] || !agentModelAllowed(ready.rows[0].plan, ready.rows[0].min_plan)) throw denied();
+        const current = ready.rows[0];
+        if (!current) throw denied();
+        if (String(current.config_version) !== String(scope.config_version))
+          throw configConflict();
+        if (
+          !current.business_active ||
+          current.agent_status !== "active" ||
+          current.config_status !== "active" ||
+          !current.has_prompt ||
+          !current.model_active ||
+          current.provider !== scope.provider ||
+          current.model_id !== scope.model_id ||
+          !agentModelAllowed(current.plan, current.min_plan)
+        )
+          throw denied();
         const credential = await client.query(
           `SELECT id FROM website_deployments WHERE id=$1 AND business_id=$2
           AND agent_id=$3 AND credential_hash=$4 AND status='active'
