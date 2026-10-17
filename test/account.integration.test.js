@@ -1671,7 +1671,7 @@ test(
               await chat(
                 sales,
                 "name-only",
-                "My name is Alex Customer and I want pricing",
+                "My name is Alex Customer",
               )
             )
               .status,
@@ -1683,6 +1683,19 @@ test(
           assert.equal(namedLead.full_name, "Alex Customer");
           assert.equal(namedLead.email, null);
           assert.equal(namedLead.phone, null);
+          assert.equal(
+            (await chat(sales, "name-only", "What pricing options are available?"))
+              .status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_leads WHERE session_id='name-only' AND full_name='Alex Customer'",
+              )
+            ).rows[0].n,
+            1,
+          );
           assert.equal(
             (
               await chat(
@@ -2179,6 +2192,23 @@ test(
       await t.test(
         "removing agency staff revokes explicit business access without touching client grants",
         async () => {
+          const temporaryClientMembership = randomUUID();
+          await db.query(
+            `INSERT INTO chatflow_member(id,"organizationId","userId",role,"createdAt")
+             VALUES($1,$2,$3,'member',now())`,
+            [temporaryClientMembership, agency, client.id],
+          );
+          await db.query("DELETE FROM chatflow_member WHERE id=$1", [
+            temporaryClientMembership,
+          ]);
+          const independentGrant = await db.query(
+            "SELECT grant_kind,agency_member_id FROM business_memberships WHERE business_id=$1 AND user_id=$2",
+            [business.id, client.id],
+          );
+          assert.deepEqual(independentGrant.rows[0], {
+            grant_kind: "client",
+            agency_member_id: null,
+          });
           const member = (
             await db.query(
               'SELECT id FROM chatflow_member WHERE "organizationId"=$1 AND "userId"=$2',

@@ -71,7 +71,11 @@ CREATE TRIGGER chatflow_guard_agency_owner BEFORE INSERT OR UPDATE OR DELETE ON 
 
 CREATE OR REPLACE FUNCTION chatflow_remove_staff_access() RETURNS trigger LANGUAGE plpgsql AS $body$
 BEGIN
-  DELETE FROM business_memberships WHERE agency_id=OLD."organizationId" AND user_id=OLD."userId";
+  -- Independent client grants survive agency staff removal. Agency-staff rows
+  -- are also covered by the composite FK's ON DELETE CASCADE.
+  DELETE FROM business_memberships
+    WHERE agency_id=OLD."organizationId" AND user_id=OLD."userId"
+      AND grant_kind='agency_staff';
   RETURN OLD;
 END $body$;
 DROP TRIGGER IF EXISTS chatflow_remove_staff_access ON chatflow_member;

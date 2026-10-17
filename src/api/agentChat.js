@@ -235,7 +235,7 @@ export function createAgentChatRouter({
         if (
           scope.lead_capture?.enabled &&
           scope.capabilities?.includes("lead_capture") &&
-          lead.isLead &&
+          (lead.isLead || captured.name) &&
           (captured.name || captured.email || captured.phone)
         ) {
           await client.query(
