@@ -2658,7 +2658,7 @@ test(
                 "SELECT count(*)::int n FROM chatflow_schema_migrations",
               )
             ).rows[0].n,
-            4,
+            5,
           );
         },
       );
