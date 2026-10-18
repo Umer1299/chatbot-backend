@@ -110,6 +110,8 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
       try {
         const upload=upsertSupplementalChunks(A,['concurrent upload one','concurrent upload two']);
         await started;
+        await assert.rejects(upsertSupplementalChunks(A,['overlapping upload']), error =>
+          error.status===409 && error.code==='KNOWLEDGE_MUTATION_CONFLICT');
         await assert.rejects(deleteBusinessChunks(A), error => error.status===409);
         assert.equal(sessionPool.waitingCount,0);
         releaseResolve();

@@ -33,10 +33,21 @@ async function assertKnowledgeClaim(client, businessId, token) {
 }
 
 async function releaseKnowledgeClaim(businessId, token) {
-  await pool.query(
-    'DELETE FROM legacy_knowledge_mutation_claims WHERE business_id=$1 AND claim_token=$2',
-    [businessId, token],
-  );
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await pool.query(
+        'DELETE FROM legacy_knowledge_mutation_claims WHERE business_id=$1 AND claim_token=$2',
+        [businessId, token],
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2)
+        await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  throw lastError;
 }
 
 function validatedChunks(chunks) {
@@ -132,10 +143,11 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
   } catch (cause) {
     if (inTransaction) await client.query('ROLLBACK').catch(() => {});
     throw new KnowledgeIngestionError(cause, { skipped, failed: content.length,
-      code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
+      code: cause.status === 409 ? 'KNOWLEDGE_MUTATION_CONFLICT' :
+        cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
   } finally {
     client?.release();
-    if (claim) await releaseKnowledgeClaim(businessId, claim).catch(() => {});
+    if (claim) await releaseKnowledgeClaim(businessId, claim);
   }
 }
 
@@ -175,9 +187,10 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
   } catch (cause) {
     // Successfully committed chunks (and their DB revisions) are preserved.
     throw new KnowledgeIngestionError(cause, { inserted, skipped, failed: Math.max(0, chunks.length - inserted - skipped),
-      code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
+      code: cause.status === 409 ? 'KNOWLEDGE_MUTATION_CONFLICT' :
+        cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
   } finally {
-    if (claim) await releaseKnowledgeClaim(businessId, claim).catch(() => {});
+    if (claim) await releaseKnowledgeClaim(businessId, claim);
   }
 }
 
@@ -257,7 +270,7 @@ export async function deleteBusinessChunks(businessId) {
     throw error;
   } finally {
     client?.release();
-    if (claim) await releaseKnowledgeClaim(businessId, claim).catch(() => {});
+    if (claim) await releaseKnowledgeClaim(businessId, claim);
   }
 }
 

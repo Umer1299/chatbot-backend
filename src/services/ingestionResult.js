@@ -10,7 +10,11 @@ export class KnowledgeIngestionError extends Error {
   ) {
     super('Knowledge ingestion failed', { cause });
     this.code = code;
-    this.status = code === 'KNOWLEDGE_EMBEDDING_FAILED' ? 502 : 503;
+    this.status = code === 'KNOWLEDGE_EMBEDDING_FAILED'
+      ? 502
+      : code === 'KNOWLEDGE_MUTATION_CONFLICT'
+        ? 409
+        : 503;
     this.result = {
       inserted,
       skipped,

@@ -13,7 +13,8 @@ let chunks,
   inputChunks,
   queued,
   queueMode,
-  knowledgeClaim;
+  knowledgeClaim,
+  claimReleaseFailures;
 const A = "business-a";
 const db = {
   query: async (sql, args = []) => {
@@ -28,6 +29,10 @@ const db = {
     if (q.startsWith("SELECT claim_token FROM legacy_knowledge_mutation_claims"))
       return { rows: knowledgeClaim ? [{ claim_token: knowledgeClaim }] : [] };
     if (q.startsWith("DELETE FROM legacy_knowledge_mutation_claims")) {
+      if (claimReleaseFailures > 0) {
+        claimReleaseFailures--;
+        throw Error("Claim release failed");
+      }
       if (knowledgeClaim === args[1]) knowledgeClaim = null;
       return { rows: [], rowCount: 1 };
     }
@@ -200,6 +205,7 @@ beforeEach(() => {
   queued = [];
   queueMode = "success";
   knowledgeClaim = null;
+  claimReleaseFailures = 0;
 });
 
 test("database failures reject helper and API with no success marker", async () => {
@@ -289,6 +295,20 @@ test("replacement embedding failure never deletes working website or owner knowl
   await assert.rejects(upsertChunks(A, ["new one", "bad embedding"]));
   assert.deepEqual(chunks, before);
   assert.ok(!calls.some((c) => c.q.startsWith("DELETE FROM knowledge_chunks")));
+});
+test("successful writes do not report success when durable claim cleanup exhausts retries", async () => {
+  claimReleaseFailures = 3;
+  await assert.rejects(
+    upsertSupplementalChunks(A, ["committed before cleanup failure"]),
+    /Claim release failed/,
+  );
+  assert.ok(chunks.some((c) => c.content === "committed before cleanup failure"));
+  assert.equal(
+    calls.filter((c) =>
+      c.q.startsWith("DELETE FROM legacy_knowledge_mutation_claims"),
+    ).length,
+    3,
+  );
 });
 test("replacement database failure rolls back all attempted chunks and revision changes", async () => {
   const before = structuredClone(chunks);
