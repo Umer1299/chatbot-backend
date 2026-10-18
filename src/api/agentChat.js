@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import pool from "../db/pool.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { inTransaction } from "../services/agencyAccess.js";
@@ -26,37 +27,49 @@ function explicitlyProvidedName(message) {
     /^([A-Za-z][A-Za-z'-]{1,49}(?:\s+[A-Za-z][A-Za-z'-]{1,49})?)\b/.exec(
       marker[1],
     )?.[1];
-  return name
-    ? name
-        .split(/\s+/)
-        .map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
-        .join(" ")
-    : null;
+  if (!name) return null;
+  const stopWords = new Set(["and", "but", "because", "from", "who"]);
+  const words = name.split(/\s+/);
+  if (stopWords.has(words[0].toLowerCase())) return null;
+  return words
+    .filter((word, index) => index === 0 || !stopWords.has(word.toLowerCase()))
+    .map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
 }
 
-async function withSessionTurnLock(db, key, work) {
-  const client = await db.connect();
-  let locked = false;
-  try {
-    await client.query(
-      "SELECT pg_advisory_lock(hashtextextended($1::text,145009))",
-      [key],
+const turnConflict = () =>
+  Object.assign(new Error("Conversation turn already in progress"), {
+    status: 409,
+  });
+async function withSessionTurnClaim(db, scope, sessionId, work) {
+  const claim = randomUUID();
+  const acquired = await db.query(
+    `INSERT INTO agent_chat_turn_claims(session_id,business_id,agent_id,deployment_id,claim_token,expires_at)
+    VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '15 minutes')
+    ON CONFLICT(session_id) DO UPDATE SET business_id=EXCLUDED.business_id,agent_id=EXCLUDED.agent_id,
+      deployment_id=EXCLUDED.deployment_id,claim_token=EXCLUDED.claim_token,claimed_at=clock_timestamp(),expires_at=EXCLUDED.expires_at
+    WHERE agent_chat_turn_claims.expires_at<=clock_timestamp()
+    RETURNING claim_token`,
+    [sessionId, scope.business_id, scope.agent_id, scope.deployment_id, claim],
+  );
+  if (acquired.rows[0]?.claim_token !== claim) {
+    const own = await db.query(
+      `SELECT 1 FROM agent_chat_turn_claims WHERE session_id=$1 AND business_id=$2
+      AND agent_id=$3 AND deployment_id=$4 AND expires_at>clock_timestamp()`,
+      [sessionId, scope.business_id, scope.agent_id, scope.deployment_id],
     );
-    locked = true;
-    return await work(client);
+    if (own.rows[0]) throw turnConflict();
+    throw denied();
+  }
+  try {
+    return await work(claim);
   } finally {
-    let unlockError;
-    if (locked) {
-      try {
-        await client.query(
-          "SELECT pg_advisory_unlock(hashtextextended($1::text,145009))",
-          [key],
-        );
-      } catch (error) {
-        unlockError = error;
-      }
-    }
-    client.release(unlockError);
+    await db
+      .query(
+        "DELETE FROM agent_chat_turn_claims WHERE session_id=$1 AND claim_token=$2",
+        [sessionId, claim],
+      )
+      .catch((error) => console.error("Failed to release agent chat turn", error));
   }
 }
 function send(req, res, reply, extra = {}, usage = { creditsUsed: extra.isDisabled ? 0 : 1 }) {
@@ -139,13 +152,14 @@ export function createAgentChatRouter({
         throw denied();
       const { sessionId } = body,
         message = body.message.trim();
-      return withSessionTurnLock(
+      return withSessionTurnClaim(
         db,
+        scope,
         sessionId,
-        async (turnClient) => {
-          // Session identifiers are globally unique. Holding the same lock from
-          // history read through commit serializes turns and ownership checks.
-          const existing = await turnClient.query(
+        async (claim) => {
+          // The short claim serializes the globally unique session without
+          // reserving a pool client while external services are running.
+          const existing = await db.query(
             "SELECT business_id,agent_id,deployment_id FROM agent_chat_sessions WHERE id=$1",
             [sessionId],
           );
@@ -157,7 +171,7 @@ export function createAgentChatRouter({
           )
             throw denied();
           const history = (
-            await turnClient.query(
+            await db.query(
               `SELECT role,content FROM
       (SELECT id,role,content,created_at FROM agent_chat_messages
       WHERE session_id=$1 AND business_id=$2 AND agent_id=$3 AND deployment_id=$4
@@ -175,7 +189,7 @@ export function createAgentChatRouter({
             businessId: scope.business_id,
             agentId: scope.agent_id,
             query: message,
-            db: turnClient,
+            db,
             embed,
             cache,
           });
@@ -207,6 +221,17 @@ export function createAgentChatRouter({
           });
           // Session, message pair, lead and inquiry either commit together or not at all.
           await inTransaction(async (client) => {
+        const activeTurn = await client.query(
+          `SELECT claim_token FROM agent_chat_turn_claims WHERE session_id=$1
+          AND business_id=$2 AND agent_id=$3 AND deployment_id=$4 FOR UPDATE`,
+          [
+            sessionId,
+            scope.business_id,
+            scope.agent_id,
+            scope.deployment_id,
+          ],
+        );
+        if (activeTurn.rows[0]?.claim_token !== claim) throw turnConflict();
         // Generation happens outside the transaction. Recheck mutable admission
         // state under row locks before committing a reply: a rotation, pause or
         // model deactivation during generation must revoke this in-flight write.
@@ -323,12 +348,7 @@ export function createAgentChatRouter({
           "UPDATE agent_chat_sessions SET updated_at=now() WHERE id=$1 AND business_id=$2 AND agent_id=$3 AND deployment_id=$4",
           [sessionId, scope.business_id, scope.agent_id, scope.deployment_id],
         );
-          }, {
-            connect: async () => ({
-              query: (...args) => turnClient.query(...args),
-              release() {},
-            }),
-          });
+          }, db);
           send(req, res, reply, { model: scope.model_id }, usage);
         },
       );

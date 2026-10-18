@@ -143,6 +143,7 @@ test(
         "009_agency_business_access.sql",
         "010_agent_foundation.sql",
         "011_agent_runtime.sql",
+        "012_agent_chat_turn_claims.sql",
       ])
         await admin.query(
           await readFile(
@@ -1537,6 +1538,7 @@ test(
               "agent_chat_messages",
               "agent_leads",
               "agent_inquiries",
+              "agent_chat_turn_claims",
             ])
               assert.equal(
                 (
@@ -1702,6 +1704,24 @@ test(
             "Alex Customer",
           );
           assert.equal(
+            (
+              await chat(
+                sales,
+                "conjunction-name-only",
+                "My name is Alex and I need pricing",
+              )
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT full_name FROM agent_leads WHERE session_id='conjunction-name-only'",
+              )
+            ).rows[0].full_name,
+            "Alex",
+          );
+          assert.equal(
             (await chat(sales, "name-only", "What pricing options are available?"))
               .status,
             200,
@@ -1768,14 +1788,20 @@ test(
             "serialized-turns",
             "Second concurrent question",
           );
+          const secondTurnResult = await secondTurn;
+          assert.equal(secondTurnResult.status, 409, secondTurnResult.raw);
+          assert.equal(modelCalls.length, callsBeforeSerializedTurns + 1);
+          assert.equal(db.waitingCount, 0);
           firstReleaseResolve();
-          const [firstTurnResult, secondTurnResult] = await Promise.all([
-            firstTurn,
-            secondTurn,
-          ]);
+          const firstTurnResult = await firstTurn;
           completionBarrier = null;
           assert.equal(firstTurnResult.status, 200, firstTurnResult.raw);
-          assert.equal(secondTurnResult.status, 200, secondTurnResult.raw);
+          const retryResult = await chat(
+            sales,
+            "serialized-turns",
+            "Second concurrent question",
+          );
+          assert.equal(retryResult.status, 200, retryResult.raw);
           const serializedCalls = modelCalls.slice(callsBeforeSerializedTurns);
           assert.equal(serializedCalls.length, 2);
           assert.deepEqual(
@@ -1797,6 +1823,14 @@ test(
               )
             ).rows[0].n,
             4,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_chat_turn_claims WHERE session_id='serialized-turns'",
+              )
+            ).rows[0].n,
+            0,
           );
           assert.equal(
             (await call(support.root + "/leads", { cookie: owner.cookie })).body
@@ -2575,13 +2609,14 @@ test(
         },
       );
       await t.test(
-        "008/009/010/011 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
+        "008/009/010/011/012 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
         async () => {
           for (const file of [
             "008_account_auth.sql",
             "009_agency_business_access.sql",
             "010_agent_foundation.sql",
             "011_agent_runtime.sql",
+            "012_agent_chat_turn_claims.sql",
           ])
             await db.query(
               await readFile(
