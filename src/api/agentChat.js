@@ -159,8 +159,10 @@ export function createAgentChatRouter({
           const history = (
             await turnClient.query(
               `SELECT role,content FROM
-      (SELECT id,role,content,created_at FROM agent_chat_messages WHERE session_id=$1 AND business_id=$2 AND agent_id=$3 AND deployment_id=$4
-      ORDER BY created_at DESC,id DESC LIMIT 20) recent ORDER BY created_at,id`,
+      (SELECT id,role,content,created_at FROM agent_chat_messages
+      WHERE session_id=$1 AND business_id=$2 AND agent_id=$3 AND deployment_id=$4
+      ORDER BY created_at DESC,CASE role WHEN 'assistant' THEN 0 ELSE 1 END,id DESC LIMIT 20) recent
+      ORDER BY created_at,CASE role WHEN 'user' THEN 0 ELSE 1 END,id`,
               [
                 sessionId,
                 scope.business_id,
