@@ -1684,6 +1684,24 @@ test(
           assert.equal(namedLead.email, null);
           assert.equal(namedLead.phone, null);
           assert.equal(
+            (
+              await chat(
+                sales,
+                "lowercase-name-only",
+                "my name is alex customer",
+              )
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT full_name FROM agent_leads WHERE session_id='lowercase-name-only'",
+              )
+            ).rows[0].full_name,
+            "Alex Customer",
+          );
+          assert.equal(
             (await chat(sales, "name-only", "What pricing options are available?"))
               .status,
             200,
@@ -1726,6 +1744,59 @@ test(
               )
             ).rows[0].n,
             0,
+          );
+          let firstStartedResolve, firstReleaseResolve;
+          const firstStarted = new Promise((resolve) => {
+            firstStartedResolve = resolve;
+          });
+          const firstRelease = new Promise((resolve) => {
+            firstReleaseResolve = resolve;
+          });
+          completionBarrier = {
+            started: firstStartedResolve,
+            release: firstRelease,
+          };
+          const callsBeforeSerializedTurns = modelCalls.length;
+          const firstTurn = chat(
+            sales,
+            "serialized-turns",
+            "First concurrent question",
+          );
+          await firstStarted;
+          const secondTurn = chat(
+            sales,
+            "serialized-turns",
+            "Second concurrent question",
+          );
+          firstReleaseResolve();
+          const [firstTurnResult, secondTurnResult] = await Promise.all([
+            firstTurn,
+            secondTurn,
+          ]);
+          completionBarrier = null;
+          assert.equal(firstTurnResult.status, 200, firstTurnResult.raw);
+          assert.equal(secondTurnResult.status, 200, secondTurnResult.raw);
+          const serializedCalls = modelCalls.slice(callsBeforeSerializedTurns);
+          assert.equal(serializedCalls.length, 2);
+          assert.deepEqual(
+            serializedCalls[0].messages.map((row) => row.content),
+            ["First concurrent question"],
+          );
+          assert.deepEqual(
+            serializedCalls[1].messages.map((row) => row.content),
+            [
+              "First concurrent question",
+              "Sales response",
+              "Second concurrent question",
+            ],
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_chat_messages WHERE session_id='serialized-turns'",
+              )
+            ).rows[0].n,
+            4,
           );
           assert.equal(
             (await call(support.root + "/leads", { cookie: owner.cookie })).body
