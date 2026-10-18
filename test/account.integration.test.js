@@ -144,6 +144,7 @@ test(
         "010_agent_foundation.sql",
         "011_agent_runtime.sql",
         "012_agent_chat_turn_claims.sql",
+        "013_legacy_knowledge_mutation_claims.sql",
       ])
         await admin.query(
           await readFile(
@@ -1721,6 +1722,22 @@ test(
             ).rows[0].full_name,
             "Alex",
           );
+          for (const [sessionId, message] of [
+            ["so-name-only", "My name is Alex so I can ask about pricing"],
+            ["or-name-only", "My name is Alex or you can call me later"],
+            ["then-name-only", "My name is Alex then I need pricing"],
+          ]) {
+            assert.equal((await chat(sales, sessionId, message)).status, 200);
+            assert.equal(
+              (
+                await db.query(
+                  "SELECT full_name FROM agent_leads WHERE session_id=$1",
+                  [sessionId],
+                )
+              ).rows[0].full_name,
+              "Alex",
+            );
+          }
           assert.equal(
             (await chat(sales, "name-only", "What pricing options are available?"))
               .status,
@@ -2609,7 +2626,7 @@ test(
         },
       );
       await t.test(
-        "008/009/010/011/012 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
+        "008/009/010/011/012/013 replay preserves legacy data/configs, nullable unique Bubble IDs and relationships",
         async () => {
           for (const file of [
             "008_account_auth.sql",
@@ -2617,6 +2634,7 @@ test(
             "010_agent_foundation.sql",
             "011_agent_runtime.sql",
             "012_agent_chat_turn_claims.sql",
+            "013_legacy_knowledge_mutation_claims.sql",
           ])
             await db.query(
               await readFile(
@@ -2658,7 +2676,7 @@ test(
                 "SELECT count(*)::int n FROM chatflow_schema_migrations",
               )
             ).rows[0].n,
-            5,
+            6,
           );
         },
       );

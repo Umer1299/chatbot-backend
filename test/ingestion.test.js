@@ -12,15 +12,25 @@ let chunks,
   embeddingMode,
   inputChunks,
   queued,
-  queueMode;
+  queueMode,
+  knowledgeClaim;
 const A = "business-a";
 const db = {
   query: async (sql, args = []) => {
     const q = sql.replace(/\s+/g, " ").trim();
     calls.push({ q, args });
     if (failDb) throw Error("Database unavailable");
-    if (q.startsWith("SELECT pg_advisory_lock") || q.startsWith("SELECT pg_advisory_unlock"))
-      return { rows: [{}] };
+    if (q.startsWith("INSERT INTO legacy_knowledge_mutation_claims")) {
+      if (knowledgeClaim) return { rows: [] };
+      knowledgeClaim = args[1];
+      return { rows: [{ claim_token: knowledgeClaim }] };
+    }
+    if (q.startsWith("SELECT claim_token FROM legacy_knowledge_mutation_claims"))
+      return { rows: knowledgeClaim ? [{ claim_token: knowledgeClaim }] : [] };
+    if (q.startsWith("DELETE FROM legacy_knowledge_mutation_claims")) {
+      if (knowledgeClaim === args[1]) knowledgeClaim = null;
+      return { rows: [], rowCount: 1 };
+    }
     if (q.startsWith("SELECT id FROM businesses")) return { rows: [{ id: A }] };
     if (q.startsWith("SELECT content FROM knowledge_chunks"))
       return {
@@ -189,6 +199,7 @@ beforeEach(() => {
   inputChunks = ["new one", "new two"];
   queued = [];
   queueMode = "success";
+  knowledgeClaim = null;
 });
 
 test("database failures reject helper and API with no success marker", async () => {
@@ -277,7 +288,7 @@ test("replacement embedding failure never deletes working website or owner knowl
   const before = structuredClone(chunks);
   await assert.rejects(upsertChunks(A, ["new one", "bad embedding"]));
   assert.deepEqual(chunks, before);
-  assert.ok(!calls.some((c) => c.q.startsWith("DELETE")));
+  assert.ok(!calls.some((c) => c.q.startsWith("DELETE FROM knowledge_chunks")));
 });
 test("replacement database failure rolls back all attempted chunks and revision changes", async () => {
   const before = structuredClone(chunks);

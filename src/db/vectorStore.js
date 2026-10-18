@@ -1,24 +1,41 @@
 import { KnowledgeIngestionError, ingestionResult } from '../services/ingestionResult.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import pool from './pool.js';
 import { getEmbedding } from '../services/aiService.js';
 import { redisClient } from '../services/redis.js';
 
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 200;
-const KNOWLEDGE_LOCK_SALT = 145008;
-
-async function lockBusinessKnowledge(client, businessId) {
-  await client.query(
-    'SELECT pg_advisory_lock(hashtextextended($1::text,$2::bigint))',
-    [businessId, KNOWLEDGE_LOCK_SALT],
+async function acquireKnowledgeClaim(businessId) {
+  const token = randomUUID();
+  const result = await pool.query(
+    `INSERT INTO legacy_knowledge_mutation_claims(business_id,claim_token,expires_at)
+     VALUES($1,$2,clock_timestamp()+interval '30 minutes')
+     ON CONFLICT(business_id) DO UPDATE SET claim_token=EXCLUDED.claim_token,
+       claimed_at=clock_timestamp(),expires_at=EXCLUDED.expires_at
+     WHERE legacy_knowledge_mutation_claims.expires_at<=clock_timestamp()
+     RETURNING claim_token`,
+    [businessId, token],
   );
+  if (result.rows[0]?.claim_token !== token)
+    throw Object.assign(new Error('Knowledge mutation already in progress'), { status: 409 });
+  return token;
 }
 
-async function unlockBusinessKnowledge(client, businessId) {
-  await client.query(
-    'SELECT pg_advisory_unlock(hashtextextended($1::text,$2::bigint))',
-    [businessId, KNOWLEDGE_LOCK_SALT],
+async function assertKnowledgeClaim(client, businessId, token) {
+  const result = await client.query(
+    `SELECT claim_token FROM legacy_knowledge_mutation_claims
+     WHERE business_id=$1 FOR UPDATE`,
+    [businessId],
+  );
+  if (result.rows[0]?.claim_token !== token)
+    throw Object.assign(new Error('Knowledge mutation claim expired'), { status: 409 });
+}
+
+async function releaseKnowledgeClaim(businessId, token) {
+  await pool.query(
+    'DELETE FROM legacy_knowledge_mutation_claims WHERE business_id=$1 AND claim_token=$2',
+    [businessId, token],
   );
 }
 
@@ -92,16 +109,17 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
   const skipped = chunks.length - content.length;
   if (!content.length) return ingestionResult(0, skipped); // Never erase working data for empty input.
   let client;
-  let locked = false;
+  let claim;
   let inTransaction = false;
   try {
-    client = await pool.connect();
-    await lockBusinessKnowledge(client, businessId); locked = true;
-    // Prepare all embeddings before the destructive transaction. The advisory
-    // lock also serializes this complete mutation with deletion.
+    claim = await acquireKnowledgeClaim(businessId);
+    // The durable claim serializes the complete mutation with deletion without
+    // retaining a pool client during external embedding calls.
     const embeddings = [];
     for (const chunk of content) embeddings.push(await embedChunk(chunk));
+    client = await pool.connect();
     await client.query('BEGIN'); inTransaction = true;
+    await assertKnowledgeClaim(client, businessId, claim);
     // Serialize replacement for this business; readers keep seeing committed knowledge.
     const business = await client.query('SELECT id FROM businesses WHERE id=$1 FOR UPDATE', [businessId]);
     if (!business.rows.length) throw new Error('Business not found');
@@ -116,8 +134,8 @@ export async function upsertChunks(businessId, chunks, sourceType = 'website') {
     throw new KnowledgeIngestionError(cause, { skipped, failed: content.length,
       code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
   } finally {
-    if (locked) await unlockBusinessKnowledge(client, businessId).catch(() => {});
     client?.release();
+    if (claim) await releaseKnowledgeClaim(businessId, claim).catch(() => {});
   }
 }
 
@@ -126,21 +144,30 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
   let skipped = chunks.length - content.length;
   let inserted = 0;
   if (!content.length) return ingestionResult(0, skipped);
-  let client;
-  let locked = false;
+  let claim;
   try {
-    client = await pool.connect();
-    await lockBusinessKnowledge(client, businessId); locked = true;
+    claim = await acquireKnowledgeClaim(businessId);
     // Recheck stored content on retries, independent of Redis dedup expiry/failures.
-    const existing = await client.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 AND source_type=$2 AND content=ANY($3::text[])', [businessId, sourceType, content]);
+    const existing = await pool.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 AND source_type=$2 AND content=ANY($3::text[])', [businessId, sourceType, content]);
     const known = new Set(existing.rows.map(row => row.content));
-    const count = await client.query('SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1', [businessId]);
+    const count = await pool.query('SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1', [businessId]);
     const startIndex = count.rows[0]?.total || 0;
     for (let i = 0; i < content.length; i++) {
       const chunk = content[i];
       if (known.has(chunk)) { skipped++; continue; }
       const embedding = await embedChunk(chunk);
-      await insertChunk(client, businessId, chunk, embedding, sourceType, startIndex + inserted);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await assertKnowledgeClaim(client, businessId, claim);
+        await insertChunk(client, businessId, chunk, embedding, sourceType, startIndex + inserted);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
       inserted++; known.add(chunk);
       if ((i + 1) % BATCH_SIZE === 0) await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
     }
@@ -150,8 +177,7 @@ export async function upsertSupplementalChunks(businessId, chunks, sourceType = 
     throw new KnowledgeIngestionError(cause, { inserted, skipped, failed: Math.max(0, chunks.length - inserted - skipped),
       code: cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
   } finally {
-    if (locked) await unlockBusinessKnowledge(client, businessId).catch(() => {});
-    client?.release();
+    if (claim) await releaseKnowledgeClaim(businessId, claim).catch(() => {});
   }
 }
 
@@ -212,22 +238,26 @@ export async function getRelevantChunks(businessId, queryText, _namespace, limit
 
 export async function deleteBusinessChunks(businessId) {
   let client;
-  let locked = false;
+  let claim;
+  let inTransaction = false;
   try {
+    claim = await acquireKnowledgeClaim(businessId);
     client = await pool.connect();
-    await lockBusinessKnowledge(client, businessId); locked = true;
+    await client.query('BEGIN'); inTransaction = true;
+    await assertKnowledgeClaim(client, businessId, claim);
     const result = await client.query(
       'DELETE FROM knowledge_chunks WHERE business_id = $1',
       [businessId],
     );
-
+    await client.query('COMMIT'); inTransaction = false;
     return result.rowCount;
   } catch (error) {
+    if (inTransaction) await client.query('ROLLBACK').catch(() => {});
     console.error('Failed to delete business chunks:', error.message);
     throw error;
   } finally {
-    if (locked) await unlockBusinessKnowledge(client, businessId).catch(() => {});
     client?.release();
+    if (claim) await releaseKnowledgeClaim(businessId, claim).catch(() => {});
   }
 }
 

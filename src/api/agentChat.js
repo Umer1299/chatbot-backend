@@ -28,7 +28,11 @@ function explicitlyProvidedName(message) {
       marker[1],
     )?.[1];
   if (!name) return null;
-  const stopWords = new Set(["and", "but", "because", "from", "who"]);
+  const stopWords = new Set([
+    "and", "or", "but", "nor", "yet", "so", "then", "because", "if",
+    "when", "while", "as", "since", "although", "though", "from", "who",
+    "to", "for", "with", "can", "need", "want", "would", "have",
+  ]);
   const words = name.split(/\s+/);
   if (stopWords.has(words[0].toLowerCase())) return null;
   return words

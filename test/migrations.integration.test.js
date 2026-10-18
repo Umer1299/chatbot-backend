@@ -41,6 +41,8 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
     await client.query(await migration('005_security_boundaries.sql'));
     await client.query(await migration('006_durable_chatbot_settings.sql'));
     await client.query(await migration('007_knowledge_cache_revision.sql'));
+    for (const name of ['008_account_auth.sql','009_agency_business_access.sql','010_agent_foundation.sql','011_agent_runtime.sql','012_agent_chat_turn_claims.sql','013_legacy_knowledge_mutation_claims.sql'])
+      await client.query(await migration(name));
 
     await t.test('005 retains historical inconsistencies and rejects new cross-business/unowned messages', async () => {
       assert.equal((await client.query('SELECT COUNT(*)::int AS n FROM messages')).rows[0].n,2);
@@ -98,7 +100,7 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
       assert.equal(retry.inserted,1);assert.equal(retry.skipped,1);
       assert.equal((await client.query("SELECT COUNT(*)::int AS n FROM knowledge_chunks WHERE business_id=$1 AND content='confirmed partial'",[A])).rows[0].n,1);
     });
-    await t.test('supplemental ingestion and deletion serialize for one business', async () => {
+    await t.test('supplemental ingestion conflicts safely with deletion without holding pooled clients', async () => {
       const {deleteBusinessChunks,upsertSupplementalChunks}=await import('../src/db/vectorStore.js');
       sessionPool = new pg.Pool({ connectionString: testUrl, max: 3, options: `-c search_path=${schema},public` });
       let startedResolve,releaseResolve;
@@ -108,10 +110,11 @@ test('isolated PostgreSQL migration, historical data and RAG revision integratio
       try {
         const upload=upsertSupplementalChunks(A,['concurrent upload one','concurrent upload two']);
         await started;
-        const deletion=deleteBusinessChunks(A);
+        await assert.rejects(deleteBusinessChunks(A), error => error.status===409);
+        assert.equal(sessionPool.waitingCount,0);
         releaseResolve();
         await upload;
-        await deletion;
+        await deleteBusinessChunks(A);
         assert.equal((await sessionPool.query('SELECT count(*)::int n FROM knowledge_chunks WHERE business_id=$1',[A])).rows[0].n,0);
       } finally {
         embeddingBarrier=null;

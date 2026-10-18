@@ -6,13 +6,18 @@ import express from 'express';
 const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
 const question = 'What is the warranty on this service?';
-let cache, chunks, revisions, sessions, reads, redisFailure, dbFailure, race, failInsert, modelReply, leadWrites;
+let cache, chunks, revisions, sessions, reads, redisFailure, dbFailure, race, failInsert, modelReply, leadWrites, knowledgeClaim;
 const prompts = [];
 const key = (id, revision, text = question, limit = 5) => `rag:v2:${id}:${revision}:${createHash('sha256').update(JSON.stringify([text, limit])).digest('hex')}`;
 const db = { query: async (sql, args = []) => {
   if (dbFailure) throw Error('PostgreSQL unavailable');
   const q = sql.replace(/\s+/g, ' ').trim();
-  if (q.startsWith('SELECT pg_advisory_lock') || q.startsWith('SELECT pg_advisory_unlock')) return { rows: [{}] };
+  if (q.startsWith('INSERT INTO legacy_knowledge_mutation_claims')) {
+    if (knowledgeClaim) return { rows: [] };
+    knowledgeClaim=args[1]; return { rows: [{claim_token:knowledgeClaim}] };
+  }
+  if (q.startsWith('SELECT claim_token FROM legacy_knowledge_mutation_claims')) return { rows: knowledgeClaim ? [{claim_token:knowledgeClaim}] : [] };
+  if (q.startsWith('DELETE FROM legacy_knowledge_mutation_claims')) { if (knowledgeClaim===args[1]) knowledgeClaim=null; return {rows:[],rowCount:1}; }
   if (q.startsWith('SELECT knowledge_revision')) return { rows: [{ knowledge_revision: String(revisions.get(args[0])) }] };
   if (q.startsWith('SELECT content FROM knowledge_chunks')) return { rows: chunks.filter(c => c.businessId===args[0] && c.type===args[1] && args[2].includes(c.content)).map(c=>({content:c.content})) };
   if (q.startsWith('SELECT content,')) {
@@ -77,7 +82,7 @@ const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1
 after(() => new Promise(resolve => server.close(resolve)));
 beforeEach(() => {
   cache = new Map(); chunks = [{ businessId: A, content: 'Deleted warranty detail', type: 'website' }, { businessId: B, content: 'Private tenant B detail', type: 'website' }];
-  revisions = new Map([[A,0], [B,0]]); sessions = new Map(); reads=0; redisFailure=false; dbFailure=false; race=undefined; failInsert=false; prompts.length=0; modelReply=undefined; leadWrites=[];
+  revisions = new Map([[A,0], [B,0]]); sessions = new Map(); reads=0; redisFailure=false; dbFailure=false; race=undefined; failInsert=false; prompts.length=0; modelReply=undefined; leadWrites=[]; knowledgeClaim=null;
 });
 test('retrieval ignores old namespace keys and uses business-scoped versioned keys', async () => {
   cache.set('rag:bot-public-namespace:what-is-the-warranty-on-this-service?', JSON.stringify([{ content: 'stale namespace cache', similarity: 1 }]));
