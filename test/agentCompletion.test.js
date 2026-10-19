@@ -6,8 +6,8 @@ mock.module("openai", {
   defaultExport: class {
     chat = {
       completions: {
-        create: async (request) => {
-          requests.push(["openai", request]);
+        create: async (request, options) => {
+          requests.push(["openai", request, options]);
           return { choices: [{ message: { content: "OpenAI reply" } }], usage: { prompt_tokens: 20, completion_tokens: 5 } };
         },
       },
@@ -17,8 +17,8 @@ mock.module("openai", {
 mock.module("@anthropic-ai/sdk", {
   defaultExport: class {
     messages = {
-      create: async (request) => {
-        requests.push(["anthropic", request]);
+      create: async (request, options) => {
+        requests.push(["anthropic", request, options]);
         return { content: [{ type: "text", text: "Anthropic reply" }], usage: { input_tokens: 30, output_tokens: 6 } };
       },
     };
@@ -51,5 +51,26 @@ test("configured top_p reaches both providers without changing defaults", async 
     else process.env.OPENAI_API_KEY = oldOpenAI;
     if (oldAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = oldAnthropic;
+  }
+});
+
+test("optional abort signal is forwarded to provider adapters", async () => {
+  const oldOpenAI = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-only";
+  const signal = AbortSignal.timeout(5000);
+  try {
+    await completeAgent({
+      provider: "openai",
+      apiModelId: "mock-model",
+      systemPrompt: "Short smoke test",
+      messages: [{ role: "user", content: "Reply with OK" }],
+      signal,
+      settings: { max_output_tokens: 32 },
+    });
+    assert.equal(requests.at(-1)[1].max_tokens, 32);
+    assert.equal(requests.at(-1)[2].signal, signal);
+  } finally {
+    if (oldOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldOpenAI;
   }
 });

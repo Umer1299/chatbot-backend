@@ -8,7 +8,9 @@
     "start": "node src/server.js",
     "worker": "node src/workers/fileWorker.js",
     "dev": "nodemon src/server.js",
-    "test": "node --experimental-test-module-mocks --test test/*.test.js"
+    "test": "node --experimental-test-module-mocks --test test/*.test.js",
+    "test:staging": "node scripts/run-staging-tests.js",
+    "smoke:provider": "node scripts/live-provider-canary.js"
   },
   "repository": {
     "type": "git",

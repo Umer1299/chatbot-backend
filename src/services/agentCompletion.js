@@ -7,6 +7,7 @@ export async function completeAgent({
   systemPrompt,
   messages,
   settings = {},
+  signal,
 }) {
   const max_tokens = settings.max_output_tokens ?? 1000;
   if (provider === "openai") {
@@ -19,7 +20,7 @@ export async function completeAgent({
       temperature: settings.temperature ?? 0.7,
       ...(settings.top_p === undefined ? {} : { top_p: settings.top_p }),
       messages: [{ role: "system", content: systemPrompt }, ...messages],
-    });
+    }, signal ? { signal } : undefined);
     return { reply: answer.choices[0].message.content, rawUsage: answer.usage };
   }
   if (provider === "anthropic") {
@@ -34,7 +35,7 @@ export async function completeAgent({
       ...(settings.top_p === undefined ? {} : { top_p: settings.top_p }),
       system: systemPrompt,
       messages,
-    });
+    }, signal ? { signal } : undefined);
     return { reply: answer.content.find((c) => c.type === "text")?.text || "", rawUsage: answer.usage };
   }
   throw new Error("Unsupported provider");

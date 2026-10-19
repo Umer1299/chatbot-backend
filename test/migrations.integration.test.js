@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 
 // This suite NEVER reads DATABASE_URL or .env. CI provides a disposable database.
 const testUrl = process.env.TEST_DATABASE_URL;
+const testDatabaseConfirmation = "I_CONFIRM_DISPOSABLE_TEST_DATABASE";
 let client, sessionPool;
 let embeddingBarrier;
 const cache = new Map();
@@ -19,6 +20,11 @@ const migration = async name => readFile(new URL(`../src/db/migrations/${name}`,
 
 test('isolated PostgreSQL migration, historical data and RAG revision integration', { skip: !testUrl && 'TEST_DATABASE_URL not configured; run in PostgreSQL CI or isolated staging' }, async t => {
   const url = new URL(testUrl);
+  assert.equal(
+    process.env.TEST_DATABASE_CONFIRM,
+    testDatabaseConfirmation,
+    'Set TEST_DATABASE_CONFIRM=I_CONFIRM_DISPOSABLE_TEST_DATABASE before running migration rehearsals',
+  );
   assert.ok(['127.0.0.1','localhost','[::1]'].includes(url.hostname), 'Integration tests require a loopback database');
   assert.equal(url.pathname, '/chatflow_security_test', 'Integration database must be explicitly named chatflow_security_test');
   const { default: pg } = await import('pg');

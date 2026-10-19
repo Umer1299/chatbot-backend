@@ -21,6 +21,7 @@ const { createAgentChatRouter } = await import("../src/api/agentChat.js");
 const { retrieveAgentKnowledge } =
   await import("../src/services/agentKnowledge.js");
 const testUrl = process.env.TEST_DATABASE_URL;
+const testDatabaseConfirmation = "I_CONFIRM_DISPOSABLE_TEST_DATABASE";
 
 test(
   "isolated Better Auth and agency/business PostgreSQL integration",
@@ -31,6 +32,11 @@ test(
   },
   async (t) => {
     const url = new URL(testUrl);
+    assert.equal(
+      process.env.TEST_DATABASE_CONFIRM,
+      testDatabaseConfirmation,
+      "Set the explicit disposable database confirmation before running migration/integration tests",
+    );
     assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(url.hostname));
     assert.equal(url.pathname, "/chatflow_security_test");
     const { default: pg } = await import("pg");
@@ -1490,6 +1496,26 @@ test(
           assert.ok(!modelCalls[1].systemPrompt.includes("Sales pricing"));
           assert.equal(modelCalls[0].messages.length, 1);
           assert.equal(modelCalls[1].messages.length, 1);
+          // A transport/response loss after commit has no idempotency key today.
+          // Retrying the same request with the same session commits another turn.
+          const retryMessage = "My refund issue still needs help";
+          assert.equal(
+            (await chat(support, "response-loss-retry", retryMessage)).status,
+            200,
+          );
+          assert.equal(
+            (await chat(support, "response-loss-retry", retryMessage)).status,
+            200,
+          );
+          assert.equal(
+            (
+              await db.query(
+                "SELECT count(*)::int n FROM agent_chat_messages WHERE session_id='response-loss-retry'",
+              )
+            ).rows[0].n,
+            4,
+            "current contract permits duplicate message pairs after an ambiguous successful commit",
+          );
           const updateConfig = async (
             agent,
             system_prompt,

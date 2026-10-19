@@ -67,7 +67,7 @@ export function claudeStream(systemPrompt, messages) {
   });
 }
 
-export async function getEmbedding(text) {
+export async function getEmbedding(text, { signal } = {}) {
   try {
     const openai = getOpenAIClient();
     const input = typeof text === 'string' ? text.slice(0, 8000) : '';
@@ -75,7 +75,7 @@ export async function getEmbedding(text) {
     const result = await openai.embeddings.create({
       model: 'text-embedding-ada-002',
       input,
-    });
+    }, signal ? { signal } : undefined);
 
     return result?.data?.[0]?.embedding || null;
   } catch (error) {
