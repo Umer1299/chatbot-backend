@@ -1498,7 +1498,7 @@ test(
           assert.equal(modelCalls[1].messages.length, 1);
           // A transport/response loss after commit has no idempotency key today.
           // Retrying the same request with the same session commits another turn.
-          const retryMessage = "My refund issue still needs help";
+          const retryMessage = "Can you explain this to me?";
           assert.equal(
             (await chat(support, "response-loss-retry", retryMessage)).status,
             200,
