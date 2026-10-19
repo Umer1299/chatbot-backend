@@ -4,7 +4,7 @@ import express from 'express';
 mock.module('../src/db/pool.js',{defaultExport:{}});
 mock.module('../src/services/redis.js',{namedExports:{redisClient:null}});
 mock.module('../src/services/aiService.js',{namedExports:{getEmbedding:async()=>null}});
-const {createAgentChatRouter}=await import('../src/api/agentChat.js');
+const {createAgentChatRouter,withSessionTurnClaim}=await import('../src/api/agentChat.js');
 let sqlReads=0,embeds=0,completions=0;
 const db={async query(){sqlReads++;return {rows:[]};},connect(){throw Error('Unexpected write');}};
 const app=express();app.use(express.json());
@@ -29,4 +29,42 @@ test('public ID, malformed credentials and caller ownership claims never authori
     [{sessionId:'one',message:'hi'},'wct_'+'a'.repeat(43),403],
   ]) assert.equal(await send('/on',body,{'x-agent-token':token}),status);
   assert.equal(embeds,0);assert.equal(completions,0);assert.equal(sqlReads,1);
+});
+
+test('turn claim completion waits for bounded cleanup retries',async()=>{
+  let releases=0,workFinished=false;
+  const claimDb={query:async(sql,params)=>{
+    if(sql.startsWith('INSERT INTO agent_chat_turn_claims')) return {rows:[{claim_token:params[4]}]};
+    if(sql.startsWith('DELETE FROM agent_chat_turn_claims')) {
+      releases++;
+      if(releases<3) throw Error('transient cleanup failure');
+      return {rows:[]};
+    }
+    throw Error('Unexpected query');
+  }};
+  const result=await withSessionTurnClaim(claimDb,{
+    business_id:'business',agent_id:'agent',deployment_id:'deployment',
+  },'session',async()=>{workFinished=true;return 'reply ready';});
+  assert.equal(workFinished,true);
+  assert.equal(releases,3);
+  assert.equal(result,'reply ready');
+});
+
+test('turn claim cleanup exhaustion rejects instead of reporting success',async()=>{
+  let releases=0;
+  const claimDb={query:async(sql,params)=>{
+    if(sql.startsWith('INSERT INTO agent_chat_turn_claims')) return {rows:[{claim_token:params[4]}]};
+    if(sql.startsWith('DELETE FROM agent_chat_turn_claims')) {
+      releases++;
+      throw Error('persistent cleanup failure');
+    }
+    throw Error('Unexpected query');
+  }};
+  await assert.rejects(
+    withSessionTurnClaim(claimDb,{
+      business_id:'business',agent_id:'agent',deployment_id:'deployment',
+    },'session',async()=>({reply:'must not be emitted'})),
+    /persistent cleanup failure/,
+  );
+  assert.equal(releases,3);
 });

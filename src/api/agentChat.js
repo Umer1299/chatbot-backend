@@ -45,7 +45,22 @@ const turnConflict = () =>
   Object.assign(new Error("Conversation turn already in progress"), {
     status: 409,
   });
-async function withSessionTurnClaim(db, scope, sessionId, work) {
+async function releaseSessionTurnClaim(db, sessionId, claim) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await db.query(
+        "DELETE FROM agent_chat_turn_claims WHERE session_id=$1 AND claim_token=$2",
+        [sessionId, claim],
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+export async function withSessionTurnClaim(db, scope, sessionId, work) {
   const claim = randomUUID();
   const acquired = await db.query(
     `INSERT INTO agent_chat_turn_claims(session_id,business_id,agent_id,deployment_id,claim_token,expires_at)
@@ -68,12 +83,7 @@ async function withSessionTurnClaim(db, scope, sessionId, work) {
   try {
     return await work(claim);
   } finally {
-    await db
-      .query(
-        "DELETE FROM agent_chat_turn_claims WHERE session_id=$1 AND claim_token=$2",
-        [sessionId, claim],
-      )
-      .catch((error) => console.error("Failed to release agent chat turn", error));
+    await releaseSessionTurnClaim(db, sessionId, claim);
   }
 }
 function send(req, res, reply, extra = {}, usage = { creditsUsed: extra.isDisabled ? 0 : 1 }) {
@@ -156,7 +166,7 @@ export function createAgentChatRouter({
         throw denied();
       const { sessionId } = body,
         message = body.message.trim();
-      return withSessionTurnClaim(
+      const completed = await withSessionTurnClaim(
         db,
         scope,
         sessionId,
@@ -353,8 +363,15 @@ export function createAgentChatRouter({
           [sessionId, scope.business_id, scope.agent_id, scope.deployment_id],
         );
           }, db);
-          send(req, res, reply, { model: scope.model_id }, usage);
+          return { reply, usage };
         },
+      );
+      return send(
+        req,
+        res,
+        completed.reply,
+        { model: scope.model_id },
+        completed.usage,
       );
     }),
   );
