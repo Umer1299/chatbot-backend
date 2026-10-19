@@ -39,12 +39,12 @@ Required by the staging test runner:
 | `TEST_DATABASE_CONFIRM` | `I_CONFIRM_DISPOSABLE_TEST_DATABASE` | Positive confirmation required before SQL rehearsal |
 | `STAGING_REDIS_URL` | `redis://127.0.0.1:56379/0` | Must be a loopback Redis address |
 | `LIVE_PROVIDER_TEST_APPROVED` | `I_APPROVE_ONE_BOUNDED_PROVIDER_CANARY` | Explicit opt-in for live provider calls |
-| `LIVE_PROVIDER` | `openai` or `anthropic` | Selects exactly one completion provider |
+| `LIVE_PROVIDER` | `openai`, `anthropic`, or `combined` | `openai` tests OpenAI embedding + completion; `anthropic` tests Anthropic completion only; `combined` tests OpenAI embedding + Anthropic completion |
 | `LIVE_PROVIDER_MODEL` | approved provider model ID | Required completion model |
 | `LIVE_PROVIDER_MAX_COST_USD` | `0.01` | Caller limit, hard capped by the script at `$0.05` |
 | `LIVE_PROVIDER_INPUT_USD_PER_1M` | operator supplied | Current completion input price |
 | `LIVE_PROVIDER_OUTPUT_USD_PER_1M` | operator supplied | Current completion output price |
-| `LIVE_PROVIDER_EMBEDDING_USD_PER_1M` | operator supplied | Current embedding input price |
+| `LIVE_PROVIDER_EMBEDDING_USD_PER_1M` | operator supplied | Current OpenAI embedding input price; required only for `openai` and `combined` |
 
 For running the actual Express app against a separately prepared isolated staging database, also configure `DATABASE_URL`, `REDIS_URL`, `ACCOUNT_AUTH_ENABLED=true`, `ACCOUNT_AUTH_URL`, `ACCOUNT_AUTH_SECRET` (at least 32 random characters), `ACCOUNT_TRUSTED_ORIGINS`, `ACCOUNT_PROXY_MODE`, `TRUSTED_PROXY_CIDRS` when proxy mode is `trusted`, `DASHBOARD_ALLOWED_ORIGINS`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, and the required test provider key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`). Set `AGENT_WEBSITE_ENABLED=true` only in an isolated staging service after migrations and preflight checks. The committed example leaves it `false`.
 
@@ -91,7 +91,7 @@ Do not run `node src/db/migrate.js` against an initialized database: it blindly 
 
 ## Optional live-provider canary
 
-The test fixture and CI use mocks; they do not establish that provider credentials, account billing, model access, or network access work. The optional canary makes exactly two bounded calls: one existing OpenAI embedding request (maximum 8,000 input characters, the canary sends a short fixed phrase) and one completion to the selected OpenAI or Anthropic model with at most 32 output tokens. Both carry a 20-second abort signal. It requires current per-million token prices and a caller-selected cost cap no higher than $0.05, then calculates a conservative request ceiling using 64 embedding tokens, 256 completion input tokens and 32 completion output tokens before it sends anything. It prints provider name, token counts, estimated cost and embedding dimensions only, never the prompt, response, vector or key. Use the provider account's own spend controls as well; the estimate relies on the prices supplied by the operator.
+The test fixture and CI use mocks; they do not establish that provider credentials, account billing, model access, or network access work. Provider-specific behavior is explicit: `openai` makes one OpenAI embedding call and one OpenAI completion; `anthropic` makes one Anthropic completion and needs no OpenAI credential or embedding price; `combined` makes one OpenAI embedding call and one Anthropic completion, and requires both credentials. All completion modes require `LIVE_PROVIDER_MODEL` and current input/output prices; embedding modes also require the OpenAI embedding price. Each SDK request receives a 20-second abort signal and completion output is capped at 32 tokens. Before calls, the script enforces a conservative request ceiling using up to 64 embedding tokens, 256 completion input tokens and 32 completion output tokens, plus a caller-selected cost cap hard-limited to $0.05. It prints provider mode, token counts, estimated cost and (only when embedding runs) dimensions; it never prints prompts, responses, vectors or keys. The estimates rely on prices supplied by the operator, so also use the provider account's own spend controls.
 
 Only run it after confirming a non-production environment and approved test credentials:
 
@@ -108,7 +108,7 @@ OPENAI_API_KEY=<approved-test-key> \
 npm run smoke:provider
 ```
 
-For Anthropic, use `LIVE_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`. The canary has no PostgreSQL write and does not prove agent configuration, RAG insertion/retrieval, chat history, leads/inquiries, JSON/SSE routing, or real API deployment behavior. A live full-runtime check requires a separate isolated staging API/business and should run through the authenticated management and public chat APIs with a tightly controlled test account. No live provider calls were made for this change because approved credentials and a staging endpoint were unavailable.
+For Anthropic-only mode, use `LIVE_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`; do not provide or configure OpenAI credentials. For combined mode, use `LIVE_PROVIDER=combined`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and the embedding price. Unsupported mode values fail before any provider call. The canary has no PostgreSQL write and does not prove agent configuration, RAG insertion/retrieval, chat history, leads/inquiries, JSON/SSE routing, or real API deployment behavior. A live full-runtime check requires a separate isolated staging API/business and should run through the authenticated management and public chat APIs with a tightly controlled test account. No live provider calls were made for this change because approved credentials and a staging endpoint were unavailable.
 
 ## Deployment audit and production blockers
 
