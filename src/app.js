@@ -29,6 +29,9 @@ import inquiriesRoutes from './api/inquiries.js';
 import businessRoutes from './api/businessPublic.js';
 import quickAnswersRoutes from './api/quickAnswers.js';
 import { globalErrorHandler } from './middleware/errorHandler.js';
+import { createReadinessHandler } from './services/readiness.js';
+import pool from './db/pool.js';
+import { redisClient } from './services/redis.js';
 
 dotenv.config();
 
@@ -53,7 +56,10 @@ app.use('/api/v1', accountLookupLimiter, accountIdentity(), accountUserLimiter, 
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/healthz', (req, res) => res.send('OK'));
 app.get('/ready', (req, res) => res.send('Ready'));
-app.get('/readyz', (req, res) => res.send('Ready'));
+app.get('/readyz', createReadinessHandler({
+  checkDatabase: () => pool.query('SELECT 1'),
+  checkRedis: () => redisClient.ping(),
+}));
 
 app.get('/billing/select-plan', (req, res) => {
   const frontendUrl = process.env.BUBBLE_APP_URL || process.env.FRONTEND_URL;

@@ -112,6 +112,7 @@ export async function setupVectorTable() {
     console.log('pgvector table, indexes, and brand columns ready');
   } catch (error) {
     console.error('Failed to setup pgvector knowledge table:', error.message);
+    throw error;
   }
 }
 
