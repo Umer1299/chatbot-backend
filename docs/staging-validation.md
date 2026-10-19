@@ -147,3 +147,24 @@ The future dashboard should call Better Auth endpoints for sign-up, sign-in, ver
 - [ ] Verify health/readiness timing, startup failure handling, queue retention, Redis memory alerts, rollback steps and that the public agent feature flag remains off outside staging.
 
 **Current assessment:** CI provides strong automated two-agent and migration evidence. No local container runtime, staging service, approved sanitized customer snapshot, or provider credentials were available for this task. Staging readiness is **pending**; production readiness is **blocked**.
+
+## Phase 4B verification record — 2026-10-19
+
+The PR head `c63e4de9563174496f5ce8e1aa0193958236bd02` was checked without changing cloud infrastructure or using customer data.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Node compatibility and dependency install | **PASS** | Local Node `v24.19.0`; `npm ci --ignore-scripts` completed; `npm ls --depth=0` reported no invalid dependencies. |
+| Full pull-request CI | **PASS** | [Run 39212695343](https://github.com/Umer1299/chatbot-backend/actions/runs/39212695343): 191 tests, 191 passed, 0 failed, 0 skipped. The job ran Node 24, PostgreSQL 16/pgvector and Redis 7; database integration tests and migration fixtures ran in that isolated CI job. |
+| Local unit/security suite | **PASS with infrastructure skips** | `npm test`: 157 total, 154 passed, 0 failed, 3 skipped. The skips require local PostgreSQL/Redis URLs. |
+| Disposable local migration rehearsal | **BLOCKED** | Docker and Docker Compose are not installed. The staging runner was invoked without confirmation and correctly exited 2 before opening a database or running SQL. |
+| Redis local connectivity/policy | **BLOCKED** | No local Redis or Docker runtime. CI's Redis 7 service and integration check passed; no Render Redis settings were changed. |
+| Agency onboarding/two-agent integration | **PASS in CI; NOT RUN against a deployed staging API** | The PostgreSQL integration suite exercises Better Auth/API onboarding and the two-agent isolation fixture with test-only data and controlled provider mocks. No real staging account or service was available. |
+| Live provider canary | **NOT RUN** | No approved non-production API credentials or live staging endpoint were supplied. Invoking the canary without explicit approval exited 2 before provider calls. Mock-mode canary tests ran as part of the suite. |
+| Full real-provider website RAG | **NOT RUN** | Requires an isolated staging API, approved provider credentials, and a real staging deployment. A canary unit test is not evidence of full application RAG. |
+| Render/HTTPS/proxy/email/file handoff | **BLOCKED** | No staging Render service was authorized or available. Existing blueprint issues remain: Node 20 conflicts with `>=22.18.0`, Redis `allkeys-lru` conflicts with queue-safe `noeviction`, and API-to-worker temporary files are not proven shared. |
+| Historical backup/restore rehearsal | **NOT RUN** | No sanitized historical snapshot and no isolated staging database were provided. CI uses synthetic fixtures only. |
+
+Local verification commands included `npm ci --ignore-scripts`, `npm ls --depth=0`, `npm test`, `node --check scripts/live-provider-canary.js`, `node --check scripts/run-staging-tests.js`, and a guarded `npm run test:staging` invocation. The latter refused to proceed without the disposable-database confirmation, as intended. The CI result, rather than the local skips, is the evidence for PostgreSQL/pgvector and Redis integration coverage.
+
+Required separate staging configuration changes remain: select Node `>=22.18.0` (CI-tested Node 24) for both API and worker; use a dedicated Redis configured with `noeviction`; provision isolated PostgreSQL 16/pgvector and verify backup/restore; set an HTTPS staging URL plus explicit trusted proxy CIDRs, secure Better Auth cookies, exact trusted origins and test email delivery; set `AGENT_WEBSITE_ENABLED=true` only in that isolated service after migrations and preflight pass; and prove file upload handoff across the actual API/worker topology before allowing file uploads. These are manual, separately reviewed staging changes. No Render service or production setting was changed during this verification.
