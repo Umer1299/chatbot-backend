@@ -2,12 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
+import { REQUIRED_LEDGER_VERSIONS, REQUIRED_TABLES, REQUIRED_TRIGGERS } from './staging-schema.js';
 
 const { Client } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REQUIRED_CONFIRMATION = 'I_CONFIRM_EMPTY_STAGING_DATABASE';
 const EXPECTED_DATABASE = 'chatflow_staging';
-const EXPECTED_LEDGER = ['008', '009', '010', '011', '012', '013'];
+const EXPECTED_LEDGER = REQUIRED_LEDGER_VERSIONS;
 const EXPECTED_MIGRATIONS = [
   '001_initial_schema.sql', '002_plan_limits.sql', '003_models_and_disable.sql',
   '003_quick_answers.sql', '004_inquiries.sql', '005_security_boundaries.sql',
@@ -16,23 +17,6 @@ const EXPECTED_MIGRATIONS = [
   '010_agent_foundation.sql', '011_agent_runtime.sql',
   '012_agent_chat_turn_claims.sql', '013_legacy_knowledge_mutation_claims.sql',
 ];
-const REQUIRED_TABLES = [
-  'businesses', 'bot_configs', 'knowledge_chunks', 'leads', 'sessions',
-  'messages', 'inquiries', 'chatbot_settings', 'chatflow_schema_migrations',
-  'chatflow_user', 'chatflow_session', 'chatflow_account',
-  'chatflow_verification', 'chatflow_organization', 'chatflow_member',
-  'chatflow_invitation', 'chatflow_rate_limit', 'agency_businesses',
-  'business_memberships', 'agents', 'agent_configs', 'legacy_agent_mappings',
-  'website_deployments', 'agent_knowledge_sources', 'agent_knowledge_chunks',
-  'agent_chat_sessions', 'agent_chat_messages', 'agent_leads', 'agent_inquiries',
-  'agent_chat_turn_claims', 'legacy_knowledge_mutation_claims',
-];
-const REQUIRED_TRIGGERS = [
-  'knowledge_revision_insert', 'knowledge_revision_update',
-  'knowledge_revision_delete', 'agent_knowledge_revision_insert',
-  'agent_knowledge_revision_update', 'agent_knowledge_revision_delete',
-];
-
 export function validateMigrationTarget(env) {
   if (env.CHATFLOW_ENVIRONMENT !== 'isolated-staging')
     throw new Error('CHATFLOW_ENVIRONMENT must be isolated-staging.');
@@ -93,8 +77,11 @@ export async function runStagingMigrations({
       [REQUIRED_TRIGGERS],
     ).catch(() => null);
     const vectorPresent = await client.query("SELECT 1 FROM pg_extension WHERE extname='vector'").catch(() => null);
+    if (!relationsPresent)
+      throw new Error('Unable to verify required staging tables; refusing to apply migrations. Check the database permissions and retry only after review.');
+    const missingTables = relationsPresent.rows.map((row) => row.name);
     const recorded = new Set((versionsPresent?.rows || []).map((row) => row.version));
-    const migrationComplete = versionsPresent && relationsPresent?.rowCount === 0 &&
+    const migrationComplete = versionsPresent && missingTables.length === 0 &&
       triggersPresent?.rowCount === REQUIRED_TRIGGERS.length && vectorPresent?.rowCount === 1 &&
       EXPECTED_LEDGER.every((version) => recorded.has(version));
     if (migrationComplete)
@@ -106,8 +93,11 @@ export async function runStagingMigrations({
       WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f')
       LIMIT 1
     `);
-    if (existing.rowCount)
+    if (existing.rowCount) {
+      if (missingTables.length)
+        throw new Error(`Refusing to migrate an initialized staging schema with missing required tables: ${missingTables.join(', ')}. No migrations were applied. Restore or repair the schema through an approved recovery plan; this command only initializes an empty staging database.`);
       throw new Error('Refusing to migrate a database with existing public schema objects; this command only initializes a fresh staging database.');
+    }
 
     const files = (await fs.readdir(migrationsDirectory))
       .filter((file) => /^\d{3}_.+\.sql$/.test(file))

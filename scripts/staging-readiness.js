@@ -2,30 +2,11 @@ import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import Redis from 'ioredis';
 import { trustedProxySettings } from '../src/middleware/trustedProxy.js';
+import { REQUIRED_LEDGER_VERSIONS, REQUIRED_TABLES, REQUIRED_TRIGGERS } from './staging-schema.js';
 
 const { Pool } = pg;
 const CONFIRM = 'I_CONFIRM_NON_PRODUCTION_STAGING';
 const DB_NAME = 'chatflow_staging';
-const REQUIRED_LEDGER_VERSIONS = ['008', '009', '010', '011', '012', '013'];
-const REQUIRED_TABLES = [
-  'businesses', 'bot_configs', 'knowledge_chunks', 'scrape_jobs', 'leads',
-  'sessions', 'messages', 'notifications', 'pipeline_stages', 'analytics_daily',
-  'model_configs', 'quick_answers', 'inquiries', 'chatbot_settings',
-  'chatflow_schema_migrations', 'chatflow_user', 'chatflow_session',
-  'chatflow_account', 'chatflow_verification', 'chatflow_organization',
-  'chatflow_member', 'chatflow_invitation', 'chatflow_rate_limit',
-  'agency_businesses', 'business_memberships', 'agents', 'agent_configs',
-  'legacy_agent_mappings', 'website_deployments', 'agent_knowledge_sources',
-  'agent_knowledge_chunks', 'agent_chat_sessions', 'agent_chat_messages',
-  'agent_leads', 'agent_inquiries', 'agent_chat_turn_claims',
-  'legacy_knowledge_mutation_claims',
-];
-const REQUIRED_TRIGGERS = [
-  'knowledge_revision_insert', 'knowledge_revision_update',
-  'knowledge_revision_delete', 'agent_knowledge_revision_insert',
-  'agent_knowledge_revision_update', 'agent_knowledge_revision_delete',
-];
-
 const parseUrl = (value, protocols) => {
   try {
     const url = new URL(value);

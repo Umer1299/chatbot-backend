@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { runStagingMigrations, validateMigrationTarget } from '../scripts/apply-staging-migrations.js';
+import { REQUIRED_TABLES } from '../scripts/staging-schema.js';
 
 const expectedFiles = [
   '001_initial_schema.sql', '002_plan_limits.sql', '003_models_and_disable.sql',
@@ -117,6 +118,73 @@ test('migration runner is a no-op when the complete staging schema is already pr
   const result = await runStagingMigrations({ env: testEnv(), clientFactory: async () => client });
   assert.equal(result.alreadyApplied, true);
   assert.deepEqual(result.migrations, []);
+});
+
+test('migration runner rejects every missing legacy table despite a completed migration ledger and performs no writes', async () => {
+  const legacyTables = [
+    'model_configs', 'quick_answers', 'scrape_jobs', 'notifications',
+    'pipeline_stages', 'analytics_daily',
+  ];
+  for (const missingTable of legacyTables) {
+    assert.ok(REQUIRED_TABLES.includes(missingTable), `${missingTable} is part of the shared required schema`);
+    const calls = [];
+    const client = {
+      async connect() {},
+      async query(sql) {
+        calls.push(sql);
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+        if (sql.includes('current_database')) return { rows: [{ name: 'chatflow_staging', server_version: '16.3' }], rowCount: 1 };
+        if (sql.includes('chatflow_schema_migrations'))
+          return { rows: ['008', '009', '010', '011', '012', '013'].map(version => ({ version })), rowCount: 6 };
+        if (sql.includes('to_regclass')) return { rows: [{ name: missingTable }], rowCount: 1 };
+        if (sql.includes('pg_trigger'))
+          return { rows: [
+            'knowledge_revision_insert', 'knowledge_revision_update', 'knowledge_revision_delete',
+            'agent_knowledge_revision_insert', 'agent_knowledge_revision_update', 'agent_knowledge_revision_delete',
+          ].map(tgname => ({ tgname })), rowCount: 6 };
+        if (sql.includes("extname='vector'")) return { rows: [{ ok: 1 }], rowCount: 1 };
+        if (sql.includes('FROM pg_class')) return { rows: [{ relname: 'chatflow_schema_migrations' }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+      async end() {},
+    };
+    await assert.rejects(
+      runStagingMigrations({ env: testEnv(), clientFactory: async () => client }),
+      new RegExp(`missing required tables: ${missingTable}`),
+    );
+    assert.ok(calls.every(sql => /^\s*SELECT\b/i.test(sql)), 'only read-only checks and advisory locks may run');
+    assert.equal(calls.some(sql => sql.includes("SELECT '001_")), false, 'no migration SQL was applied');
+  }
+});
+
+test('migration runner rejects missing new agent tables even when the ledger is complete', async () => {
+  const missingTables = ['agents', 'agent_configs', 'website_deployments', 'agent_knowledge_chunks', 'agent_chat_sessions'];
+  for (const missingTable of missingTables) {
+    assert.ok(REQUIRED_TABLES.includes(missingTable));
+    const client = {
+      async connect() {},
+      async query(sql) {
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+        if (sql.includes('current_database')) return { rows: [{ name: 'chatflow_staging', server_version: '16.3' }], rowCount: 1 };
+        if (sql.includes('chatflow_schema_migrations'))
+          return { rows: ['008', '009', '010', '011', '012', '013'].map(version => ({ version })), rowCount: 6 };
+        if (sql.includes('to_regclass')) return { rows: [{ name: missingTable }], rowCount: 1 };
+        if (sql.includes('pg_trigger'))
+          return { rows: [
+            'knowledge_revision_insert', 'knowledge_revision_update', 'knowledge_revision_delete',
+            'agent_knowledge_revision_insert', 'agent_knowledge_revision_update', 'agent_knowledge_revision_delete',
+          ].map(tgname => ({ tgname })), rowCount: 6 };
+        if (sql.includes("extname='vector'")) return { rows: [{ ok: 1 }], rowCount: 1 };
+        if (sql.includes('FROM pg_class')) return { rows: [{ relname: 'agents' }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+      async end() {},
+    };
+    await assert.rejects(
+      runStagingMigrations({ env: testEnv(), clientFactory: async () => client }),
+      new RegExp(`missing required tables: ${missingTable}`),
+    );
+  }
 });
 
 test('migration runner refuses PostgreSQL versions other than 16 before schema inspection', async () => {
