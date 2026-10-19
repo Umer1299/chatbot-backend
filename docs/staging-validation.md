@@ -262,3 +262,9 @@ The new staging validation tests use injected PostgreSQL/Redis/HTTP fakes for gu
 | Production changes/customer data | **PASS (none made)** | No deployment, production migration, credential change, DNS change, or customer-data access was performed. |
 
 The current remote CI baseline remains 191 passed, 0 failed, 0 skipped on commit `45605993`; it is not evidence that this new commit passed CI. A fresh PR CI run and Codex review are required after this change is pushed.
+
+### Phase 4C verification follow-up
+
+Before this follow-up, review of the staging checks found that a connected PostgreSQL instance should be positively checked as major version 16, rather than inferred from the Blueprint. `staging:check` now reports the connected major version, and `staging:migrate` refuses before schema inspection or SQL unless the exact `chatflow_staging` database is PostgreSQL 16. Readiness also requires the legacy JWT secret and explicit legacy widget HTTPS origins; the managed Render Key Value product/version is reported as Redis-protocol Redis 7 or Valkey 7, and incompatible major versions fail closed.
+
+Latest local verification after these adjustments: focused staging tests **13 passed, 0 failed, 0 skipped**; full `npm test`: **170 total, 167 passed, 0 failed, 3 skipped**. Syntax checks and `git diff --check` passed. PostgreSQL 16/pgvector and Redis/Valkey service connectivity remain unverified locally because Docker and service endpoints are unavailable; CI on the follow-up commit is required.

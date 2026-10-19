@@ -42,6 +42,7 @@ test('migration runner refuses a non-empty public schema without executing SQL',
     async query(sql) {
       calls.push(sql);
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+      if (sql.includes('current_database')) return { rows: [{ name: 'chatflow_staging', server_version: '16.3' }], rowCount: 1 };
       if (sql.includes('FROM pg_class')) return { rows: [{ relname: 'businesses' }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     },
@@ -62,6 +63,7 @@ test('fresh staging migration runner applies only the exact ordered 001–013 se
     async connect() {},
     async query(sql) {
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+      if (sql.includes('current_database')) return { rows: [{ name: 'chatflow_staging', server_version: '16.3' }], rowCount: 1 };
       if (sql.includes('FROM pg_class')) return { rows: [], rowCount: 0 };
       if (sql.includes('to_regclass')) return { rows: [], rowCount: 0 };
       if (sql.includes('pg_trigger')) {
@@ -97,6 +99,7 @@ test('migration runner is a no-op when the complete staging schema is already pr
     async connect() {},
     async query(sql) {
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+      if (sql.includes('current_database')) return { rows: [{ name: 'chatflow_staging', server_version: '16.3' }], rowCount: 1 };
       if (sql.includes('chatflow_schema_migrations'))
         return { rows: ['008', '009', '010', '011', '012', '013'].map(version => ({ version })), rowCount: 6 };
       if (sql.includes('to_regclass')) return { rows: [], rowCount: 0 };
@@ -114,4 +117,21 @@ test('migration runner is a no-op when the complete staging schema is already pr
   const result = await runStagingMigrations({ env: testEnv(), clientFactory: async () => client });
   assert.equal(result.alreadyApplied, true);
   assert.deepEqual(result.migrations, []);
+});
+
+test('migration runner refuses PostgreSQL versions other than 16 before schema inspection', async () => {
+  const calls = [];
+  const client = {
+    async connect() {},
+    async query(sql) {
+      calls.push(sql);
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+      if (sql.includes('current_database')) return { rows: [{ name: 'chatflow_staging', server_version: '15.8' }], rowCount: 1 };
+      if (sql.includes('pg_advisory_unlock')) return { rows: [{ pg_advisory_unlock: true }], rowCount: 1 };
+      throw new Error('Schema query must not run on unsupported PostgreSQL.');
+    },
+    async end() {},
+  };
+  await assert.rejects(runStagingMigrations({ env: testEnv(), clientFactory: async () => client }), /PostgreSQL 16/);
+  assert.equal(calls.some(sql => sql.includes('chatflow_schema_migrations')), false);
 });

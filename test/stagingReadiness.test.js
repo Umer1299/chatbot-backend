@@ -32,7 +32,7 @@ const env = () => ({
   STAGING_BASE_URL: 'https://api.staging.example.test',
 });
 
-function fakePostgres() {
+function fakePostgres(version = '16.0') {
   const versions = ['008', '009', '010', '011', '012', '013'];
   const triggers = [
     'knowledge_revision_insert', 'knowledge_revision_update',
@@ -41,7 +41,7 @@ function fakePostgres() {
   ];
   return {
     async query(sql) {
-      if (sql.includes('current_database')) return { rowCount: 1, rows: [{ name: 'chatflow_staging', server_version: '16.0' }] };
+      if (sql.includes('current_database')) return { rowCount: 1, rows: [{ name: 'chatflow_staging', server_version: version }] };
       if (sql.includes('pg_extension')) return { rowCount: 1, rows: [{ extversion: '0.7.4' }] };
       if (sql.includes('to_regclass')) return { rowCount: 0, rows: [] };
       if (sql.includes('chatflow_schema_migrations')) return { rowCount: versions.length, rows: versions.map(version => ({ version })) };
@@ -140,6 +140,18 @@ test('staging readiness requires separate legacy JWT and explicit widget origins
   });
   assert.ok(results.some(r => r.name === 'Legacy JWT secret' && r.status === 'BLOCKED'));
   assert.ok(results.some(r => r.name === 'Legacy widget HTTPS origins' && r.status === 'BLOCKED'));
+});
+
+test('staging readiness reports a non-PostgreSQL-16 database as a failure', async () => {
+  const results = await runStagingReadiness({
+    env: env(),
+    nodeVersion: 'v24.21.0',
+    postgresConnector: async () => fakePostgres('17.0'),
+    redisConnector: async () => fakeRedis(),
+    httpRequest: httpOk,
+  });
+  assert.ok(results.some(r => r.name === 'PostgreSQL major version' && r.status === 'FAIL'));
+  assert.equal(summarizeReadiness(results).ready, false);
 });
 
 test('readiness endpoint stays unavailable until startup completes and live dependencies answer', async () => {

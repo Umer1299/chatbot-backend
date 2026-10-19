@@ -142,6 +142,9 @@ async function checkDatabase(results, env, connect = connectPostgres) {
       return;
     }
     add(results, 'PostgreSQL connectivity and database identity', 'PASS', 'Read-only connection reached chatflow_staging.');
+    const pgMajor = Number.parseInt(identity.rows[0]?.server_version?.split('.')[0], 10);
+    add(results, 'PostgreSQL major version', pgMajor === 16 ? 'PASS' : (Number.isFinite(pgMajor) ? 'FAIL' : 'BLOCKED'),
+      Number.isFinite(pgMajor) ? `Observed PostgreSQL ${pgMajor}; staging requires PostgreSQL 16.` : 'PostgreSQL server version could not be determined.');
 
     const ext = await client.query("SELECT extversion FROM pg_extension WHERE extname='vector'");
     add(results, 'pgvector extension', ext.rowCount === 1 ? 'PASS' : 'FAIL',

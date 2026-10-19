@@ -76,6 +76,11 @@ export async function runStagingMigrations({
     locked = lock.rows[0]?.locked === true;
     if (!locked) throw new Error('Another migration process holds the migration lock.');
 
+    const targetInfo = await client.query('SELECT current_database() AS name, current_setting($1) AS server_version', ['server_version']);
+    const pgMajor = Number.parseInt(targetInfo.rows[0]?.server_version?.split('.')[0], 10);
+    if (targetInfo.rows[0]?.name !== EXPECTED_DATABASE || pgMajor !== 16)
+      throw new Error('Connected target must be PostgreSQL 16 database chatflow_staging.');
+
     const versionsPresent = await client.query(`
       SELECT version FROM chatflow_schema_migrations WHERE version=ANY($1::text[])
     `, [EXPECTED_LEDGER]).catch(() => null);
