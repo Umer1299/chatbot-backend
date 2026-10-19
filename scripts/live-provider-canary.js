@@ -94,7 +94,7 @@ export function parseCanaryConfig(env) {
   };
 }
 
-export async function runCanary({
+async function runCanary({
   config,
   embed = getEmbedding,
   complete = completeAgent,

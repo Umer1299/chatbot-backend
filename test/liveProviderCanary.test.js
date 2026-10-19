@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseCanaryConfig,
-  runCanary,
   runConfiguredCanary,
 } from "../scripts/live-provider-canary.js";
 
@@ -41,7 +40,10 @@ test("Anthropic-only canary runs completion without OpenAI key or embedding pric
     ANTHROPIC_API_KEY: "test-anthropic-key",
   }));
   const calls = [];
-  await runCanary({ config, ...fakeProviders(calls) });
+  await runConfiguredCanary({
+    env: baseEnv("anthropic", { ANTHROPIC_API_KEY: "test-anthropic-key" }),
+    ...fakeProviders(calls),
+  });
 
   assert.equal(config.runEmbedding, false);
   assert.equal(config.completionProvider, "anthropic");
@@ -56,7 +58,13 @@ test("OpenAI-only canary tests OpenAI embedding and completion", async () => {
     LIVE_PROVIDER_EMBEDDING_USD_PER_1M: "0.1",
   }));
   const calls = [];
-  await runCanary({ config, ...fakeProviders(calls) });
+  await runConfiguredCanary({
+    env: baseEnv("openai", {
+      OPENAI_API_KEY: "test-openai-key",
+      LIVE_PROVIDER_EMBEDDING_USD_PER_1M: "0.1",
+    }),
+    ...fakeProviders(calls),
+  });
 
   assert.equal(config.runEmbedding, true);
   assert.equal(config.completionProvider, "openai");
@@ -71,7 +79,14 @@ test("combined mode tests OpenAI embeddings and Anthropic completion", async () 
     LIVE_PROVIDER_EMBEDDING_USD_PER_1M: "0.1",
   }));
   const calls = [];
-  await runCanary({ config, ...fakeProviders(calls) });
+  await runConfiguredCanary({
+    env: baseEnv("combined", {
+      OPENAI_API_KEY: "test-openai-key",
+      ANTHROPIC_API_KEY: "test-anthropic-key",
+      LIVE_PROVIDER_EMBEDDING_USD_PER_1M: "0.1",
+    }),
+    ...fakeProviders(calls),
+  });
 
   assert.deepEqual(calls.map(([kind]) => kind), ["embedding", "completion"]);
   assert.equal(calls[1][1].provider, "anthropic");
@@ -149,7 +164,10 @@ test("provider calls receive a 20-second timeout signal", async () => {
   }));
   const calls = [];
   const deps = fakeProviders(calls);
-  await runCanary({ config, ...deps });
+  await runConfiguredCanary({
+    env: baseEnv("anthropic", { ANTHROPIC_API_KEY: "test-anthropic-key" }),
+    ...deps,
+  });
   assert.deepEqual(calls[0][1].signal, { timeout: 20_000 });
 });
 
