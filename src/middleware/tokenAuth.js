@@ -5,11 +5,13 @@ export async function tokenAuth(req, res, next) {
   if (!token) {
     return res.status(401).json({ error: 'Missing x-chatbot-token header' });
   }
+  try {
   const namespace = await redisClient.get(`chatbot_token:${token}`);
   if (!namespace) {
     return res.status(403).json({ error: 'Invalid or expired token' });
   }
   req.chatbotToken = token;
   req.namespace = namespace;
-  next();
+  return next();
+  } catch (error) { return next(error); }
 }

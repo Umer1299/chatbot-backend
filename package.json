@@ -7,7 +7,13 @@
   "scripts": {
     "start": "node src/server.js",
     "worker": "node src/workers/fileWorker.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test": "node --experimental-test-module-mocks --test test/*.test.js",
+    "test:staging": "node scripts/run-staging-tests.js",
+    "smoke:staging": "npm run test:staging",
+    "staging:check": "node scripts/staging-readiness.js",
+    "staging:migrate": "node scripts/apply-staging-migrations.js",
+    "smoke:provider": "node scripts/live-provider-canary.js"
   },
   "repository": {
     "type": "git",
@@ -21,12 +27,14 @@
   },
   "homepage": "https://github.com/Umer1299/Umer1299#readme",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "@langchain/community": "^0.3.0",
     "@langchain/core": "^0.3.80",
     "@langchain/openai": "^0.3.0",
     "@langchain/pinecone": "^0.1.0",
     "@langchain/redis": "^0.1.0",
     "@pinecone-database/pinecone": "^4.0.0",
+    "better-auth": "1.7.10",
     "bullmq": "^5.7.0",
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
@@ -34,22 +42,24 @@
     "express": "^4.19.2",
     "express-rate-limit": "^8.3.2",
     "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
     "langchain": "^0.3.0",
     "mammoth": "^1.6.0",
     "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "openai": "^4.104.0",
     "pdf-parse": "^1.1.1",
+    "pg": "^8.13.1",
     "rate-limit-redis": "^4.3.1",
+    "resend": "^4.0.1",
     "tiktoken": "^1.0.17",
     "uuid": "^11.0.3",
-    "zod": "^3.22.4",
-    "@anthropic-ai/sdk": "^0.39.0",
-    "pg": "^8.13.1",
-    "node-cron": "^3.0.3",
-    "resend": "^4.0.1",
-    "jsonwebtoken": "^9.0.2",
-    "openai": "^4.104.0"
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   }
 }

@@ -1,27 +1,23 @@
-import { redisClient } from '../services/redis.js';
+import { getChatbotSettings } from '../services/chatbotSettings.js';
+
+import { parseHttpOrigin } from './corsPolicy.js';
 
 function normalizeHostname(value = '') {
-  const raw = String(value || '').trim().toLowerCase();
-  if (!raw) return '';
-
   try {
-    return new URL(raw.includes('://') ? raw : `https://${raw}`).hostname.replace(/^www\./, '');
-  } catch {
-    return raw
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .split('/')[0]
-      .split(':')[0]
-      .trim();
-  }
+    const raw = String(value).trim();
+    const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !url.hostname) return '';
+    return url.hostname.replace(/^www\./, '');
+  } catch { return ''; }
 }
 
 function getRequestHost(req) {
-  const origin = req.headers.origin;
+  if (req.headers.origin !== undefined) {
+    return parseHttpOrigin(req.headers.origin)?.hostname.replace(/^www\./, '') || '';
+  }
   const referer = req.headers.referer || req.headers.referrer;
-  const host = req.headers.host;
-
-  return normalizeHostname(origin || referer || host || '');
+  if (referer) return normalizeHostname(referer);
+  return null; // Server-to-server: Origin cannot be used as identity proof.
 }
 
 function isDomainAllowed(requestHost, allowedDomain) {
@@ -32,29 +28,24 @@ function isDomainAllowed(requestHost, allowedDomain) {
 
   if (raw.startsWith('*.')) {
     const baseDomain = normalizeHostname(raw.slice(2));
-    return requestHost === baseDomain || requestHost.endsWith(`.${baseDomain}`);
+    return Boolean(baseDomain) && (requestHost === baseDomain || requestHost.endsWith(`.${baseDomain}`));
   }
 
   const allowedHost = normalizeHostname(raw);
-  return requestHost === allowedHost || requestHost.endsWith(`.${allowedHost}`);
+  return Boolean(allowedHost) && (requestHost === allowedHost || requestHost.endsWith(`.${allowedHost}`));
 }
 
 export async function domainRestriction(req, res, next) {
   const requestHost = getRequestHost(req);
-  if (!requestHost) return next();
 
   const namespace = req.namespace;
 
   try {
-    const settingsRaw = await redisClient.get(`chatbot:${namespace}`);
-    if (!settingsRaw) return next();
+    const settings = await getChatbotSettings(namespace);
+    const allowedDomains = settings.allowedDomains;
 
-    const settings = JSON.parse(settingsRaw);
-    const allowedDomains = Array.isArray(settings.allowedDomains)
-      ? settings.allowedDomains
-      : [];
-
-    if (allowedDomains.length === 0) return next();
+    if (requestHost === '') return res.status(403).json({ error: 'Invalid origin' });
+    if (requestHost === null || allowedDomains.length === 0) return next();
 
     const isAllowed = allowedDomains.some((domain) => isDomainAllowed(requestHost, domain));
 
@@ -76,6 +67,6 @@ export async function domainRestriction(req, res, next) {
     return next();
   } catch (error) {
     console.error('[domainRestriction] Failed to validate domain:', error.message);
-    return next();
+    return next(error);
   }
 }

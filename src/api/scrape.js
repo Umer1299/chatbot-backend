@@ -1,3 +1,4 @@
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Router } from 'express';
 import multer from 'multer';
 import pool from '../db/pool.js';
@@ -11,26 +12,26 @@ const multerUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-router.post('/start', requireAuth, async (req, res) => {
+router.post('/start', requireAuth, asyncHandler(async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL required' });
   const jobId = await addScrapeJob(req.business.businessId, url);
   return res.json({ jobId, message: 'Scraping started' });
-});
+}));
 
-router.get('/status/:jobId', requireAuth, async (req, res) => {
-  const job = await getJobStatus(req.params.jobId);
+router.get('/status/:jobId', requireAuth, asyncHandler(async (req, res) => {
+  const job = await getJobStatus(req.params.jobId, req.business.businessId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   return res.json(job);
-});
+}));
 
-router.post('/refresh', requireAuth, async (req, res) => {
+router.post('/refresh', requireAuth, asyncHandler(async (req, res) => {
   const { url } = req.body;
   const jobId = await refreshScrapeJob(req.business.businessId, url);
   return res.json({ jobId, message: 'Re-scrape started' });
-});
+}));
 
-router.post('/supplement/text', requireAuth, async (req, res) => {
+router.post('/supplement/text', requireAuth, asyncHandler(async (req, res) => {
   const { content } = req.body;
   if (!content || content.length < 50) {
     return res.status(400).json({ error: 'Please provide at least 50 characters' });
@@ -41,9 +42,9 @@ router.post('/supplement/text', requireAuth, async (req, res) => {
 
   const result = await processSupplementalInfo(req.business.businessId, content, businessRow?.industry || req.business.industry);
   return res.json(result);
-});
+}));
 
-router.post('/supplement/file', requireAuth, multerUpload.single('file'), async (req, res) => {
+router.post('/supplement/file', requireAuth, multerUpload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   let extractedText = '';
@@ -67,6 +68,6 @@ router.post('/supplement/file', requireAuth, multerUpload.single('file'), async 
     business?.industry || req.business.industry,
   );
   return res.json(result);
-});
+}));
 
 export default router;

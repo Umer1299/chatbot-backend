@@ -12,6 +12,8 @@ import {
   toStoragePlan,
 } from '../services/planService.js';
 
+import { requireAdminKey } from '../middleware/adminAuth.js';
+
 const router = Router();
 
 function getRequestedPlan(body = {}) {
@@ -75,7 +77,7 @@ router.get('/usage', requireAuth, async (req, res) => {
   }
 });
 
-router.post('/select-plan', requireAuth, async (req, res) => {
+router.post('/select-plan', requireAuth, requireAdminKey, async (req, res) => {
   try {
     const selectedPlan = assertSelectablePlan(getRequestedPlan(req.body));
     const storagePlan = toStoragePlan(selectedPlan);

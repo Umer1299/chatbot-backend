@@ -1,42 +1,10 @@
 import express from 'express';
-import pool from '../db/pool.js';
-import { buildSessionMemoryBlock, getChatHistoryLimit } from '../db/sessionHistory.js';
-
-const originalQuery = pool.query.bind(pool);
-const ORIGINAL_HISTORY_QUERY = 'SELECT role, content FROM messages WHERE session_id=$1 ORDER BY created_at ASC LIMIT 30';
-const BOT_CONFIG_QUERY_MARKER = 'FROM bot_configs bc JOIN businesses b ON bc.business_id = b.id WHERE b.bot_id=$1 AND bc.active=true LIMIT 1';
 
 const HAIKU_PRICING_USD_PER_1M = {
   input: Number(process.env.CLAUDE_HAIKU_INPUT_USD_PER_1M || 1),
   output: Number(process.env.CLAUDE_HAIKU_OUTPUT_USD_PER_1M || 5),
   multiplier: Number(process.env.CLAUDE_HAIKU_MODEL_MULTIPLIER || 1),
 };
-
-function normalizeQuery(value) {
-  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
-}
-
-function isFreeOrTrialPlan(plan) {
-  return ['free', 'trial'].includes(String(plan || 'free').trim().toLowerCase());
-}
-
-function removeLeadEmailRecipientsForFreePlans(text, result) {
-  if (!normalizeQuery(text).includes(BOT_CONFIG_QUERY_MARKER)) return result;
-  if (!result?.rows?.length) return result;
-
-  return {
-    ...result,
-    rows: result.rows.map((row) => {
-      if (!isFreeOrTrialPlan(row?.plan)) return row;
-      return {
-        ...row,
-        owner_email: null,
-        escalation_email: null,
-        lead_email_alerts_enabled: false,
-      };
-    }),
-  };
-}
 
 function isHaikuModel(model = {}) {
   const text = typeof model === 'string'
@@ -108,46 +76,6 @@ function patchResponsePricing(res) {
     }
   };
 }
-
-async function getOptimizedHistory(sessionId) {
-  const limit = getChatHistoryLimit();
-
-  const [historyResult, sessionResult] = await Promise.all([
-    originalQuery(
-      `SELECT role, content
-       FROM (
-         SELECT role, content, created_at
-         FROM messages
-         WHERE session_id = $1
-         ORDER BY created_at DESC
-         LIMIT $2
-       ) recent
-       ORDER BY created_at ASC`,
-      [sessionId, limit],
-    ),
-    originalQuery('SELECT collected_data FROM sessions WHERE id = $1', [sessionId]).catch(() => ({ rows: [] })),
-  ]);
-
-  const memoryBlock = buildSessionMemoryBlock(sessionResult.rows?.[0] || {});
-  if (!memoryBlock) return historyResult;
-
-  return {
-    ...historyResult,
-    rows: [
-      { role: 'user', content: memoryBlock },
-      ...historyResult.rows,
-    ],
-  };
-}
-
-pool.query = async function optimizedSessionHistoryQuery(text, params = [], ...rest) {
-  if (normalizeQuery(text) === ORIGINAL_HISTORY_QUERY && params?.[0]) {
-    return getOptimizedHistory(params[0]);
-  }
-
-  const result = await originalQuery(text, params, ...rest);
-  return removeLeadEmailRecipientsForFreePlans(text, result);
-};
 
 const { default: originalRouter } = await import('./chat.js');
 const router = express.Router();

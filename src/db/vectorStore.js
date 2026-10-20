@@ -1,60 +1,79 @@
+import { KnowledgeIngestionError, ingestionResult } from '../services/ingestionResult.js';
+import { createHash, randomUUID } from 'node:crypto';
 import pool from './pool.js';
 import { getEmbedding } from '../services/aiService.js';
 import { redisClient } from '../services/redis.js';
 
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 200;
+async function acquireKnowledgeClaim(businessId) {
+  const token = randomUUID();
+  const result = await pool.query(
+    `INSERT INTO legacy_knowledge_mutation_claims(business_id,claim_token,expires_at)
+     VALUES($1,$2,clock_timestamp()+interval '30 minutes')
+     ON CONFLICT(business_id) DO UPDATE SET claim_token=EXCLUDED.claim_token,
+       claimed_at=clock_timestamp(),expires_at=EXCLUDED.expires_at
+     WHERE legacy_knowledge_mutation_claims.expires_at<=clock_timestamp()
+     RETURNING claim_token`,
+    [businessId, token],
+  );
+  if (result.rows[0]?.claim_token !== token)
+    throw Object.assign(new Error('Knowledge mutation already in progress'), { status: 409 });
+  return token;
+}
 
-async function clearRagCache(pattern, logLabel) {
-  if (!redisClient) return;
+async function assertKnowledgeClaim(client, businessId, token) {
+  const result = await client.query(
+    `SELECT claim_token FROM legacy_knowledge_mutation_claims
+     WHERE business_id=$1 FOR UPDATE`,
+    [businessId],
+  );
+  if (result.rows[0]?.claim_token !== token)
+    throw Object.assign(new Error('Knowledge mutation claim expired'), { status: 409 });
+}
 
-  try {
-    const keys = await redisClient.keys(pattern);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
+async function releaseKnowledgeClaim(businessId, token) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await pool.query(
+        'DELETE FROM legacy_knowledge_mutation_claims WHERE business_id=$1 AND claim_token=$2',
+        [businessId, token],
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2)
+        await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
     }
-    console.log(`Cleared RAG cache for ${logLabel}`);
-  } catch (error) {
-    console.warn('Failed to clear RAG cache:', error.message);
+  }
+  throw lastError;
+}
+
+function validatedChunks(chunks) {
+  if (!Array.isArray(chunks) || chunks.some(chunk => typeof chunk !== 'string')) {
+    throw Object.assign(new Error('chunks must be an array of strings'), { status: 400 });
+  }
+  return chunks.filter(chunk => chunk.trim());
+}
+
+async function embedChunk(chunk) {
+  try {
+    const embedding = await getEmbedding(chunk);
+    if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every(Number.isFinite)) {
+      throw new Error('Embedding unavailable');
+    }
+    return embedding;
+  } catch (cause) {
+    throw new KnowledgeIngestionError(cause, { code: 'KNOWLEDGE_EMBEDDING_FAILED' });
   }
 }
 
-async function insertChunkBatch(businessId, chunks, sourceType, startIndex = 0) {
-  let inserted = 0;
-  let skipped = 0;
-  const totalBatches = Math.ceil(chunks.length / BATCH_SIZE);
-
-  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-    const batch = chunks.slice(i, i + BATCH_SIZE);
-
-    for (let j = 0; j < batch.length; j += 1) {
-      const chunk = batch[j];
-      const embedding = await getEmbedding(chunk);
-
-      if (!embedding) {
-        skipped += 1;
-        continue;
-      }
-
-      const chunkIndex = startIndex + i + j;
-      const wordCount = chunk.split(/\s+/).filter(Boolean).length;
-
-      await pool.query(
-        `INSERT INTO knowledge_chunks
-          (business_id, content, embedding, source_type, chunk_index, word_count)
-         VALUES ($1, $2, $3::vector, $4, $5, $6)`,
-        [businessId, chunk, JSON.stringify(embedding), sourceType, chunkIndex, wordCount],
-      );
-
-      inserted += 1;
-    }
-
-    const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-    console.log(`Embedded batch ${batchNumber} of ${totalBatches}`);
-    await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
-  }
-
-  return { inserted, skipped };
+async function insertChunk(client, businessId, chunk, embedding, sourceType, index) {
+  await client.query(`INSERT INTO knowledge_chunks
+    (business_id, content, embedding, source_type, chunk_index, word_count)
+    VALUES ($1, $2, $3::vector, $4, $5, $6)`,
+  [businessId, chunk, JSON.stringify(embedding), sourceType, index, chunk.split(/\s+/).filter(Boolean).length]);
 }
 
 async function ensureBrandColumns() {
@@ -93,84 +112,138 @@ export async function setupVectorTable() {
     console.log('pgvector table, indexes, and brand columns ready');
   } catch (error) {
     console.error('Failed to setup pgvector knowledge table:', error.message);
+    throw error;
   }
 }
 
 export async function upsertChunks(businessId, chunks, sourceType = 'website') {
+  const content = validatedChunks(chunks);
+  const skipped = chunks.length - content.length;
+  if (!content.length) return ingestionResult(0, skipped); // Never erase working data for empty input.
+  let client;
+  let claim;
+  let inTransaction = false;
   try {
-    await pool.query(
-      'DELETE FROM knowledge_chunks WHERE business_id = $1 AND source_type = $2',
-      [businessId, sourceType],
-    );
-
-    const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, 0);
-    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
-
-    return { inserted, skipped };
-  } catch (error) {
-    console.error('Failed to upsert chunks:', error.message);
-    return { inserted: 0, skipped: chunks?.length || 0 };
+    claim = await acquireKnowledgeClaim(businessId);
+    // The durable claim serializes the complete mutation with deletion without
+    // retaining a pool client during external embedding calls.
+    const embeddings = [];
+    for (const chunk of content) embeddings.push(await embedChunk(chunk));
+    client = await pool.connect();
+    await client.query('BEGIN'); inTransaction = true;
+    await assertKnowledgeClaim(client, businessId, claim);
+    // Serialize replacement for this business; readers keep seeing committed knowledge.
+    const business = await client.query('SELECT id FROM businesses WHERE id=$1 FOR UPDATE', [businessId]);
+    if (!business.rows.length) throw new Error('Business not found');
+    await client.query('DELETE FROM knowledge_chunks WHERE business_id = $1 AND source_type = $2', [businessId, sourceType]);
+    for (let i = 0; i < content.length; i++) {
+      await insertChunk(client, businessId, content[i], embeddings[i], sourceType, i);
+    }
+    await client.query('COMMIT'); inTransaction = false;
+    return ingestionResult(content.length, skipped);
+  } catch (cause) {
+    if (inTransaction) await client.query('ROLLBACK').catch(() => {});
+    throw new KnowledgeIngestionError(cause, { skipped, failed: content.length,
+      code: cause.status === 409 ? 'KNOWLEDGE_MUTATION_CONFLICT' :
+        cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
+  } finally {
+    client?.release();
+    if (claim) await releaseKnowledgeClaim(businessId, claim);
   }
 }
 
 export async function upsertSupplementalChunks(businessId, chunks, sourceType = 'owner_upload') {
+  const content = validatedChunks(chunks);
+  let skipped = chunks.length - content.length;
+  let inserted = 0;
+  if (!content.length) return ingestionResult(0, skipped);
+  let claim;
   try {
-    const existing = await pool.query(
-      'SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1',
-      [businessId],
-    );
-    const startIndex = existing.rows[0]?.total || 0;
-
-    const { inserted, skipped } = await insertChunkBatch(businessId, chunks, sourceType, startIndex);
-    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
-
-    return { inserted, skipped };
-  } catch (error) {
-    console.error('Failed to upsert supplemental chunks:', error.message);
-    return { inserted: 0, skipped: chunks?.length || 0 };
+    claim = await acquireKnowledgeClaim(businessId);
+    // Recheck stored content on retries, independent of Redis dedup expiry/failures.
+    const existing = await pool.query('SELECT content FROM knowledge_chunks WHERE business_id=$1 AND source_type=$2 AND content=ANY($3::text[])', [businessId, sourceType, content]);
+    const known = new Set(existing.rows.map(row => row.content));
+    const count = await pool.query('SELECT COUNT(*)::int AS total FROM knowledge_chunks WHERE business_id = $1', [businessId]);
+    const startIndex = count.rows[0]?.total || 0;
+    for (let i = 0; i < content.length; i++) {
+      const chunk = content[i];
+      if (known.has(chunk)) { skipped++; continue; }
+      const embedding = await embedChunk(chunk);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await assertKnowledgeClaim(client, businessId, claim);
+        await insertChunk(client, businessId, chunk, embedding, sourceType, startIndex + inserted);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+      inserted++; known.add(chunk);
+      if ((i + 1) % BATCH_SIZE === 0) await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+    }
+    return ingestionResult(inserted, skipped);
+  } catch (cause) {
+    // Successfully committed chunks (and their DB revisions) are preserved.
+    throw new KnowledgeIngestionError(cause, { inserted, skipped, failed: Math.max(0, chunks.length - inserted - skipped),
+      code: cause.status === 409 ? 'KNOWLEDGE_MUTATION_CONFLICT' :
+        cause.code === 'KNOWLEDGE_EMBEDDING_FAILED' ? cause.code : 'KNOWLEDGE_INGESTION_FAILED' });
+  } finally {
+    if (claim) await releaseKnowledgeClaim(businessId, claim);
   }
 }
 
-export async function getRelevantChunks(businessId, queryText, namespace, limit = 5) {
-  const cacheKey = `rag:${namespace}:${queryText.substring(0, 40).replace(/\s+/g, '-').toLowerCase()}`;
+async function knowledgeRevision(businessId) {
+  const { rows } = await pool.query('SELECT knowledge_revision FROM businesses WHERE id=$1', [businessId]);
+  const revision = rows[0]?.knowledge_revision;
+  if (revision == null || !/^\d+$/.test(String(revision))) throw new Error('Knowledge revision unavailable');
+  return String(revision);
+}
 
-  if (redisClient) {
-    try {
-      const cached = await redisClient.get(cacheKey);
-      if (cached) return JSON.parse(cached);
-    } catch (error) {
-      console.warn('Redis read failed, using DB fallback:', error.message);
-    }
-  }
-
+// Keep the public call signature; namespace is legacy and never scopes this cache.
+export async function getRelevantChunks(businessId, queryText, _namespace, limit = 5) {
+  const queryHash = createHash('sha256').update(JSON.stringify([queryText, limit])).digest('hex');
   try {
-    const queryEmbedding = await getEmbedding(queryText);
-
-    if (!queryEmbedding) {
-      console.warn('Embedding failed for RAG query');
-      return [];
-    }
-
-    const result = await pool.query(
-      `SELECT content,
-              1 - (embedding <=> $2::vector) AS similarity
-       FROM knowledge_chunks
-       WHERE business_id = $1
-         AND 1 - (embedding <=> $2::vector) > 0.65
-       ORDER BY embedding <=> $2::vector
-       LIMIT $3`,
-      [businessId, JSON.stringify(queryEmbedding), limit],
-    );
-
-    if (redisClient) {
+    let queryEmbedding;
+    // Retry once if knowledge changed while embedding/retrieval was in progress.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const revision = await knowledgeRevision(businessId);
+      const cacheKey = `rag:v2:${businessId}:${revision}:${queryHash}`;
       try {
-        await redisClient.setex(cacheKey, 300, JSON.stringify(result.rows));
+        const cached = await redisClient?.get(cacheKey);
+        if (cached) {
+          const chunks = JSON.parse(cached);
+          if (Array.isArray(chunks) && chunks.length <= limit && chunks.every(chunk =>
+            typeof chunk?.content === 'string' && Number.isFinite(chunk.similarity))) return chunks;
+        }
+      } catch (error) {
+        console.warn('Redis read failed, using DB fallback:', error.message);
+      }
+
+      queryEmbedding ??= await getEmbedding(queryText);
+      if (!queryEmbedding) return [];
+      const result = await pool.query(
+        `SELECT content,
+                1 - (embedding <=> $2::vector) AS similarity
+         FROM knowledge_chunks
+         WHERE business_id = $1
+           AND 1 - (embedding <=> $2::vector) > 0.65
+         ORDER BY embedding <=> $2::vector
+         LIMIT $3`,
+        [businessId, JSON.stringify(queryEmbedding), limit],
+      );
+      if (revision !== await knowledgeRevision(businessId)) continue;
+      try {
+        await redisClient?.setex(cacheKey, 300, JSON.stringify(result.rows));
       } catch (error) {
         console.warn('Redis cache write failed:', error.message);
       }
+      return result.rows;
     }
-
-    return result.rows;
+    // Continuously changing knowledge must not return a stale generation.
+    return [];
   } catch (error) {
     console.error('Failed to fetch relevant chunks:', error.message);
     return [];
@@ -178,17 +251,27 @@ export async function getRelevantChunks(businessId, queryText, namespace, limit 
 }
 
 export async function deleteBusinessChunks(businessId) {
+  let client;
+  let claim;
+  let inTransaction = false;
   try {
-    const result = await pool.query(
+    claim = await acquireKnowledgeClaim(businessId);
+    client = await pool.connect();
+    await client.query('BEGIN'); inTransaction = true;
+    await assertKnowledgeClaim(client, businessId, claim);
+    const result = await client.query(
       'DELETE FROM knowledge_chunks WHERE business_id = $1',
       [businessId],
     );
-
-    await clearRagCache(`rag:${businessId}:*`, `business ${businessId}`);
+    await client.query('COMMIT'); inTransaction = false;
     return result.rowCount;
   } catch (error) {
+    if (inTransaction) await client.query('ROLLBACK').catch(() => {});
     console.error('Failed to delete business chunks:', error.message);
-    return 0;
+    throw error;
+  } finally {
+    client?.release();
+    if (claim) await releaseKnowledgeClaim(businessId, claim);
   }
 }
 

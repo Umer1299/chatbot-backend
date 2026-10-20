@@ -1,0 +1,76 @@
+import { test, mock } from "node:test";
+import assert from "node:assert/strict";
+
+const requests = [];
+mock.module("openai", {
+  defaultExport: class {
+    chat = {
+      completions: {
+        create: async (request, options) => {
+          requests.push(["openai", request, options]);
+          return { choices: [{ message: { content: "OpenAI reply" } }], usage: { prompt_tokens: 20, completion_tokens: 5 } };
+        },
+      },
+    };
+  },
+});
+mock.module("@anthropic-ai/sdk", {
+  defaultExport: class {
+    messages = {
+      create: async (request, options) => {
+        requests.push(["anthropic", request, options]);
+        return { content: [{ type: "text", text: "Anthropic reply" }], usage: { input_tokens: 30, output_tokens: 6 } };
+      },
+    };
+  },
+});
+const { completeAgent } = await import("../src/services/agentCompletion.js");
+
+test("configured top_p reaches both providers without changing defaults", async () => {
+  const oldOpenAI = process.env.OPENAI_API_KEY;
+  const oldAnthropic = process.env.ANTHROPIC_API_KEY;
+  process.env.OPENAI_API_KEY = "test-only";
+  process.env.ANTHROPIC_API_KEY = "test-only";
+  try {
+    for (const provider of ["openai", "anthropic"]) {
+      const base = {
+        provider,
+        apiModelId: "mock-model",
+        systemPrompt: "Test assistant",
+        messages: [{ role: "user", content: "Hello" }],
+      };
+      const response = await completeAgent({ ...base, settings: { top_p: 0.31 } });
+      assert.equal(requests.at(-1)[0], provider);
+      assert.equal(requests.at(-1)[1].top_p, 0.31);
+      assert.equal(response.rawUsage[provider === "openai" ? "prompt_tokens" : "input_tokens"], provider === "openai" ? 20 : 30);
+      await completeAgent({ ...base, settings: {} });
+      assert.equal(Object.hasOwn(requests.at(-1)[1], "top_p"), false);
+    }
+  } finally {
+    if (oldOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldOpenAI;
+    if (oldAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = oldAnthropic;
+  }
+});
+
+test("optional abort signal is forwarded to provider adapters", async () => {
+  const oldOpenAI = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-only";
+  const signal = AbortSignal.timeout(5000);
+  try {
+    await completeAgent({
+      provider: "openai",
+      apiModelId: "mock-model",
+      systemPrompt: "Short smoke test",
+      messages: [{ role: "user", content: "Reply with OK" }],
+      signal,
+      settings: { max_output_tokens: 32 },
+    });
+    assert.equal(requests.at(-1)[1].max_tokens, 32);
+    assert.equal(requests.at(-1)[2].signal, signal);
+  } finally {
+    if (oldOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = oldOpenAI;
+  }
+});

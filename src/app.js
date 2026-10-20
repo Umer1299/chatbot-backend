@@ -1,8 +1,18 @@
 import express from 'express';
 import cors from 'cors';
+import { createCorsPolicy } from './middleware/corsPolicy.js';
+import { configureTrustedProxy } from './middleware/trustedProxy.js';
 import dotenv from 'dotenv';
-import rateLimit from 'express-rate-limit';
-import RedisStore from 'rate-limit-redis';
+import { accountHandler, accountIdentity } from './middleware/accountAuth.js';
+import agenciesV1 from './api/agenciesV1.js';
+import agentsV1 from './api/agentsV1.js';
+import agentRuntimeV1 from './api/agentRuntimeV1.js';
+import agentChat from './api/agentChat.js';
+import { accountIpLimiter, accountLookupLimiter, accountUserLimiter, agentChatIpLimiter } from './middleware/rateLimiter.js';
+import { authRateLimiter, publicReadLimiter, adminRateLimiter, widgetLimiter, dashboardLimiter } from './middleware/rateLimiter.js';
+import requireAuth from './middleware/jwtAuth.js';
+import { tokenAuth } from './middleware/tokenAuth.js';
+import { requireAdminKey } from './middleware/adminAuth.js';
 
 import './agents/registerSaasSoftware.js';
 import './agents/registerUniversalContactRouter.js';
@@ -18,73 +28,38 @@ import leadsRoutes from './api/leads.js';
 import inquiriesRoutes from './api/inquiries.js';
 import businessRoutes from './api/businessPublic.js';
 import quickAnswersRoutes from './api/quickAnswers.js';
-import { redisClient } from './services/redis.js';
 import { globalErrorHandler } from './middleware/errorHandler.js';
+import { createReadinessHandler } from './services/readiness.js';
+import pool from './db/pool.js';
+import { redisClient } from './services/redis.js';
 
 dotenv.config();
 
 const app = express();
+configureTrustedProxy(app);
 
-const allowedOriginsRaw = process.env.WIDGET_ALLOWED_ORIGINS || '';
-const allowedOrigins = allowedOriginsRaw
-  ? allowedOriginsRaw.split(',').map(s => s.trim()).filter(Boolean)
-  : [];
+const corsPolicy = createCorsPolicy({
+  widgetOriginsRaw: process.env.WIDGET_ALLOWED_ORIGINS || '',
+  dashboardOriginsRaw: process.env.DASHBOARD_ALLOWED_ORIGINS,
+});
 
-if (process.env.NODE_ENV === 'production' && allowedOrigins.length === 0) {
-  console.warn('[CORS] WIDGET_ALLOWED_ORIGINS not set — all origins allowed. Set in Render env vars.');
+function authenticatedManagementQuota(req, res, next) {
+  return requireAuth(req, res, () => dashboardLimiter(req, res, next));
 }
 
-const corsOptions = {
-  origin(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.length === 0) return callback(null, true);
-    const isAllowed = allowedOrigins.some(a =>
-      a.startsWith('*.') ? origin.endsWith(a.slice(2)) : origin === a,
-    );
-    isAllowed ? callback(null, true) : callback(new Error('CORS: Origin not allowed'));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-chatbot-token', 'x-admin-key', 'Origin'],
-};
-
-const widgetLimiter = rateLimit({
-  store: new RedisStore({
-    sendCommand: (...args) => redisClient.call(...args),
-  }),
-  keyGenerator: (req) => {
-    const token = req.headers['x-chatbot-token'] || 'anon';
-    const ip = req.ip;
-    return token + ':' + ip;
-  },
-  windowMs: 60 * 1000,
-  max: 60,
-  message: { error: 'Too many requests' },
-  standardHeaders: true,
-});
-
-const dashboardLimiter = rateLimit({
-  store: new RedisStore({
-    sendCommand: (...args) => redisClient.call(...args),
-  }),
-  keyGenerator: (req) => {
-    const auth = req.headers.authorization || 'anon';
-    const ip = req.ip;
-    return auth + ':' + ip;
-  },
-  windowMs: 60 * 1000,
-  max: 120,
-  message: { error: 'Too many requests' },
-  standardHeaders: true,
-});
-
-app.use(cors(corsOptions));
+app.use(cors(corsPolicy));
+// Better Auth consumes the raw stream; mount before the JSON parser.
+app.all('/api/account/*', accountIpLimiter, accountHandler());
 app.use(express.json());
+app.use('/api/v1', accountLookupLimiter, accountIdentity(), accountUserLimiter, agenciesV1, agentsV1, agentRuntimeV1);
 
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/healthz', (req, res) => res.send('OK'));
 app.get('/ready', (req, res) => res.send('Ready'));
-app.get('/readyz', (req, res) => res.send('Ready'));
+app.get('/readyz', createReadinessHandler({
+  checkDatabase: () => pool.query('SELECT 1'),
+  checkRedis: () => redisClient.ping(),
+}));
 
 app.get('/billing/select-plan', (req, res) => {
   const frontendUrl = process.env.BUBBLE_APP_URL || process.env.FRONTEND_URL;
@@ -96,16 +71,25 @@ app.get('/billing/select-plan', (req, res) => {
   return res.redirect(302, `${base}/billing/select-plan${query}`);
 });
 
-app.use('/api/chat', widgetLimiter);
-app.use('/api/upsert', widgetLimiter);
-app.use('/api/leads', dashboardLimiter);
-app.use('/api/inquiries', dashboardLimiter);
-app.use('/api/business', dashboardLimiter);
-app.use('/api/billing', dashboardLimiter);
-app.use('/api/scrape', dashboardLimiter);
-app.use('/api/auth', dashboardLimiter);
-app.use('/api/quick-answers', dashboardLimiter);
-app.use('/api/moderate', widgetLimiter);
+app.use('/api/chat', tokenAuth, widgetLimiter);
+app.use('/api/agent-chat', agentChatIpLimiter, agentChat);
+app.use('/api/upsert', authenticatedManagementQuota);
+app.use('/api/leads', authenticatedManagementQuota);
+app.use('/api/inquiries', authenticatedManagementQuota);
+// Existing preview exposes only public widget presentation fields.
+app.use('/api/business', (req, res, next) => {
+  if (['GET', 'HEAD'].includes(req.method) && /^\/bot-config\/[^/]+\/preview\/?$/.test(req.path)) {
+    return publicReadLimiter(req, res, next);
+  }
+  return authenticatedManagementQuota(req, res, next);
+});
+app.use('/api/billing', authenticatedManagementQuota);
+app.use('/api/scrape', authenticatedManagementQuota);
+app.use('/api/auth', authRateLimiter);
+app.use('/api/quick-answers', authenticatedManagementQuota);
+app.use('/api/moderate', tokenAuth, widgetLimiter);
+app.use('/api/chatbots', requireAdminKey, adminRateLimiter);
+app.use('/api/lead', requireAdminKey, adminRateLimiter);
 
 app.use('/api/chat', chatRoutes);
 app.use('/api/upsert', upsertRoutes);
@@ -120,6 +104,11 @@ app.use('/api/inquiries', inquiriesRoutes);
 app.use('/api/business', businessRoutes);
 app.use('/api/quick-answers', quickAnswersRoutes);
 
+app.use((error, req, res, next) => {
+  if (!/^\/api\/(account|v1)(\/|$)/.test(req.path) || res.headersSent) return next(error);
+  const status = [400,401,403,404,409,415,429,503].includes(error.status) ? error.status : 500;
+  res.status(status).json({ error: status === 500 ? 'Account operation failed' : status === 503 ? 'Account service unavailable' : status === 404 ? 'Resource not found' : status === 409 ? 'Operation conflicts with current state' : status === 400 ? 'Invalid request' : status === 401 ? 'Authentication required' : 'Request not permitted' });
+});
 app.use(globalErrorHandler);
 
 export default app;
