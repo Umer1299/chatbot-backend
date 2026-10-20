@@ -112,19 +112,29 @@ test('staging readiness reports incompatible Node, open feature flag and Redis e
   assert.equal(summarizeReadiness(results).ready, false);
 });
 
-test('staging readiness accepts Redis-protocol version 7 and rejects incompatible versions', async () => {
-  const results = await runStagingReadiness({
-    env: env(),
-    nodeVersion: 'v24.21.0',
-    postgresConnector: async () => fakePostgres(),
-    redisConnector: async () => ({
-      ...fakeRedis(),
-      async info(section) { return section === 'server' ? '# Server\nvalkey_version:8.0.1\n' : '# Memory\nmaxmemory_policy:noeviction\n'; },
-    }),
-    httpRequest: httpOk,
-  });
-  assert.ok(results.some(r => r.name === 'Redis protocol service version' && r.status === 'FAIL'));
-  assert.equal(summarizeReadiness(results).ready, false);
+test('staging readiness accepts Redis 7 and Render Valkey 8 but rejects unsupported major versions', async () => {
+  async function checkVersion(serverInfo) {
+    return runStagingReadiness({
+      env: env(),
+      nodeVersion: 'v24.21.0',
+      postgresConnector: async () => fakePostgres(),
+      redisConnector: async () => ({
+        ...fakeRedis(),
+        async info(section) { return section === 'server' ? serverInfo : '# Memory\nmaxmemory_policy:noeviction\n'; },
+      }),
+      httpRequest: httpOk,
+    });
+  }
+
+  const redis7 = await checkVersion('# Server\nredis_version:7.2.4\n');
+  assert.ok(redis7.some(r => r.name === 'Redis protocol service version' && r.status === 'PASS'));
+
+  const valkey8 = await checkVersion('# Server\nvalkey_version:8.0.1\n');
+  assert.ok(valkey8.some(r => r.name === 'Redis protocol service version' && r.status === 'PASS'));
+
+  const unsupported = await checkVersion('# Server\nvalkey_version:7.2.4\n');
+  assert.ok(unsupported.some(r => r.name === 'Redis protocol service version' && r.status === 'FAIL'));
+  assert.equal(summarizeReadiness(unsupported).ready, false);
 });
 
 test('staging readiness requires separate legacy JWT and explicit widget origins', async () => {

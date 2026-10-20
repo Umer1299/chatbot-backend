@@ -7,7 +7,7 @@ test('staging runbook configures auth before readiness and enables agent chat be
   const setup = runbook.slice(runbook.indexOf('### Exact manual service setup'), runbook.indexOf('### Staging API smoke request guide'));
   const authConfigured = setup.indexOf('ACCOUNT_AUTH_ENABLED=true');
   const migration = setup.indexOf('npm run staging:migrate');
-  const deploy = setup.indexOf('Start/deploy the isolated API');
+  const deploy = setup.indexOf('Manually deploy/restart the API and worker');
   const readiness = setup.indexOf('npm run staging:check');
   const onboarding = setup.indexOf('Verify Better Auth onboarding');
   const agentsConfigured = setup.indexOf('Create an agency');

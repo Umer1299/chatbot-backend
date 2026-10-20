@@ -167,13 +167,17 @@ async function checkRedis(results, env, connect = connectRedis) {
     const product = valkeyVersion ? 'Valkey' : 'Redis';
     const version = valkeyVersion || redisVersion;
     const major = version ? Number.parseInt(version.split('.')[0], 10) : NaN;
+    // Newly created Render Key Value services run Valkey 8. Keep Redis limited
+    // to Redis 7 (the version exercised in CI), while accepting Render's
+    // documented Redis-protocol-compatible Valkey 8 service.
+    const supportedProtocolService = valkeyVersion ? major === 8 : major === 7;
     const policy = /^maxmemory_policy:(.+)$/m.exec(info)?.[1]?.trim();
     if (pong !== 'PONG') {
       add(results, 'Redis connectivity', 'FAIL', 'Redis did not return PONG.');
     } else {
       add(results, 'Redis connectivity', 'PASS', 'Redis returned PONG.');
-      add(results, 'Redis protocol service version', major === 7 ? 'PASS' : (version ? 'FAIL' : 'BLOCKED'),
-        version ? `Observed ${product} ${version}; staging requires Redis 7-compatible protocol service.` : 'Redis INFO did not expose a server version; verify the managed service version manually.');
+      add(results, 'Redis protocol service version', supportedProtocolService ? 'PASS' : (version ? 'FAIL' : 'BLOCKED'),
+        version ? `Observed ${product} ${version}; staging supports Redis 7 or Render Key Value Valkey 8.` : 'Redis INFO did not expose a server version; verify the managed service version manually.');
       add(results, 'Redis eviction policy', policy === 'noeviction' ? 'PASS' : (policy ? 'FAIL' : 'BLOCKED'),
         policy ? `Observed policy: ${policy}. BullMQ requires noeviction.` : 'Redis INFO did not expose maxmemory_policy; verify the managed service setting manually.');
     }
