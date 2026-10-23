@@ -1,0 +1,84 @@
+name: Phase 6D critical dependency remediation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [fix/tenant-security-boundaries]
+    paths:
+      - '.github/workflows/phase-6d-critical-dependencies.yml'
+      - '.github/scripts/audit-evidence.mjs'
+      - '.github/scripts/audit-evidence.test.mjs'
+      - 'package-lock.json'
+      - 'test/trustedProxy.test.js'
+      - 'test/criticalDependencyResolution.test.js'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-6d-critical-dependency-fixes') || github.head_ref == 'security/phase-6d-critical-dependency-fixes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - name: Verify implementation baseline and narrow change
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = '63a69f44cec1ed10d2e4d54fdd62c019d03ed6ea'
+          test "$(git rev-parse HEAD^:package-lock.json)" = '7da8bb9df03b98b8fd07464ba05585aacb11dca6'
+          test "$(git diff --name-only HEAD^ HEAD | sort)" = $'.github/scripts/audit-evidence.mjs\n.github/scripts/audit-evidence.test.mjs\n.github/workflows/phase-6d-critical-dependencies.yml\npackage-lock.json\ntest/criticalDependencyResolution.test.js\ntest/trustedProxy.test.js'
+          git diff --check HEAD^ HEAD
+          node --version
+          npm --version
+      - name: Test evidence sanitizer
+        run: node --test .github/scripts/audit-evidence.test.mjs
+      - name: Install pinned dependencies without scripts
+        run: npm ci --ignore-scripts
+      - name: Generate reports and retain each command status
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p raw
+          npm audit --json > raw/audit-full.json 2>/dev/null; full=$?
+          npm audit --omit=dev --json > raw/audit-production.json 2>/dev/null; production=$?
+          npm ls --all --json > raw/dependency-tree.json 2>/dev/null; tree=$?
+          npm outdated --json > raw/outdated.json 2>/dev/null; outdated=$?
+          printf '{"auditFull":%d,"auditProduction":%d,"dependencyTree":%d,"outdated":%d}\n' "$full" "$production" "$tree" "$outdated" > raw/exit-status.json
+          set -e
+          node .github/scripts/audit-evidence.mjs
+          git diff --exit-code -- package.json package-lock.json
+      - name: Verify resolved security targets
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const lock = JSON.parse(fs.readFileSync('package-lock.json'));
+          for (const [name, version] of Object.entries({
+            'proxy-addr': '2.0.8', 'protobufjs': '7.6.6', '@grpc/grpc-js': '1.14.6',
+          })) assert.equal(lock.packages['node_modules/' + name]?.version, version);
+          for (const report of ['audit-full.json', 'audit-production.json']) {
+            const audit = JSON.parse(fs.readFileSync('reports/' + report));
+            assert.equal(audit.metadata.vulnerabilities.critical, 0);
+            for (const name of ['proxy-addr', 'protobufjs', '@grpc/grpc-js'])
+              assert.equal(audit.vulnerabilities[name], undefined, report + ': ' + name);
+          }
+          NODE
+      - name: Run backend regression suite
+        run: npm test
+      - name: Upload sanitized, validated JSON evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-6d-batch-1-audit-evidence
+          path: reports/*.json
+          if-no-files-found: error
+          retention-days: 1
