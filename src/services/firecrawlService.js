@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { fetchPublicWebsite, parsePublicWebsiteUrl, resolvePublicWebsite } from './scrapeDestinationPolicy.js';
 
 const DEFAULT_EXCLUDE_PATHS = [
   '/blog/*',
@@ -33,6 +34,9 @@ const FIRECRAWL_EMPTY_COMPLETION_GRACE_MS = Number(process.env.FIRECRAWL_EMPTY_C
 const FIRECRAWL_WAIT_FOR_MS = Number(process.env.FIRECRAWL_WAIT_FOR_MS || 1500);
 const DIRECT_HTML_MIN_CHARS = Number(process.env.DIRECT_HTML_MIN_CHARS || 300);
 const OFFICIAL_FIRECRAWL_URL = 'https://api.firecrawl.dev';
+const MAX_FIRECRAWL_REDIRECTS = 5;
+const MAX_FIRECRAWL_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_PAGINATION_PAGES = 50;
 
 function stripTrailingSlash(value) {
   return String(value || '').trim().replace(/\/+$/, '');
@@ -96,18 +100,70 @@ function getFirecrawlHeaders(baseUrl, includeJsonContentType = false) {
   return headers;
 }
 
-async function fetchWithTimeout(url, options = {}) {
+function approvedFirecrawlUrl(baseUrl, value, relativeTo = `${baseUrl}/`) {
+  let base, target;
+  try {
+    base = new URL(baseUrl);
+    if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password ||
+        base.search || base.hash) throw new Error();
+    if (typeof value !== 'string' || !value || /[\u0000-\u001f\u007f\\]/.test(value)) throw new Error();
+    target = new URL(value, relativeTo);
+  } catch {
+    throw new Error('Unsafe Firecrawl URL');
+  }
+  if (!['http:', 'https:'].includes(target.protocol) || target.origin !== base.origin ||
+      target.username || target.password) throw new Error('Unsafe Firecrawl URL');
+  target.hash = '';
+  return target;
+}
+
+async function fetchFirecrawl(baseUrl, value, options = {}) {
+  let target = approvedFirecrawlUrl(baseUrl, value);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_REQUEST_TIMEOUT_MS);
 
   try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
+    for (let hop = 0; hop <= MAX_FIRECRAWL_REDIRECTS; hop++) {
+      const response = await fetch(target.href, { ...options, redirect: 'manual', signal: controller.signal });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        await response.body?.cancel();
+        // Never replay a credential-bearing POST or forward credentials to a response-supplied origin.
+        if (hop === MAX_FIRECRAWL_REDIRECTS || options.method === 'POST') throw new Error('Unsafe Firecrawl redirect');
+        target = approvedFirecrawlUrl(baseUrl, location, target.href);
+        continue;
+      }
+      const reader = response.body?.getReader();
+      const chunks = [];
+      let size = 0;
+      if (reader) {
+        while (true) {
+          const { done, value: chunk } = await reader.read();
+          if (done) break;
+          size += chunk.length;
+          if (size > MAX_FIRECRAWL_BODY_BYTES) {
+            await reader.cancel();
+            throw new Error('Firecrawl response too large');
+          }
+          chunks.push(chunk);
+        }
+      }
+      const body = Buffer.concat(chunks).toString('utf8');
+      return {
+        ok: response.ok, status: response.status, statusText: response.statusText,
+        headers: response.headers, text: async () => body,
+      };
+    }
+    throw new Error('Unsafe Firecrawl redirect');
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function validateScrapeWebsiteUrl(value) {
+  const url = parsePublicWebsiteUrl(value);
+  await resolvePublicWebsite(url);
+  return url.href;
 }
 
 async function readJsonResponse(response, context) {
@@ -200,12 +256,8 @@ function getNextUrl(payload) {
 }
 
 function resolveFirecrawlUrl(baseUrl, value) {
-  if (!value) return null;
-  try {
-    return new URL(value, `${baseUrl}/`).toString();
-  } catch {
-    return null;
-  }
+  if (value == null || value === '') return null;
+  return approvedFirecrawlUrl(baseUrl, value).href;
 }
 
 async function fetchPaginatedPages(baseUrl, firstNextUrl) {
@@ -214,9 +266,10 @@ async function fetchPaginatedPages(baseUrl, firstNextUrl) {
   let nextUrl = resolveFirecrawlUrl(baseUrl, firstNextUrl);
 
   while (nextUrl && !seen.has(nextUrl)) {
+    if (seen.size >= MAX_PAGINATION_PAGES) throw new Error('Firecrawl pagination limit exceeded');
     seen.add(nextUrl);
 
-    const response = await fetchWithTimeout(nextUrl, {
+    const response = await fetchFirecrawl(baseUrl, nextUrl, {
       method: 'GET',
       headers: getFirecrawlHeaders(baseUrl),
     });
@@ -305,14 +358,7 @@ async function scrapeDirectHtml(url) {
 
   for (const candidateUrl of getUrlCandidates(url)) {
     try {
-      const response = await fetchWithTimeout(candidateUrl, {
-        method: 'GET',
-        redirect: 'follow',
-        headers: {
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'User-Agent': 'Mozilla/5.0 (compatible; ChatflowAIBot/1.0; +https://chatflowai.io)',
-        },
-      });
+      const response = await fetchPublicWebsite(candidateUrl);
 
       const rawBody = await response.text();
       if (!response.ok) {
@@ -343,11 +389,11 @@ async function scrapeDirectHtml(url) {
       };
 
       console.log(
-        `[firecrawlService] direct HTML fallback returned ${content.length} characters for ${url} via ${candidateUrl}`,
+        `[firecrawlService] direct HTML fallback returned ${content.length} characters`,
       );
       return [page];
     } catch (error) {
-      errors.push(`${candidateUrl}: ${error.message}`);
+      errors.push(error.code === 'UNSAFE_SCRAPE_DESTINATION' ? 'Unsafe scrape destination' : 'Direct HTML request failed');
     }
   }
 
@@ -369,7 +415,7 @@ async function startCrawl(baseUrl, url, options) {
     crawlOptions.ignoreRobotsTxt = true;
   }
 
-  const response = await fetchWithTimeout(crawlUrl, {
+  const response = await fetchFirecrawl(baseUrl, crawlUrl, {
     method: 'POST',
     headers: getFirecrawlHeaders(baseUrl, true),
     body: JSON.stringify(crawlOptions),
@@ -386,7 +432,7 @@ async function startCrawl(baseUrl, url, options) {
 
 async function scrapeSinglePage(baseUrl, url, options = {}) {
   const scrapeUrl = `${baseUrl}/v1/scrape`;
-  const response = await fetchWithTimeout(scrapeUrl, {
+  const response = await fetchFirecrawl(baseUrl, scrapeUrl, {
     method: 'POST',
     headers: getFirecrawlHeaders(baseUrl, true),
     body: JSON.stringify({
@@ -415,7 +461,7 @@ async function pollCrawl(baseUrl, jobId) {
   let emptyCompletionStartedAt = null;
 
   while (Date.now() - start < FIRECRAWL_TIMEOUT_MS) {
-    const pollResp = await fetchWithTimeout(pollUrl, {
+    const pollResp = await fetchFirecrawl(baseUrl, pollUrl, {
       method: 'GET',
       headers: getFirecrawlHeaders(baseUrl),
     });
@@ -436,9 +482,7 @@ async function pollCrawl(baseUrl, jobId) {
       pages.push(...await fetchPaginatedPages(baseUrl, nextUrl));
     }
 
-    console.log(
-      `[firecrawlService] poll ${jobId}: status=${status || 'unknown'} pages=${pages.length} completed=${completed ?? 'unknown'} total=${total ?? 'unknown'}`,
-    );
+    console.log(`[firecrawlService] poll pages=${pages.length} completed=${completed ?? 'unknown'} total=${total ?? 'unknown'}`);
 
     if (pages.length > 0) {
       return pages;
@@ -489,18 +533,21 @@ async function scrapeWithBaseUrl(baseUrl, url, options) {
 }
 
 export async function scrapeWebsite(url, options = {}) {
+  // Revalidate every job at the worker boundary, including jobs queued before
+  // this version or forged inside the queue. Direct fallback pins each hop.
+  const validatedUrl = await validateScrapeWebsiteUrl(url);
   const baseUrls = getFirecrawlBaseUrls();
-  const errors = [];
+  let unsafeProviderResponse = false;
 
   for (const baseUrl of baseUrls) {
     try {
-      const normalizedPages = await scrapeWithBaseUrl(baseUrl, url, options);
+      const normalizedPages = await scrapeWithBaseUrl(baseUrl, validatedUrl, options);
 
       if (!normalizedPages.length) {
         throw new Error('Firecrawl returned no usable page content');
       }
 
-      console.log(`Scraped ${normalizedPages.length} pages from ${url} via ${baseUrl}`);
+      console.log(`Scraped ${normalizedPages.length} pages`);
 
       return {
         pages: normalizedPages,
@@ -508,44 +555,36 @@ export async function scrapeWebsite(url, options = {}) {
         error: null,
       };
     } catch (crawlError) {
-      errors.push(`${baseUrl}: ${crawlError.message}`);
-      console.warn(
-        `[firecrawlService] crawl failed for ${url} via ${baseUrl}; trying single-page scrape fallback. Reason: ${crawlError.message}`,
-      );
+      unsafeProviderResponse ||= /Unsafe Firecrawl/.test(crawlError.message);
+      console.warn('[firecrawlService] crawl failed; trying same-origin single-page fallback');
 
       try {
-        const fallbackPages = await scrapeSinglePage(baseUrl, url, options);
-        console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s) for ${url} via ${baseUrl}`);
+        const fallbackPages = await scrapeSinglePage(baseUrl, validatedUrl, options);
+        console.log(`[firecrawlService] fallback scrape returned ${fallbackPages.length} page(s)`);
         return {
           pages: fallbackPages,
           totalPages: fallbackPages.length,
           error: null,
         };
       } catch (singlePageError) {
-        errors.push(`${baseUrl}: ${singlePageError.message}`);
-        console.warn(
-          `[firecrawlService] single-page scrape fallback failed for ${url} via ${baseUrl}. Reason: ${singlePageError.message}`,
-        );
+        unsafeProviderResponse ||= /Unsafe Firecrawl/.test(singlePageError.message);
+        console.warn('[firecrawlService] same-origin single-page fallback failed');
       }
     }
   }
 
   try {
-    const directPages = await scrapeDirectHtml(url);
+    const directPages = await scrapeDirectHtml(validatedUrl);
     return {
       pages: directPages,
       totalPages: directPages.length,
       error: null,
     };
-  } catch (directError) {
-    errors.push(directError.message);
-  }
-
-  const detailedMessage = errors.join(' | ');
+  } catch { /* Do not expose response bodies or user-supplied URL query strings in job errors. */ }
   return {
     pages: [],
     totalPages: 0,
-    error: detailedMessage || 'Unable to scrape the provided URL. Please try again.',
+    error: unsafeProviderResponse ? 'Unable to scrape: unapproved provider destination' : 'Unable to scrape the provided URL. Please try again.',
   };
 }
 

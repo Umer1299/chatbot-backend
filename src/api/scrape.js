@@ -5,12 +5,14 @@ import pool from '../db/pool.js';
 import requireAuth from '../middleware/jwtAuth.js';
 import { addScrapeJob, getJobStatus, refreshScrapeJob } from '../jobs/scrapeWorker.js';
 import { processSupplementalInfo } from '../agents/contentValidator.js';
+import { validateScrapeWebsiteUrl } from '../services/firecrawlService.js';
 
 const router = Router();
 router.post('/start', requireAuth, asyncHandler(async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL required' });
-  const jobId = await addScrapeJob(req.business.businessId, url);
+  const validatedUrl = await validateScrapeWebsiteUrl(url);
+  const jobId = await addScrapeJob(req.business.businessId, validatedUrl);
   return res.json({ jobId, message: 'Scraping started' });
 }));
 
@@ -22,7 +24,9 @@ router.get('/status/:jobId', requireAuth, asyncHandler(async (req, res) => {
 
 router.post('/refresh', requireAuth, asyncHandler(async (req, res) => {
   const { url } = req.body;
-  const jobId = await refreshScrapeJob(req.business.businessId, url);
+  if (!url) return res.status(400).json({ error: 'URL required' });
+  const validatedUrl = await validateScrapeWebsiteUrl(url);
+  const jobId = await refreshScrapeJob(req.business.businessId, validatedUrl);
   return res.json({ jobId, message: 'Re-scrape started' });
 }));
 
