@@ -40,7 +40,7 @@ jobs:
           git diff --check "$baseline" HEAD
           git diff --name-only "$baseline" HEAD | while read -r file; do
             case "$file" in
-              .env.staging.example|.github/workflows/phase-6d-batch2-multer.yml|docs/phase-6d-batch2-multer.md|render.staging.yaml|package.json|package-lock.json|src/api/scrape.js|src/middleware/legacyUploads.js|src/routes/upsert.js|test/security.test.js) ;;
+              .env.staging.example|.github/workflows/phase-6d-batch2-multer.yml|docs/phase-6d-batch2-multer.md|docs/phase-6d-batch2-independent-security-assessment.md|render.staging.yaml|package.json|package-lock.json|src/api/scrape.js|src/middleware/legacyUploads.js|src/routes/upsert.js|test/security.test.js) ;;
               *) echo 'Unexpected change in stacked audit scope'; exit 1 ;;
             esac
           done

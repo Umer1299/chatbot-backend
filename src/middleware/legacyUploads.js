@@ -32,7 +32,10 @@ export const supplementUpload = multer({
 });
 
 export function blockStagingLegacyUploads(req, res, next) {
-  if (process.env.CHATFLOW_ENVIRONMENT === 'isolated-staging' &&
+  // A missing or mistyped upload flag must not re-enable files in an
+  // explicitly isolated staging environment. The flag also blocks uploads
+  // if the environment marker was accidentally omitted.
+  if (process.env.CHATFLOW_ENVIRONMENT === 'isolated-staging' ||
       process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS === 'true') {
     return res.status(403).json({ error: 'Legacy file uploads disabled in staging' });
   }

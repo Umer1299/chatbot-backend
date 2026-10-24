@@ -250,6 +250,8 @@ test('multipart limits reject abuse before queueing or inserting knowledge', asy
     ['/api/upsert', [['files', '1', '1.txt'], ['files', '2', '2.txt'], ['files', '3', '3.txt'], ['files', '4', '4.txt']], 400],
     ['/api/upsert', [['files', new Uint8Array(50 * 1024 * 1024 + 1), 'large.txt']], 413],
     ['/api/upsert', [['text', 'ok'], ['extra', 'bad']], 400],
+    ['/api/upsert', [['text', 'first'], ['text', 'second']], 400],
+    ['/api/upsert', [['text', 'first'], ['text[0]', 'second']], 400],
     ['/api/upsert', [['text', 'ok'], ['files', '1', '1.txt'], ['files', '2', '2.txt'], ['files', '3', '3.txt'], ['files', '4', '4.txt']], 400],
     ['/api/upsert', [['x'.repeat(33), 'bad']], 400],
     ['/api/upsert', [['text[4294967294]', 'x'], ['text[key]', 'y']], 400],
@@ -291,16 +293,33 @@ test('malformed boundaries and aborted streams do not enqueue or crash the serve
 
 test('explicit isolated staging switch blocks both legacy upload ingress paths while JSON text remains available', async () => {
   process.env.CHATFLOW_ENVIRONMENT = 'isolated-staging';
-  process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS = 'true';
   try {
-    for (const path of ['/api/upsert', '/api/upsert/', '/api/scrape/supplement/file', '/api/scrape/supplement/file/']) {
-      assert.equal((await postMultipart(path, multipart([['files', 'bytes', 'test.txt']]))).status, 403);
+    for (const flag of [undefined, 'invalid', 'false', 'true']) {
+      if (flag === undefined) delete process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS;
+      else process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS = flag;
+      for (const path of ['/api/upsert', '/api/upsert/', '/api/scrape/supplement/file', '/api/scrape/supplement/file/']) {
+        assert.equal((await postMultipart(path, multipart([['files', 'bytes', 'test.txt']]))).status, 403);
+      }
     }
+    const put = await fetch(base + '/api/upsert', { method: 'PUT', headers: owner(), body: multipart([['files', 'bytes', 'test.txt']]) });
+    assert.equal(put.status, 404);
     assert.equal((await request('/api/upsert', 'POST', owner(), { text: 'owner text knowledge' })).status, 200);
     assert.equal(effects.jobs, 0);
   } finally {
     delete process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS;
     delete process.env.CHATFLOW_ENVIRONMENT;
+  }
+});
+
+test('explicit upload flag blocks legacy file paths if staging environment marker is missing', async () => {
+  delete process.env.CHATFLOW_ENVIRONMENT;
+  process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS = 'true';
+  try {
+    assert.equal((await postMultipart('/api/upsert', multipart([['files', 'bytes', 'test.txt']]))).status, 403);
+    assert.equal((await postMultipart('/api/scrape/supplement/file', multipart([['file', 'bytes', 'test.txt']]))).status, 403);
+    assert.equal(effects.jobs, 0);
+  } finally {
+    delete process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS;
   }
 });
 test('file job polling is owner-scoped, including legacy jobs without ownership', async () => {
