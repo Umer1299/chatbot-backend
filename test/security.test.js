@@ -5,6 +5,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import { parsePublicWebsiteUrl } from '../src/services/scrapeDestinationPolicy.js';
 
 // Every external service is replaced before application modules are imported.
 // No .env file, production database, Redis, queue, email or model API is used.
@@ -41,6 +42,11 @@ const db = { async query(sql, args = []) {
     assert.match(q, /business_id = \$2/);
     return { rows: jobs.filter(j => j.id === args[0] && j.business_id === args[1]) };
   }
+  if (q.startsWith('INSERT INTO scrape_jobs')) {
+    const job = { id: `scrape-${jobs.length + 1}`, business_id: args[0], url: args[1], status: 'queued' };
+    jobs.push(job);
+    return { rows: [{ id: job.id }] };
+  }
   if (q.includes('FROM messages')) {
     assert.match(q, /business_id\s*=\s*\$2/);
     return { rows: records.filter(r => r.session_id === args[0] && r.business_id === args[1]) };
@@ -70,7 +76,7 @@ mock.module('../src/queues/fileQueue.js', { namedExports: { fileQueue: {
   add: async (name, data) => { effects.jobs++; effects.jobPayloads.push(data); },
 } } });
 mock.module('../src/services/recordManager.js', { namedExports: { markContentProcessed: async () => {}, isDuplicateContent: async () => false } });
-mock.module('../src/services/firecrawlService.js', { namedExports: { scrapeWebsite: async () => [], cleanAndChunkContent: () => ['example chunk'], shouldEmbedChunk: () => true } });
+mock.module('../src/services/firecrawlService.js', { namedExports: { scrapeWebsite: async () => [], validateScrapeWebsiteUrl: async url => parsePublicWebsiteUrl(url).href, cleanAndChunkContent: () => ['example chunk'], shouldEmbedChunk: () => true } });
 mock.module('../src/agents/industryDetector.js', { namedExports: { detectIndustry: async () => ({}) } });
 mock.module('../src/agents/contentValidator.js', { namedExports: { validateWebsiteContent: async () => ({}), processSupplementalInfo: async () => ({}) } });
 mock.module('../src/agents/contentGenerator.js', { namedExports: { generateChatbotContent: async () => ({}) } });
@@ -90,7 +96,7 @@ for (const [path, module] of [['auth','../src/api/auth.js'], ['leads','../src/ap
   app.use(`/api/${path}`, (await import(module)).default);
 }
 app.use('/direct-chat', (await import('../src/api/chat.js')).default);
-app.use((error, req, res, next) => res.status(503).json({ error: 'Service unavailable' }));
+app.use((error, req, res, next) => res.status(error.status === 400 ? 400 : 503).json({ error: 'Service unavailable' }));
 const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
 after(() => new Promise(resolve => server.close(resolve)));
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -335,6 +341,22 @@ test('scrape job status only returns jobs belonging to authenticated business', 
   assert.equal((await request('/api/scrape/status/j', 'GET', owner())).status, 404);
   jobs[0].business_id = A;
   assert.equal((await request('/api/scrape/status/j', 'GET', owner())).status, 200);
+});
+test('scrape start and refresh reject unsafe destinations before queue insertion and preserve owner isolation', async () => {
+  for (const path of ['/api/scrape/start', '/api/scrape/refresh']) {
+    for (const headers of [{}, { authorization: 'Bearer invalid' }]) {
+      assert.equal((await request(path, 'POST', headers, { url: 'https://93.184.216.34/' })).status, 401);
+    }
+    for (const url of ['http://127.0.0.1/internal', 'http://169.254.169.254/latest/meta-data/', 'https://user@93.184.216.34/', 'https://93.184.216.34:8080/']) {
+      assert.equal((await request(path, 'POST', owner(), { url })).status, 400);
+    }
+    assert.equal(jobs.length, path.endsWith('start') ? 0 : 1);
+    assert.equal((await request(path, 'POST', owner(), { url: 'https://93.184.216.34/' })).status, 200);
+    assert.equal(jobs.at(-1).business_id, A);
+    assert.equal(jobs.at(-1).url, 'https://93.184.216.34/');
+  }
+  assert.equal(jobs.length, 2);
+  assert.equal((await request('/api/scrape/status/scrape-1', 'GET', { authorization: `Bearer ${sign(businesses[1])}` })).status, 404);
 });
 test('legacy lead webhook and entitlement writes require server key', async () => {
   assert.equal((await request('/api/lead/capture', 'POST', widget, { message: 'spam' })).status, 401);
