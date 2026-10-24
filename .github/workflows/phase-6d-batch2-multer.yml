@@ -1,0 +1,90 @@
+name: Phase 6D Batch 2 Multer evidence
+
+on:
+  pull_request:
+    branches: [security/phase-6d-critical-dependency-fixes]
+    paths:
+      - '.github/workflows/phase-6d-batch2-multer.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'src/middleware/legacyUploads.js'
+      - 'src/routes/upsert.js'
+      - 'src/api/scrape.js'
+      - 'test/security.test.js'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: github.head_ref == 'security/phase-6d-batch2-multer-hardening' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-6d-batch2-multer-hardening')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - name: Verify Batch 1 baseline and scoped changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=7306ba7c15ffa4a4c549d1bdb508a9254942538c
+          git merge-base --is-ancestor "$baseline" HEAD
+          test "$(git rev-parse "$baseline":package-lock.json)" = 'f301624fad4f0833479f6867dd107cb23138b78a'
+          git diff --check "$baseline" HEAD
+          git diff --name-only "$baseline" HEAD | while read -r file; do
+            case "$file" in
+              .env.staging.example|.github/workflows/phase-6d-batch2-multer.yml|docs/phase-6d-batch2-multer.md|docs/phase-6d-batch2-independent-security-assessment.md|render.staging.yaml|package.json|package-lock.json|src/api/scrape.js|src/middleware/legacyUploads.js|src/routes/upsert.js|test/security.test.js) ;;
+              *) echo 'Unexpected change in stacked audit scope'; exit 1 ;;
+            esac
+          done
+          node --version
+          npm --version
+      - name: Test sanitizer
+        run: node --test .github/scripts/audit-evidence.test.mjs
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts
+      - name: Generate and validate four reports
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p raw
+          npm audit --json > raw/audit-full.json 2>/dev/null; full=$?
+          npm audit --omit=dev --json > raw/audit-production.json 2>/dev/null; production=$?
+          npm ls --all --json > raw/dependency-tree.json 2>/dev/null; tree=$?
+          npm outdated --json > raw/outdated.json 2>/dev/null; outdated=$?
+          printf '{"auditFull":%d,"auditProduction":%d,"dependencyTree":%d,"outdated":%d}\n' "$full" "$production" "$tree" "$outdated" > raw/exit-status.json
+          set -e
+          node .github/scripts/audit-evidence.mjs
+          git diff --exit-code -- package.json package-lock.json
+      - name: Verify targeted dependency and critical findings
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const lock = JSON.parse(fs.readFileSync('package-lock.json'));
+          for (const [name, version] of Object.entries({
+            'multer': '2.5.0', 'proxy-addr': '2.0.8',
+            'protobufjs': '7.6.6', '@grpc/grpc-js': '1.14.6',
+          })) assert.equal(lock.packages['node_modules/' + name]?.version, version);
+          for (const report of ['audit-full.json', 'audit-production.json']) {
+            const audit = JSON.parse(fs.readFileSync('reports/' + report));
+            assert.equal(audit.metadata.vulnerabilities.critical, 0);
+            for (const name of ['multer', 'proxy-addr', 'protobufjs'])
+              assert.equal(audit.vulnerabilities[name], undefined, `${report}: ${name}`);
+          }
+          NODE
+      - name: Upload sanitized audit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-6d-batch-2-multer-evidence
+          path: reports/*.json
+          if-no-files-found: error
+          retention-days: 1

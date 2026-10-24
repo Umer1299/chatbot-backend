@@ -1,7 +1,7 @@
 import { assertIngestionResult, ingestionErrorPayload } from '../services/ingestionResult.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import express from 'express';
-import multer from 'multer';
+import { upsertUpload, blockStagingMultipartUploads, multipartErrorHandler } from '../middleware/legacyUploads.js';
 import { fileQueue } from '../queues/fileQueue.js';
 import { markContentProcessed } from '../services/recordManager.js';
 import { deleteBusinessChunks, upsertSupplementalChunks } from '../db/vectorStore.js';
@@ -14,9 +14,7 @@ import fs from 'fs/promises';
 import { lookupUploadJob, stageUpload, enqueueOutcome, holdStagedUpload } from '../services/uploadStaging.js';
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 3 } });
-
-router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(async (req, res) => {
+router.post('/', requireKnowledgeOwner, blockStagingMultipartUploads, upsertUpload.array('files', 3), asyncHandler(async (req, res) => {
   const namespace = req.namespace;
   const text = req.body.text;
   const files = req.files || [];
@@ -102,7 +100,7 @@ router.post('/', requireKnowledgeOwner, upload.array('files', 3), asyncHandler(a
     console.error('[upsert]', req.method, req.path, err.message);
     res.status(err.status || 500).json({ ...ingestionErrorPayload(err), ...(jobIds.length ? { partial: true, jobIds } : {}) });
   }
-}));
+}), multipartErrorHandler);
 
 router.get('/job/:jobId', requireKnowledgeOwner, asyncHandler(async (req, res) => {
   const { jobId } = req.params;
