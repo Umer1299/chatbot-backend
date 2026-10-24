@@ -1,17 +1,12 @@
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { Router } from 'express';
-import multer from 'multer';
+import { supplementUpload, blockStagingLegacyUploads, multipartErrorHandler } from '../middleware/legacyUploads.js';
 import pool from '../db/pool.js';
 import requireAuth from '../middleware/jwtAuth.js';
 import { addScrapeJob, getJobStatus, refreshScrapeJob } from '../jobs/scrapeWorker.js';
 import { processSupplementalInfo } from '../agents/contentValidator.js';
 
 const router = Router();
-const multerUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
-});
-
 router.post('/start', requireAuth, asyncHandler(async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL required' });
@@ -44,7 +39,7 @@ router.post('/supplement/text', requireAuth, asyncHandler(async (req, res) => {
   return res.json(result);
 }));
 
-router.post('/supplement/file', requireAuth, multerUpload.single('file'), asyncHandler(async (req, res) => {
+router.post('/supplement/file', requireAuth, blockStagingLegacyUploads, supplementUpload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   let extractedText = '';
@@ -68,6 +63,6 @@ router.post('/supplement/file', requireAuth, multerUpload.single('file'), asyncH
     business?.industry || req.business.industry,
   );
   return res.json(result);
-}));
+}), multipartErrorHandler);
 
 export default router;

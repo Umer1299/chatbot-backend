@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import fs from 'node:fs/promises';
+import http from 'node:http';
 
 // Every external service is replaced before application modules are imported.
 // No .env file, production database, Redis, queue, email or model API is used.
@@ -63,7 +65,10 @@ mock.module('../src/db/vectorStore.js', { namedExports: {
   upsertChunks: async () => ({}), upsertSupplementalChunks: async () => { effects.knowledge++; return { inserted: 1 }; },
   deleteBusinessChunks: async id => { effects.deletions.push(id); return 1; },
 } });
-mock.module('../src/queues/fileQueue.js', { namedExports: { fileQueue: { add: async () => { effects.jobs++; } } } });
+mock.module('../src/queues/fileQueue.js', { namedExports: { fileQueue: {
+  getJob: async () => null,
+  add: async (name, data) => { effects.jobs++; effects.jobPayloads.push(data); },
+} } });
 mock.module('../src/services/recordManager.js', { namedExports: { markContentProcessed: async () => {}, isDuplicateContent: async () => false } });
 mock.module('../src/services/firecrawlService.js', { namedExports: { scrapeWebsite: async () => [], cleanAndChunkContent: () => ['example chunk'], shouldEmbedChunk: () => true } });
 mock.module('../src/agents/industryDetector.js', { namedExports: { detectIndustry: async () => ({}) } });
@@ -99,7 +104,7 @@ async function request(path, method = 'GET', headers = {}, body) {
   return { status: response.status, body: await response.json() };
 }
 beforeEach(() => {
-  calls = []; sessions = new Map(); records = []; jobs = []; effects = { messages: 0, sessions: 0, inquiries: 0, knowledge: 0, jobs: 0, webhook: 0, deletions: [] }; redisFailure = false; afterInquirySave = null; policyRevision = 'test-policy';
+  calls = []; sessions = new Map(); records = []; jobs = []; effects = { messages: 0, sessions: 0, inquiries: 0, knowledge: 0, jobs: 0, jobPayloads: [], webhook: 0, deletions: [] }; redisFailure = false; afterInquirySave = null; policyRevision = 'test-policy';
   policies = new Map([['bot-0', { allowedDomains: [] }], ['bot-1', { allowedDomains: [] }]]);
   cache.clear(); cache.set('chatbot_token:public-a', 'bot-0'); cache.set('chatbot_token:public-b', 'bot-1');
   businesses.forEach(b => { b.active = true; b.plan = 'free'; b.is_disabled=false; b.noConfig=false; delete b.disabled_reason; });
@@ -167,6 +172,136 @@ test('owner knowledge upload works; namespace from URL/body cannot override iden
   assert.equal((await request('/api/upsert/namespace/bot-1', 'DELETE', owner())).status, 403);
   assert.equal((await request('/api/upsert/namespace/bot-0', 'DELETE', owner())).status, 200);
   assert.deepEqual(effects.deletions, [A]);
+});
+
+function multipart(parts) {
+  const form = new FormData();
+  for (const [name, value, filename] of parts) {
+    if (filename) form.append(name, new Blob([value], { type: 'text/plain' }), filename);
+    else form.append(name, value);
+  }
+  return form;
+}
+
+async function postMultipart(path, form, headers = owner()) {
+  const response = await fetch(base + path, { method: 'POST', headers, body: form });
+  return { status: response.status, body: await response.json() };
+}
+
+async function removeQueuedFiles() {
+  for (const job of effects.jobPayloads) await fs.unlink(job.filePath);
+}
+
+test('multipart auth and ownership run before parsing or queue side effects', async () => {
+  const bad = multipart([['files', 'poison', 'poison.txt'], ['text[4294967294]', 'x']]);
+  for (const headers of [{}, { authorization: 'Bearer invalid' }, widget]) {
+    assert.equal((await postMultipart('/api/upsert', bad, headers)).status, 401);
+    assert.equal((await postMultipart('/api/scrape/supplement/file', bad, headers)).status, 401);
+  }
+  businesses[0].active = false;
+  assert.equal((await postMultipart('/api/upsert', bad)).status, 401);
+  businesses[0].active = true;
+  businesses[0].bot_id = null;
+  assert.equal((await postMultipart('/api/upsert', bad)).status, 403);
+  businesses[0].bot_id = 'bot-0';
+  assert.equal(effects.jobs, 0);
+  assert.equal(effects.knowledge, 0);
+});
+
+test('authorized single and multiple uploads preserve worker payload and tenant scope', async () => {
+  try {
+    const single = await postMultipart('/api/upsert', multipart([['files', 'first bytes', 'first.txt']]));
+    assert.equal(single.status, 200);
+    assert.equal(single.body.jobIds.length, 1);
+    const multiple = await postMultipart('/api/upsert', multipart([
+      ['files', 'second bytes', 'second.txt'], ['files', 'third bytes', 'third.txt'],
+    ]), { authorization: `Bearer ${sign(businesses[1])}` });
+    assert.equal(multiple.status, 200);
+    assert.equal(effects.jobs, 3);
+    assert.deepEqual(effects.jobPayloads.map(j => [j.namespace, j.businessId, j.originalName, j.mimeType]), [
+      ['bot-0', A, 'first.txt', 'text/plain'],
+      ['bot-1', B, 'second.txt', 'text/plain'],
+      ['bot-1', B, 'third.txt', 'text/plain'],
+    ]);
+    assert.deepEqual(await Promise.all(effects.jobPayloads.map(j => fs.readFile(j.filePath, 'utf8'))), ['first bytes', 'second bytes', 'third bytes']);
+  } finally { await removeQueuedFiles(); }
+});
+
+test('the full four-part legacy form remains accepted and selects text ingestion', async () => {
+  const form = multipart([
+    ['text', 'valid owner text knowledge'],
+    ['files', 'one', 'one.txt'], ['files', 'two', 'two.txt'], ['files', 'three', 'three.txt'],
+  ]);
+  assert.equal((await postMultipart('/api/upsert', form)).status, 200);
+  assert.equal(effects.knowledge, 1);
+  assert.equal(effects.jobs, 0);
+});
+
+test('supplemental text file stays scoped to verified tenant without a worker job', async () => {
+  const form = multipart([['file', 'customer text content', 'notes.txt']]);
+  const result = await postMultipart('/api/scrape/supplement/file', form);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(effects.jobs, 0);
+  assert.ok(calls.some(c => c.q.includes('SELECT industry FROM businesses') && c.args[0] === A));
+});
+
+test('multipart limits reject abuse before queueing or inserting knowledge', async () => {
+  const cases = [
+    ['/api/upsert', [['files', '1', '1.txt'], ['files', '2', '2.txt'], ['files', '3', '3.txt'], ['files', '4', '4.txt']], 400],
+    ['/api/upsert', [['files', new Uint8Array(50 * 1024 * 1024 + 1), 'large.txt']], 413],
+    ['/api/upsert', [['text', 'ok'], ['extra', 'bad']], 400],
+    ['/api/upsert', [['text', 'ok'], ['files', '1', '1.txt'], ['files', '2', '2.txt'], ['files', '3', '3.txt'], ['files', '4', '4.txt']], 400],
+    ['/api/upsert', [['x'.repeat(33), 'bad']], 400],
+    ['/api/upsert', [['text[4294967294]', 'x'], ['text[key]', 'y']], 400],
+    ['/api/upsert', [['file', 'bad', 'wrong.txt']], 400],
+    ['/api/scrape/supplement/file', [['file', 'first', '1.txt'], ['file', 'second', '2.txt']], 400],
+    ['/api/scrape/supplement/file', [['unused', 'field'], ['file', 'value', '1.txt']], 400],
+    ['/api/scrape/supplement/file', [['file', new Uint8Array(5 * 1024 * 1024 + 1), 'large.txt']], 413],
+  ];
+  for (const [path, parts, expected] of cases) {
+    const result = await postMultipart(path, multipart(parts));
+    assert.equal(result.status, expected, `${path}: ${JSON.stringify(parts.map(([name]) => name))}: ${JSON.stringify(result.body)}`);
+    assert.equal(effects.jobs, 0);
+    assert.equal(effects.knowledge, 0);
+  }
+  assert.equal((await postMultipart('/api/upsert', multipart([]))).status, 400);
+  assert.equal((await postMultipart('/api/scrape/supplement/file', multipart([]))).status, 400);
+});
+
+test('malformed boundaries and aborted streams do not enqueue or crash the server', async () => {
+  for (const path of ['/api/upsert', '/api/scrape/supplement/file']) {
+    const malformed = await fetch(base + path, {
+      method: 'POST', headers: { ...owner(), 'content-type': 'multipart/form-data; boundary=not-present' },
+      body: 'not a multipart body',
+    });
+    assert.equal(malformed.status, 400);
+  }
+  await new Promise(resolve => {
+    const request = http.request(base + '/api/upsert', {
+      method: 'POST', headers: { ...owner(), 'content-type': 'multipart/form-data; boundary=aborted', 'transfer-encoding': 'chunked' },
+    });
+    request.on('error', () => resolve());
+    request.on('close', resolve);
+    request.write('--aborted\r\nContent-Disposition: form-data; name="files"; filename="aborted.txt"\r\n\r\npartial');
+    setTimeout(() => request.destroy(), 20);
+  });
+  assert.equal(effects.jobs, 0);
+  assert.equal((await request('/identity', 'GET', owner())).status, 200);
+});
+
+test('explicit isolated staging switch blocks both legacy upload ingress paths while JSON text remains available', async () => {
+  process.env.CHATFLOW_ENVIRONMENT = 'isolated-staging';
+  process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS = 'true';
+  try {
+    for (const path of ['/api/upsert', '/api/upsert/', '/api/scrape/supplement/file', '/api/scrape/supplement/file/']) {
+      assert.equal((await postMultipart(path, multipart([['files', 'bytes', 'test.txt']]))).status, 403);
+    }
+    assert.equal((await request('/api/upsert', 'POST', owner(), { text: 'owner text knowledge' })).status, 200);
+    assert.equal(effects.jobs, 0);
+  } finally {
+    delete process.env.STAGING_DISABLE_LEGACY_FILE_UPLOADS;
+    delete process.env.CHATFLOW_ENVIRONMENT;
+  }
 });
 test('file job polling is owner-scoped, including legacy jobs without ownership', async () => {
   for (const job of [{ namespace: 'bot-1' }, {}]) {

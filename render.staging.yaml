@@ -22,6 +22,8 @@ services:
         value: isolated-staging
       - key: AGENT_WEBSITE_ENABLED
         value: "false"
+      - key: STAGING_DISABLE_LEGACY_FILE_UPLOADS
+        value: "true"
       - key: ACCOUNT_AUTH_ENABLED
         value: "false"
       - key: DATABASE_URL
