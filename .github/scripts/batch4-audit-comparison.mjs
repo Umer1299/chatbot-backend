@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import { createSanitizer } from './audit-evidence.mjs';
 
 const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
-const baselineLock = JSON.parse(execFileSync('git', ['show', 'HEAD^:package-lock.json'], { encoding: 'utf8' }));
+const baselineCommit = '5ddd4f9e4451564f744295c613c4266f0787b15f';
+execFileSync('git', ['merge-base', '--is-ancestor', baselineCommit, 'HEAD']);
+const baselineLock = JSON.parse(execFileSync('git', ['show', `${baselineCommit}:package-lock.json`], { encoding: 'utf8' }));
 const lock = read('package-lock.json');
 const publicNames = new Set(Object.keys(baselineLock.packages).map(path =>
   path ? path.slice(path.lastIndexOf('node_modules/') + 13) : baselineLock.name));
@@ -40,7 +42,7 @@ function checkTree(node) {
 }
 checkTree(tree);
 assert.equal(execFileSync('git', ['rev-parse', 'HEAD:package.json'], { encoding: 'utf8' }).trim(),
-  execFileSync('git', ['rev-parse', 'HEAD^:package.json'], { encoding: 'utf8' }).trim());
+  execFileSync('git', ['rev-parse', `${baselineCommit}:package.json`], { encoding: 'utf8' }).trim());
 
 const advisories = audit => new Set(Object.values(audit.vulnerabilities).flatMap(record =>
   record.via.filter(via => typeof via === 'object').map(via => via.url.split('/').at(-1))));
@@ -69,8 +71,8 @@ for (const scope of ['full', 'production']) {
   };
 }
 fs.writeFileSync('reports/baseline-comparison.json', `${JSON.stringify({
-  baselineCommit: execFileSync('git', ['rev-parse', 'HEAD^'], { encoding: 'utf8' }).trim(),
-  baselineLockGitBlob: execFileSync('git', ['rev-parse', 'HEAD^:package-lock.json'], { encoding: 'utf8' }).trim(),
+  baselineCommit,
+  baselineLockGitBlob: execFileSync('git', ['rev-parse', `${baselineCommit}:package-lock.json`], { encoding: 'utf8' }).trim(),
   baselineExitStatuses: read('raw/baseline-exit-status.json'),
   comparison,
 }, null, 2)}\n`);
