@@ -40,8 +40,10 @@ test('actual private Express listener exposes only health/readiness and refuses 
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const path of ['/api/upsert', '/api/upsert/', '/api/scrape/supplement/file', '/api/scrape/start',
     '/api/v1/agents', '/api/agent-chat', '/api/chat', '/api/account/sign-in', '/health']) {
-    const response = await fetch(base + path, { method: 'POST', headers: { Authorization: 'Bearer forged' } });
-    assert.equal(response.status, 404, path);
+    const get = await fetch(base + path, { headers: { Authorization: 'Bearer forged' } });
+    assert.equal(get.status, 404, path);
+    const post = await fetch(base + path, { method: 'POST', headers: { Authorization: 'Bearer forged' } });
+    assert.equal(post.status, 413, path);
   }
   assert.equal((await fetch(base + '/healthz')).status, 200);
   assert.equal((await fetch(base + '/readyz')).status, 200);
