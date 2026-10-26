@@ -1,0 +1,149 @@
+name: Phase 6D Batch 4 transitive security evidence
+
+on:
+  pull_request:
+    branches: [security/phase-6e-scraper-ssrf-credential-isolation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.head_ref == 'security/phase-6d-batch4-compatible-transitive-patches' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-6d-batch4-compatible-transitive-patches')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: chatflow_security_test
+          POSTGRES_USER: chatflow_test
+          POSTGRES_PASSWORD: local_test_only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U chatflow_test -d chatflow_security_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://chatflow_test:local_test_only@127.0.0.1:5432/chatflow_security_test
+      TEST_DATABASE_CONFIRM: I_CONFIRM_DISPOSABLE_TEST_DATABASE
+      STAGING_REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          cache: npm
+      - name: Verify stack and scoped diff
+        run: |
+          set -euo pipefail
+          baseline=5ddd4f9e4451564f744295c613c4266f0787b15f
+          git cat-file -e "$baseline^{commit}"
+          git merge-base --is-ancestor "$baseline" HEAD
+          test "$(node --version)" = 'v24.21.0'
+          test "$(npm --version)" = '11.19.0'
+          git diff --check "$baseline" HEAD
+          git diff --name-only "$baseline" HEAD | while read -r file; do
+            case "$file" in
+              package-lock.json|test/batch4TransitiveSecurity.test.js|docs/phase-6d-batch4-transitive-patches.md|.github/workflows/phase-6d-batch4-transitive.yml|.github/scripts/batch4-audit-comparison.mjs|.github/scripts/audit-evidence.mjs|.github/scripts/audit-evidence.test.mjs) ;;
+              *) echo "Unexpected Batch 4 change: $file"; exit 1 ;;
+            esac
+          done
+      - run: npm ci --ignore-scripts
+      - name: Targeted and Phase 6E security regressions
+        run: node --experimental-test-module-mocks --test test/batch4TransitiveSecurity.test.js test/scrapeDestinationPolicy.test.js test/firecrawlCredentialIsolation.test.js test/security.test.js
+      - name: Full suite with disposable PostgreSQL and Redis
+        run: npm test
+      - run: git diff --exit-code -- package.json package-lock.json
+
+  audit:
+    if: github.head_ref == 'security/phase-6d-batch4-compatible-transitive-patches' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-6d-batch4-compatible-transitive-patches')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - run: node --test .github/scripts/audit-evidence.test.mjs
+      - run: npm ci --ignore-scripts
+      - name: Audit exact parent lockfile using the same feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=5ddd4f9e4451564f744295c613c4266f0787b15f
+          git cat-file -e "$baseline^{commit}"
+          git merge-base --is-ancestor "$baseline" HEAD
+          mkdir -p raw
+          baseline_dir="$(mktemp -d)"
+          git show "$baseline:package.json" > "$baseline_dir/package.json"
+          git show "$baseline:package-lock.json" > "$baseline_dir/package-lock.json"
+          # Preserve the committed registry selection for the parent audit.
+          test "$(git rev-parse "$baseline:.npmrc")" = "$(git rev-parse HEAD:.npmrc)"
+          git show "$baseline:.npmrc" > "$baseline_dir/.npmrc"
+          test -s "$baseline_dir/package.json"
+          test -s "$baseline_dir/package-lock.json"
+          test -s "$baseline_dir/.npmrc"
+          export BASELINE_DIR="$baseline_dir"
+          # npm audit exits 1 for findings; bash -e remains active outside this block.
+          set +e
+          (cd "$baseline_dir" && npm audit --json) > raw/baseline-full.json 2>raw/baseline-full.stderr; baseline_full=$?
+          (cd "$baseline_dir" && npm audit --omit=dev --json) > raw/baseline-production.json 2>raw/baseline-production.stderr; baseline_production=$?
+          set -e
+          printf '{"baselineFull":%d,"baselineProduction":%d}\n' "$baseline_full" "$baseline_production" > raw/baseline-exit-status.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { createSanitizer, readBaselineFiles, validateAuditExecution } from './.github/scripts/audit-evidence.mjs';
+          const baseline = '5ddd4f9e4451564f744295c613c4266f0787b15f';
+          const { lock } = readBaselineFiles(process.env.BASELINE_DIR);
+          const names = new Set(Object.keys(lock.packages).map(path =>
+            path ? path.slice(path.lastIndexOf('node_modules/') + 13) : lock.name));
+          const sanitizer = createSanitizer(names);
+          const exits = JSON.parse(fs.readFileSync('raw/baseline-exit-status.json'));
+          for (const [scope, key] of [['full', 'baselineFull'], ['production', 'baselineProduction']]) {
+            let raw;
+            try { raw = JSON.parse(fs.readFileSync(`raw/baseline-${scope}.json`, 'utf8')); }
+            catch { throw new Error(`Baseline ${scope} audit did not produce parseable JSON (exit ${exits[key]})`); }
+            const validated = validateAuditExecution(raw, exits[key], sanitizer);
+            console.log(`Validated ${scope} baseline audit against ${baseline}:`, validated.metadata.vulnerabilities);
+          }
+          NODE
+      - name: Generate and validate current reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          npm audit --json > raw/audit-full.json 2>raw/audit-full.stderr; full=$?
+          npm audit --omit=dev --json > raw/audit-production.json 2>raw/audit-production.stderr; production=$?
+          npm ls --all --json > raw/dependency-tree.json 2>raw/dependency-tree.stderr; tree=$?
+          npm outdated --json > raw/outdated.json 2>raw/outdated.stderr; outdated=$?
+          printf '{"auditFull":%d,"auditProduction":%d,"dependencyTree":%d,"outdated":%d}\n' "$full" "$production" "$tree" "$outdated" > raw/exit-status.json
+          set -e
+          node .github/scripts/audit-evidence.mjs
+          node .github/scripts/batch4-audit-comparison.mjs
+          git diff --exit-code -- package.json package-lock.json
+      - name: Upload validated public-safe evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-6d-batch-4-transitive-evidence
+          path: reports/*.json
+          if-no-files-found: error
+          retention-days: 1
