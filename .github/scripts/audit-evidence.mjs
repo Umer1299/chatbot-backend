@@ -47,7 +47,7 @@ export function createSanitizer(publicNames) {
     return { name: checkName(entry.name), version: entry.version, isSemVerMajor: entry.isSemVerMajor };
   };
   const audit = value => {
-    if (!object(value) || !Number.isInteger(value.auditReportVersion) ||
+    if (!object(value) || Object.hasOwn(value, 'error') || value.auditReportVersion !== 2 ||
         !object(value.vulnerabilities) || !object(value.metadata) ||
         !counts(value.metadata.vulnerabilities, countKeys) ||
         !counts(value.metadata.dependencies, dependencyCountKeys)) {
@@ -84,7 +84,9 @@ export function createSanitizer(publicNames) {
   const tree = (value, depth = 0, name) => {
     if (depth > 100) fail('Dependency tree too deep');
     // Validate the original child before adding the name from its parent map.
-    if (!object(value) || (name === undefined && !nonempty(value.name)) ||
+    if (!object(value) || Object.hasOwn(value, 'error') ||
+        (value.problems !== undefined && (!Array.isArray(value.problems) || value.problems.length > 0)) ||
+        (name === undefined && !nonempty(value.name)) ||
         (value.name !== undefined && !nonempty(value.name)) ||
         (name !== undefined && value.name !== undefined && value.name !== name) ||
         (value.version !== undefined && !nonempty(value.version)) ||
@@ -108,6 +110,62 @@ export function createSanitizer(publicNames) {
   return { audit, tree, outdated, redactionCount: () => withheld.size };
 }
 
+export function validateAuditExecution(raw, exitCode, sanitizer) {
+  if (exitCode !== 0 && exitCode !== 1) fail(`Unexpected npm audit exit status: ${exitCode}`);
+  const validated = sanitizer.audit(raw);
+  const findings = validated.metadata.vulnerabilities.total;
+  if ((exitCode === 0) !== (findings === 0)) fail('npm audit exit disagrees with validated findings');
+  return validated;
+}
+
+export function validateCurrentEvidence(raw, status, sanitizer) {
+  const keys = ['auditFull', 'auditProduction', 'dependencyTree', 'outdated'];
+  if (!object(status) || !keys.every(key => Object.hasOwn(status, key) && Number.isInteger(status[key])) ||
+      Object.keys(status).some(key => !keys.includes(key))) fail('Invalid command exit statuses');
+  const full = validateAuditExecution(raw.full, status.auditFull, sanitizer);
+  const production = validateAuditExecution(raw.production, status.auditProduction, sanitizer);
+  if (status.dependencyTree !== 0) fail(`Unexpected npm ls exit status: ${status.dependencyTree}`);
+  const tree = sanitizer.tree(raw.tree);
+  if (Object.hasOwn(raw.outdated ?? {}, 'error')) fail('npm outdated returned an error');
+  const outdated = sanitizer.outdated(raw.outdated);
+  if ((status.outdated === 0) !== (Object.keys(outdated).length === 0) ||
+      ![0, 1].includes(status.outdated)) fail(`Unexpected npm outdated exit or report: ${status.outdated}`);
+  return { 'audit-full.json': full, 'audit-production.json': production,
+    'dependency-tree.json': tree, 'outdated.json': outdated };
+}
+
+export function readBaselineFiles(directory) {
+  const read = name => {
+    const bytes = fs.readFileSync(`${directory}/${name}`, 'utf8');
+    if (!bytes.trim()) fail(`Empty baseline ${name}`);
+    return bytes;
+  };
+  const manifest = JSON.parse(read('package.json'));
+  const lock = JSON.parse(read('package-lock.json'));
+  read('.npmrc');
+  if (!object(manifest) || !object(lock) || !object(lock.packages) || !nonempty(lock.name)) {
+    fail('Invalid baseline manifest or lockfile');
+  }
+  return { manifest, lock };
+}
+
+export function assertExpectedDependencyTree(tree, expected) {
+  const seen = new Set();
+  function visit(node) {
+    for (const [name, child] of Object.entries(node.dependencies ?? {})) {
+      if (Object.hasOwn(expected, name)) {
+        if (child.version !== expected[name]) fail(`Unexpected installed ${name} version`);
+        seen.add(name);
+      }
+      visit(child);
+    }
+  }
+  visit(tree);
+  for (const name of Object.keys(expected)) {
+    if (!seen.has(name)) fail(`Missing installed ${name} dependency`);
+  }
+}
+
 function main() {
   const raw = 'raw';
   const out = 'reports';
@@ -122,20 +180,16 @@ function main() {
     if (!object(value)) fail(`${name} is not a JSON object`);
     return value;
   };
-  const reports = {
-    'audit-full.json': audit(parse('audit-full.json')),
-    'audit-production.json': audit(parse('audit-production.json')),
-    'dependency-tree.json': tree(parse('dependency-tree.json')),
-    'outdated.json': outdated(parse('outdated.json')),
-  };
+  const status = parse('exit-status.json');
+  const reports = validateCurrentEvidence({
+    full: parse('audit-full.json'), production: parse('audit-production.json'),
+    tree: parse('dependency-tree.json'), outdated: parse('outdated.json'),
+  }, status, { audit, tree, outdated });
   fs.mkdirSync(out, { recursive: true });
   for (const [name, value] of Object.entries(reports)) {
     fs.writeFileSync(`${out}/${name}`, `${JSON.stringify(value, null, 2)}\n`);
     JSON.parse(fs.readFileSync(`${out}/${name}`, 'utf8'));
   }
-  const status = JSON.parse(fs.readFileSync(`${raw}/exit-status.json`, 'utf8'));
-  if (!object(status) || !['auditFull', 'auditProduction', 'dependencyTree', 'outdated']
-    .every(key => Number.isInteger(status[key]))) fail('Missing command exit status');
   const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
   fs.writeFileSync(`${out}/provenance.json`, `${JSON.stringify({
     auditedCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),

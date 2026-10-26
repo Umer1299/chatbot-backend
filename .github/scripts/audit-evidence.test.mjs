@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSanitizer } from './audit-evidence.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { assertExpectedDependencyTree, createSanitizer, readBaselineFiles, validateAuditExecution, validateCurrentEvidence } from './audit-evidence.mjs';
 
 const names = new Set(['app', 'known', 'nested']);
 const sanitizer = () => createSanitizer(names);
@@ -86,4 +89,103 @@ test('redact every package-bearing field using opaque correlated identifiers', (
   assert.equal(s.tree({ name: 'app', dependencies: { secret: { version: '1' } } })
     .dependencies['redacted-1'].name, 'redacted-1');
   assert.equal(s.redactionCount(), 1);
+});
+
+const cleanReport = () => ({
+  ...report(record()), vulnerabilities: {},
+  metadata: { ...report(record()).metadata,
+    vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } },
+});
+const evidence = (full = report(record()), production = report(record())) => ({
+  full, production, tree: { name: 'app', dependencies: { known: { version: '1.0.0' } } },
+  outdated: { known: { current: '1.0.0', wanted: '1.0.1', latest: '2.0.0' } },
+});
+const statuses = () => ({ auditFull: 1, auditProduction: 1, dependencyTree: 0, outdated: 1 });
+
+test('accept clean and vulnerable audits only with matching npm audit exits', () => {
+  assert.equal(validateAuditExecution(cleanReport(), 0, sanitizer()).metadata.vulnerabilities.total, 0);
+  assert.equal(validateAuditExecution(report(record()), 1, sanitizer()).metadata.vulnerabilities.total, 1);
+  const validated = validateCurrentEvidence(evidence(), statuses(), sanitizer());
+  assert.equal(validated['audit-full.json'].vulnerabilities.known.name, 'known');
+  assert.equal(validated['dependency-tree.json'].dependencies.known.version, '1.0.0');
+  assert.doesNotThrow(() => assertExpectedDependencyTree(validated['dependency-tree.json'], { known: '1.0.0' }));
+  const clean = evidence(cleanReport(), cleanReport());
+  clean.outdated = {};
+  assert.deepEqual(validateCurrentEvidence(clean,
+    { ...statuses(), auditFull: 0, auditProduction: 0, outdated: 0 }, sanitizer())['outdated.json'], {});
+});
+
+test('reject npm error objects even if otherwise valid-shaped', () => {
+  for (const value of [
+    { error: { code: 'EAUDITBROKEN' } },
+    { ...report(record()), error: { code: 'EAUDITBROKEN' } },
+    { ...cleanReport(), error: null },
+  ]) {
+    assert.throws(() => validateAuditExecution(value, 1, sanitizer()));
+    assert.throws(() => validateCurrentEvidence(evidence(value), statuses(), sanitizer()));
+  }
+});
+
+test('reject unexpected, missing, noninteger and contradictory audit exit statuses', () => {
+  for (const exit of [2, 127, undefined, '1', 1.5, null]) {
+    assert.throws(() => validateAuditExecution(report(record()), exit, sanitizer()));
+    assert.throws(() => validateCurrentEvidence(evidence(), { ...statuses(), auditFull: exit }, sanitizer()));
+  }
+  assert.throws(() => validateAuditExecution(report(record()), 0, sanitizer()));
+  assert.throws(() => validateAuditExecution(cleanReport(), 1, sanitizer()));
+  assert.throws(() => validateCurrentEvidence(evidence(), { ...statuses(), auditProduction: 0 }, sanitizer()));
+  assert.throws(() => validateCurrentEvidence(evidence(cleanReport(), cleanReport()), statuses(), sanitizer()));
+  const missing = statuses();
+  delete missing.auditFull;
+  assert.throws(() => validateCurrentEvidence(evidence(), missing, sanitizer()));
+});
+
+test('reject malformed, missing and unsupported audit evidence', () => {
+  for (const value of [
+    { ...report(record()), auditReportVersion: 3 },
+    { ...report(record()), metadata: undefined },
+    { ...report(record()), metadata: { ...report(record()).metadata,
+      vulnerabilities: { ...report(record()).metadata.vulnerabilities, high: 2 } } },
+    { ...report(record()), vulnerabilities: { known: { ...record(), via: [{}] } } },
+  ]) assert.throws(() => validateAuditExecution(value, 1, sanitizer()));
+  for (const value of ['{"auditReportVersion":', '', 'not json']) {
+    assert.throws(() => JSON.parse(value));
+  }
+  const missing = evidence();
+  missing.full = undefined;
+  assert.throws(() => validateCurrentEvidence(missing, statuses(), sanitizer()));
+});
+
+test('reject incomplete dependency tree, command errors and outdated exit/report disagreement', () => {
+  const invalidTree = evidence();
+  invalidTree.tree.dependencies.known = null;
+  assert.throws(() => validateCurrentEvidence(invalidTree, statuses(), sanitizer()));
+  const validTree = validateCurrentEvidence(evidence(), statuses(), sanitizer())['dependency-tree.json'];
+  assert.throws(() => assertExpectedDependencyTree(validTree, { known: '2.0.0' }));
+  assert.throws(() => assertExpectedDependencyTree({ name: 'app', dependencies: {} }, { known: '1.0.0' }));
+  for (const exit of [1, 2, 127]) assert.throws(() => validateCurrentEvidence(evidence(),
+    { ...statuses(), dependencyTree: exit }, sanitizer()));
+  assert.throws(() => validateCurrentEvidence({ ...evidence(), tree: { name: 'app', problems: ['invalid'] } }, statuses(), sanitizer()));
+  assert.throws(() => validateCurrentEvidence(evidence(), { ...statuses(), outdated: 0 }, sanitizer()));
+  for (const exit of [2, 127]) assert.throws(() => validateCurrentEvidence(evidence(),
+    { ...statuses(), outdated: exit }, sanitizer()));
+  assert.throws(() => validateCurrentEvidence({ ...evidence(), outdated: { error: { code: 'EOUTDATED' } } }, statuses(), sanitizer()));
+  const empty = evidence();
+  empty.outdated = {};
+  assert.deepEqual(validateCurrentEvidence(empty, { ...statuses(), outdated: 0 }, sanitizer())['outdated.json'], {});
+  assert.throws(() => validateCurrentEvidence(empty, statuses(), sanitizer()));
+});
+
+test('missing or empty exact baseline files fail validation', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'chatflow-audit-baseline-'));
+  try {
+    assert.throws(() => readBaselineFiles(dir));
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"app"}');
+    fs.writeFileSync(path.join(dir, 'package-lock.json'), '{"name":"app","packages":{}}');
+    assert.throws(() => readBaselineFiles(dir));
+    fs.writeFileSync(path.join(dir, '.npmrc'), '');
+    assert.throws(() => readBaselineFiles(dir));
+    fs.writeFileSync(path.join(dir, '.npmrc'), 'registry=https://registry.npmjs.org/\n');
+    assert.equal(readBaselineFiles(dir).lock.name, 'app');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

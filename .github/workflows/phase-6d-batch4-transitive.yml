@@ -101,7 +101,8 @@ jobs:
           git show "$baseline:.npmrc" > "$baseline_dir/.npmrc"
           test -s "$baseline_dir/package.json"
           test -s "$baseline_dir/package-lock.json"
-          export BASELINE_LOCKFILE="$baseline_dir/package-lock.json"
+          test -s "$baseline_dir/.npmrc"
+          export BASELINE_DIR="$baseline_dir"
           # npm audit exits 1 for findings; bash -e remains active outside this block.
           set +e
           (cd "$baseline_dir" && npm audit --json) > raw/baseline-full.json 2>raw/baseline-full.stderr; baseline_full=$?
@@ -110,36 +111,30 @@ jobs:
           printf '{"baselineFull":%d,"baselineProduction":%d}\n' "$baseline_full" "$baseline_production" > raw/baseline-exit-status.json
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
-          import { createSanitizer } from './.github/scripts/audit-evidence.mjs';
+          import { createSanitizer, readBaselineFiles, validateAuditExecution } from './.github/scripts/audit-evidence.mjs';
           const baseline = '5ddd4f9e4451564f744295c613c4266f0787b15f';
-          const lock = JSON.parse(fs.readFileSync(process.env.BASELINE_LOCKFILE, 'utf8'));
+          const { lock } = readBaselineFiles(process.env.BASELINE_DIR);
           const names = new Set(Object.keys(lock.packages).map(path =>
             path ? path.slice(path.lastIndexOf('node_modules/') + 13) : lock.name));
           const sanitizer = createSanitizer(names);
           const exits = JSON.parse(fs.readFileSync('raw/baseline-exit-status.json'));
           for (const [scope, key] of [['full', 'baselineFull'], ['production', 'baselineProduction']]) {
-            if (![0, 1].includes(exits[key])) throw new Error(`Baseline ${scope} audit failed with unexpected exit ${exits[key]}`);
             let raw;
             try { raw = JSON.parse(fs.readFileSync(`raw/baseline-${scope}.json`, 'utf8')); }
             catch { throw new Error(`Baseline ${scope} audit did not produce parseable JSON (exit ${exits[key]})`); }
-            if (raw.error) throw new Error(`Baseline ${scope} audit returned an npm error (exit ${exits[key]})`);
-            const validated = sanitizer.audit(raw);
-            if (exits[key] === 0 && validated.metadata.vulnerabilities.total !== 0 ||
-                exits[key] === 1 && validated.metadata.vulnerabilities.total === 0) {
-              throw new Error(`Baseline ${scope} audit exit disagrees with validated findings`);
-            }
+            const validated = validateAuditExecution(raw, exits[key], sanitizer);
             console.log(`Validated ${scope} baseline audit against ${baseline}:`, validated.metadata.vulnerabilities);
           }
           NODE
       - name: Generate and validate current reports
         shell: bash
         run: |
+          set -euo pipefail
           set +e
-          set -uo pipefail
-          npm audit --json > raw/audit-full.json 2>/dev/null; full=$?
-          npm audit --omit=dev --json > raw/audit-production.json 2>/dev/null; production=$?
-          npm ls --all --json > raw/dependency-tree.json 2>/dev/null; tree=$?
-          npm outdated --json > raw/outdated.json 2>/dev/null; outdated=$?
+          npm audit --json > raw/audit-full.json 2>raw/audit-full.stderr; full=$?
+          npm audit --omit=dev --json > raw/audit-production.json 2>raw/audit-production.stderr; production=$?
+          npm ls --all --json > raw/dependency-tree.json 2>raw/dependency-tree.stderr; tree=$?
+          npm outdated --json > raw/outdated.json 2>raw/outdated.stderr; outdated=$?
           printf '{"auditFull":%d,"auditProduction":%d,"dependencyTree":%d,"outdated":%d}\n' "$full" "$production" "$tree" "$outdated" > raw/exit-status.json
           set -e
           node .github/scripts/audit-evidence.mjs

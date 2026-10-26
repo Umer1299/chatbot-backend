@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { createSanitizer } from './audit-evidence.mjs';
+import { assertExpectedDependencyTree, createSanitizer } from './audit-evidence.mjs';
 
 const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
 const baselineCommit = '5ddd4f9e4451564f744295c613c4266f0787b15f';
@@ -34,13 +34,7 @@ for (const [name, version] of Object.entries(expected)) {
   for (const [path, record] of copies) assert.equal(record.version, version, path);
 }
 const tree = read('reports/dependency-tree.json');
-function checkTree(node) {
-  for (const [name, child] of Object.entries(node.dependencies || {})) {
-    if (expected[name]) assert.equal(child.version, expected[name], `installed ${name}`);
-    checkTree(child);
-  }
-}
-checkTree(tree);
+assertExpectedDependencyTree(tree, expected);
 assert.equal(execFileSync('git', ['rev-parse', 'HEAD:package.json'], { encoding: 'utf8' }).trim(),
   execFileSync('git', ['rev-parse', `${baselineCommit}:package.json`], { encoding: 'utf8' }).trim());
 
