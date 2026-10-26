@@ -17,6 +17,7 @@ const env = {
   STAGING_DISABLE_SCRAPING: 'true', STAGING_DISABLE_PROVIDERS: 'true',
   ACCOUNT_AUTH_ENABLED: 'false', ACCOUNT_PROXY_MODE: 'direct',
   STAGING_MAX_CONNECTIONS: '8', STAGING_MAX_ACTIVE_REQUESTS: '4', STAGING_REQUEST_TIMEOUT_MS: '5000',
+  STAGING_ALLOWED_HOST: 'preflight.internal:10000', STAGING_REDIS_HOST: 'red-preflight',
   STAGING_APPROVED_COMMIT_SHA: sha, RENDER_GIT_COMMIT: sha,
   RENDER_GIT_BRANCH: 'security/phase-7a-isolated-staging-security-preflight',
   STAGING_DATABASE_CA_PEM: ca,
@@ -93,16 +94,16 @@ test('infra gate blocks canonical routes, aliases, methods, uploads and payload-
     for (const path of ['/api/upsert', '/api/upsert/', '/api/scrape/supplement/file', '/api/v1/agents',
       '/api/agent-chat', '/api/chat', '/api/account/sign-in', '/health', '/ready', '/api//upsert']) {
       let code;
-      infraStagingGate({ method: 'POST', path, headers: {} }, { status(v) { code = v; return this; }, json() {} }, () => assert.fail(path));
+      infraStagingGate({ method: 'POST', path, headers: { host: env.STAGING_ALLOWED_HOST }, rawHeaders: ['Host', env.STAGING_ALLOWED_HOST] }, { status(v) { code = v; return this; }, json() {} }, () => assert.fail(path));
       assert.equal(code, 404, path);
     }
     for (const path of ['/healthz', '/readyz']) {
       let reached = false;
-      infraStagingGate({ method: 'GET', path, headers: {} }, {}, () => { reached = true; });
+      infraStagingGate({ method: 'GET', path, headers: { host: env.STAGING_ALLOWED_HOST }, rawHeaders: ['Host', env.STAGING_ALLOWED_HOST] }, {}, () => { reached = true; });
       assert.equal(reached, true);
     }
     let code;
-    infraStagingGate({ method: 'GET', path: '/healthz', headers: { 'transfer-encoding': 'chunked' } },
+    infraStagingGate({ method: 'GET', path: '/healthz', headers: { host: env.STAGING_ALLOWED_HOST, 'transfer-encoding': 'chunked' }, rawHeaders: ['Host', env.STAGING_ALLOWED_HOST] },
       { status(v) { code = v; return this; }, end() {} }, () => assert.fail());
     assert.equal(code, 413);
   } finally { process.env = original; }
@@ -128,7 +129,12 @@ test('review-only blueprint has private API, no worker, no automatic migrations 
   assert.match(liveLines, /autoDeployTrigger: off/);
   assert.match(liveLines, /branch: security\/phase-7a-isolated-staging-security-preflight/);
   assert.match(liveLines, /verify-infra-staging-source/);
+  assert.doesNotMatch(liveLines, /^databases:/m);
+  assert.doesNotMatch(liveLines, /type: keyvalue/);
   assert.doesNotMatch(liveLines, /type: web|type: worker|preDeployCommand|staging:migrate|OPENAI_API_KEY|FIRECRAWL_API_KEY/);
   const server = await fs.readFile(new URL('../src/server.js', import.meta.url), 'utf8');
   assert.match(server, /if \(isInfraStaging\(\)\) \{\s*await pool.query\('SELECT 1'\)/);
+  assert.match(server, /server\.maxConnections = Number\(process\.env\.STAGING_MAX_CONNECTIONS\)/);
+  assert.match(server, /server\.requestTimeout = Number\(process\.env\.STAGING_REQUEST_TIMEOUT_MS\)/);
+  assert.match(server, /server\.headersTimeout = Math\.min\(server\.requestTimeout, 10000\)/);
 });

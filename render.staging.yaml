@@ -1,4 +1,5 @@
-# REVIEW-ONLY blueprint. Do not sync until owner approves commit, capacity, CA and cost.
+# REVIEW-ONLY blueprint. BLOCKED: Render internal PostgreSQL cannot provide
+# verified CA+hostname TLS according to provider docs. Do not sync this file.
 # Separate names avoid changing any existing staging web service.
 services:
   - type: pserv
@@ -36,6 +37,10 @@ services:
         value: direct
       - key: STAGING_MAX_CONNECTIONS
         sync: false
+      - key: STAGING_ALLOWED_HOST
+        sync: false # Exact private service Host including port; verify provider probe behavior.
+      - key: STAGING_REDIS_HOST
+        sync: false # Exact internal hostname of new authenticated staging Key Value.
       - key: STAGING_MAX_ACTIVE_REQUESTS
         sync: false
       - key: STAGING_REQUEST_TIMEOUT_MS
@@ -47,30 +52,10 @@ services:
       - key: STAGING_DATABASE_CA_PEM
         sync: false
       - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: chatflow-preflight-redis
-          property: connectionString
+        sync: false # Authenticated URL only, after enabling internal authentication.
       - key: STAGING_REDIS_URL
-        fromService:
-          type: keyvalue
-          name: chatflow-preflight-redis
-          property: connectionString
+        sync: false # Must match REDIS_URL exactly.
 
-  # No worker: local upload paths are not durable across containers.
-  - type: keyvalue
-    name: chatflow-preflight-redis
-    plan: 256mb
-    region: virginia
-    maxmemoryPolicy: noeviction
-    persistenceMode: journal-snapshot
-    ipAllowList: []
-
-databases:
-  - name: chatflow-preflight-postgres
-    databaseName: chatflow_staging
-    user: chatflow_staging_owner
-    plan: 0.5c-1g
-    postgresMajorVersion: "16"
-    region: virginia
-    ipAllowList: []
+# No worker or datastore is declared. A future separately approved procedure
+# must create Key Value with internal authentication enabled and select a
+# PostgreSQL topology with CA+hostname-verifiable TLS before any sync.

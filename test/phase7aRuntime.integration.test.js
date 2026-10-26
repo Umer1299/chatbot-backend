@@ -1,6 +1,7 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import { assertInfraStaging } from '../src/config/infraStaging.js';
 
 // A controlled no-secret process fixture; never read or print inherited values.
@@ -13,6 +14,7 @@ Object.assign(process.env, {
   STAGING_DISABLE_SCRAPING: 'true', STAGING_DISABLE_PROVIDERS: 'true',
   ACCOUNT_AUTH_ENABLED: 'false', ACCOUNT_PROXY_MODE: 'direct',
   STAGING_MAX_CONNECTIONS: '8', STAGING_MAX_ACTIVE_REQUESTS: '4', STAGING_REQUEST_TIMEOUT_MS: '5000',
+  STAGING_ALLOWED_HOST: '127.0.0.1:1', STAGING_REDIS_HOST: 'red-preflight',
 });
 assertInfraStaging();
 
@@ -38,6 +40,7 @@ test('actual private Express listener exposes only health/readiness and refuses 
   t.after(() => new Promise(resolve => server.close(resolve)));
   markApplicationReady(true);
   const base = `http://127.0.0.1:${server.address().port}`;
+  process.env.STAGING_ALLOWED_HOST = `127.0.0.1:${server.address().port}`;
   for (const path of ['/api/upsert', '/api/upsert/', '/api/scrape/supplement/file', '/api/scrape/start',
     '/api/v1/agents', '/api/agent-chat', '/api/chat', '/api/account/sign-in', '/health']) {
     const get = await fetch(base + path, { headers: { Authorization: 'Bearer forged' } });
@@ -74,4 +77,36 @@ test('direct worker and migration invocations fail before creating a worker or w
     DATABASE_URL: 'postgres://test@staging-db.example/chatflow_staging',
   }), /forbidden/);
   assert.equal(databaseQueries, before);
+});
+
+test('raw HTTP framing and Host attacks are rejected by parser or health-only gate', async t => {
+  const server = http.createServer(app);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const port = server.address().port;
+  process.env.STAGING_ALLOWED_HOST = `preflight.internal:${port}`;
+  async function raw(request) {
+    return new Promise((resolve, reject) => {
+      const socket = net.connect(port, '127.0.0.1');
+      let response = '';
+      socket.setTimeout(2000, () => socket.destroy(new Error('raw fixture timeout')));
+      socket.on('connect', () => socket.write(request));
+      socket.on('data', chunk => { response += chunk.toString(); if (response.includes('\r\n')) socket.destroy(); });
+      socket.on('close', () => resolve(Number(response.match(/^HTTP\/1\.1 (\d{3})/)?.[1])));
+      socket.on('error', reject);
+    });
+  }
+  const host = `Host: preflight.internal:${port}\r\n`;
+  for (const [request, expected] of [
+    [`GET /healthz HTTP/1.1\r\n${host}Connection: close\r\n\r\n`, 200],
+    ['GET /healthz HTTP/1.0\r\n\r\n', 400],
+    ['GET /healthz HTTP/1.1\r\nHost: evil.internal\r\n\r\n', 400],
+    [`GET /healthz HTTP/1.1\r\n${host}${host}\r\n`, 400],
+    [`GET /healthz HTTP/1.1\r\n${host}Content-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n`, 400],
+    [`GET /healthz HTTP/1.1\r\n${host}Content-Length: 0\r\nContent-Length: 0\r\n\r\n`, 400],
+    [`GET /healthz HTTP/1.1\r\n${host}Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n`, 413],
+    [`GET /%68ealthz HTTP/1.1\r\n${host}\r\n`, 404],
+    [`TRACE /healthz HTTP/1.1\r\n${host}\r\n`, 404],
+    [`GET /healthz HTTP/1.1\r\n${host}X-Forwarded-For: 1.2.3.4\r\nX-Forwarded-For: 5.6.7.8\r\n\r\n`, 400],
+  ]) assert.equal(await raw(request), expected, request.split('\r\n')[0]);
 });

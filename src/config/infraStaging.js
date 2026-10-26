@@ -27,6 +27,9 @@ export function assertInfraStaging(env = process.env) {
     if (env[key] !== expected) throw new Error(`Infra-only staging requires ${key}=${expected}`);
   }
   if (env.TRUSTED_PROXY_CIDRS?.trim()) throw new Error('Infra-only direct mode forbids trusted proxy CIDRs');
+  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])(?::[1-9]\d{0,4})?$/.test(env.STAGING_ALLOWED_HOST || '') ||
+      !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])$/.test(env.STAGING_REDIS_HOST || ''))
+    throw new Error('Infra-only staging requires explicit DNS Host and Redis host');
   for (const key of FORBIDDEN_CREDENTIALS) {
     if (env[key]?.trim()) throw new Error(`Infra-only staging forbids ${key}`);
   }
@@ -52,6 +55,13 @@ export function assertScrapingDisabled(env = process.env) {
 
 export function infraStagingGate(req, res, next) {
   if (!isInfraStaging()) return next();
+  const hosts = [];
+  for (let i = 0; i < (req.rawHeaders || []).length; i += 2) {
+    if (req.rawHeaders[i]?.toLowerCase() === 'host') hosts.push(req.rawHeaders[i + 1]);
+  }
+  if (hosts.length !== 1 || hosts[0] !== process.env.STAGING_ALLOWED_HOST ||
+      req.headers.host !== process.env.STAGING_ALLOWED_HOST)
+    return res.status(400).end();
   if (req.headers['x-forwarded-for'] !== undefined || req.headers['forwarded'] !== undefined ||
       req.headers['x-real-ip'] !== undefined || req.headers['x-forwarded-host'] !== undefined ||
       req.headers['x-forwarded-proto'] !== undefined)
