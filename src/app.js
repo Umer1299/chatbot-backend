@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { createCorsPolicy } from './middleware/corsPolicy.js';
 import { configureTrustedProxy } from './middleware/trustedProxy.js';
+import { assertInfraStaging, infraStagingGate, infraStagingConcurrency } from './config/infraStaging.js';
 import dotenv from 'dotenv';
 import { accountHandler, accountIdentity } from './middleware/accountAuth.js';
 import agenciesV1 from './api/agenciesV1.js';
@@ -36,7 +37,10 @@ import { redisClient } from './services/redis.js';
 dotenv.config();
 
 const app = express();
+assertInfraStaging();
 configureTrustedProxy(app);
+app.use(infraStagingConcurrency);
+app.use(infraStagingGate);
 
 const corsPolicy = createCorsPolicy({
   widgetOriginsRaw: process.env.WIDGET_ALLOWED_ORIGINS || '',

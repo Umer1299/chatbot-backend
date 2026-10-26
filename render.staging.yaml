@@ -1,17 +1,15 @@
-# Separate staging blueprint. Applying this file creates isolated services and
-# may incur paid Render charges. It never changes the production render.yaml.
-# Do not apply until the owner has reviewed the selected plans and cost.
+# REVIEW-ONLY blueprint. Do not sync until owner approves commit, capacity, CA and cost.
+# Separate names avoid changing any existing staging web service.
 services:
-  - type: web
-    name: chatflow-staging-api
+  - type: pserv
+    name: chatflow-preflight-private-api
     runtime: node
     plan: starter
     region: virginia
-    branch: fix/tenant-security-boundaries
-    buildCommand: npm ci --ignore-scripts
-    preDeployCommand: npm run staging:migrate
-    startCommand: npm start
+    branch: security/phase-7a-isolated-staging-security-preflight
     autoDeployTrigger: off
+    buildCommand: npm ci --ignore-scripts && node scripts/verify-infra-staging-source.js
+    startCommand: node scripts/start-infra-staging.js
     healthCheckPath: /readyz
     envVars:
       - key: NODE_VERSION
@@ -20,104 +18,56 @@ services:
         value: production
       - key: CHATFLOW_ENVIRONMENT
         value: isolated-staging
+      - key: STAGING_REHEARSAL_MODE
+        value: infra-only
+      - key: STAGING_APPROVED_COMMIT_SHA
+        sync: false
       - key: AGENT_WEBSITE_ENABLED
         value: "false"
       - key: STAGING_DISABLE_LEGACY_FILE_UPLOADS
         value: "true"
+      - key: STAGING_DISABLE_SCRAPING
+        value: "true"
+      - key: STAGING_DISABLE_PROVIDERS
+        value: "true"
       - key: ACCOUNT_AUTH_ENABLED
         value: "false"
+      - key: ACCOUNT_PROXY_MODE
+        value: direct
+      - key: STAGING_MAX_CONNECTIONS
+        sync: false
+      - key: STAGING_MAX_ACTIVE_REQUESTS
+        sync: false
+      - key: STAGING_REQUEST_TIMEOUT_MS
+        sync: false
       - key: DATABASE_URL
-        fromDatabase:
-          name: chatflow-staging-postgres
-          property: connectionString
+        sync: false # Dedicated read-only API role, never the database owner URL.
       - key: STAGING_DATABASE_URL
-        fromDatabase:
-          name: chatflow-staging-postgres
-          property: connectionString
+        sync: false # Must exactly match DATABASE_URL; supplied only after owner review.
+      - key: STAGING_DATABASE_CA_PEM
+        sync: false
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: chatflow-staging-redis
+          name: chatflow-preflight-redis
           property: connectionString
       - key: STAGING_REDIS_URL
         fromService:
           type: keyvalue
-          name: chatflow-staging-redis
+          name: chatflow-preflight-redis
           property: connectionString
-      - key: ACCOUNT_AUTH_URL
-        sync: false
-      - key: ACCOUNT_TRUSTED_ORIGINS
-        sync: false
-      - key: DASHBOARD_ALLOWED_ORIGINS
-        sync: false
-      - key: WIDGET_ALLOWED_ORIGINS
-        sync: false
-      - key: ACCOUNT_AUTH_SECRET
-        sync: false
-      - key: ACCOUNT_PROXY_MODE
-        value: trusted
-      - key: TRUSTED_PROXY_CIDRS
-        sync: false
-      - key: RESEND_API_KEY
-        sync: false
-      - key: RESEND_FROM_EMAIL
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: JWT_SECRET
-        sync: false
-      - key: STAGING_BASE_URL
-        sync: false
-      - key: STAGING_READINESS_CONFIRM
-        sync: false
-      - key: STAGING_MIGRATION_CONFIRM
-        sync: false
 
-  # Keep the existing queue worker separate. Do not test file uploads until a
-  # cross-service persistent file handoff has been proven for this topology.
-  - type: worker
-    name: chatflow-staging-file-worker
-    runtime: node
-    plan: starter
-    region: virginia
-    branch: fix/tenant-security-boundaries
-    buildCommand: npm ci --ignore-scripts
-    startCommand: npm run worker
-    autoDeployTrigger: off
-    envVars:
-      - key: NODE_VERSION
-        value: 24.21.0
-      - key: NODE_ENV
-        value: production
-      - key: CHATFLOW_ENVIRONMENT
-        value: isolated-staging
-      - key: DATABASE_URL
-        fromDatabase:
-          name: chatflow-staging-postgres
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: chatflow-staging-redis
-          property: connectionString
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: WORKER_CONCURRENCY
-        value: "2"
-
+  # No worker: local upload paths are not durable across containers.
   - type: keyvalue
-    name: chatflow-staging-redis
+    name: chatflow-preflight-redis
     plan: 256mb
     region: virginia
     maxmemoryPolicy: noeviction
     persistenceMode: journal-snapshot
-    # No external network access; same-region Render services use the internal URL.
     ipAllowList: []
 
 databases:
-  - name: chatflow-staging-postgres
+  - name: chatflow-preflight-postgres
     databaseName: chatflow_staging
     user: chatflow_staging_owner
     plan: 0.5c-1g

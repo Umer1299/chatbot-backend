@@ -533,6 +533,8 @@ async function scrapeWithBaseUrl(baseUrl, url, options) {
 }
 
 export async function scrapeWebsite(url, options = {}) {
+  const { assertScrapingDisabled } = await import('../config/infraStaging.js');
+  assertScrapingDisabled();
   // Revalidate every job at the worker boundary, including jobs queued before
   // this version or forged inside the queue. Direct fallback pins each hop.
   const validatedUrl = await validateScrapeWebsiteUrl(url);

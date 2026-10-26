@@ -1,13 +1,16 @@
-import { assertIngestionResult } from '../services/ingestionResult.js';
-import { Worker } from 'bullmq';
-import { connection } from '../queues/connection.js';
-import { loadFile } from '../services/fileLoader.js';
-import { markContentProcessed } from '../services/recordManager.js';
-import { upsertSupplementalChunks } from '../db/vectorStore.js';
-import { cleanAndChunkContent, shouldEmbedChunk } from '../services/firecrawlService.js';
-import pool from '../db/pool.js';
-import { redisClient } from '../services/redis.js';
-import fs from 'fs/promises';
+import { assertInfraStaging } from '../config/infraStaging.js';
+
+if (assertInfraStaging()) throw new Error('File worker is disabled in infrastructure-only staging');
+const { assertIngestionResult } = await import('../services/ingestionResult.js');
+const { Worker } = await import('bullmq');
+const { connection } = await import('../queues/connection.js');
+const { loadFile } = await import('../services/fileLoader.js');
+const { markContentProcessed } = await import('../services/recordManager.js');
+const { upsertSupplementalChunks } = await import('../db/vectorStore.js');
+const { cleanAndChunkContent, shouldEmbedChunk } = await import('../services/firecrawlService.js');
+const { default: pool } = await import('../db/pool.js');
+const { redisClient } = await import('../services/redis.js');
+const { default: fs } = await import('fs/promises');
 
 const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '2');
 

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
+import { stagingDatabaseSsl } from '../src/db/stagingTls.js';
 import { REQUIRED_LEDGER_VERSIONS, REQUIRED_TABLES, REQUIRED_TRIGGERS } from './staging-schema.js';
 
 const { Client } = pg;
@@ -18,6 +19,8 @@ const EXPECTED_MIGRATIONS = [
   '012_agent_chat_turn_claims.sql', '013_legacy_knowledge_mutation_claims.sql',
 ];
 export function validateMigrationTarget(env) {
+  if (env.STAGING_REHEARSAL_MODE === 'infra-only')
+    throw new Error('Migrations are forbidden in infrastructure-only staging');
   if (env.CHATFLOW_ENVIRONMENT !== 'isolated-staging')
     throw new Error('CHATFLOW_ENVIRONMENT must be isolated-staging.');
   if (env.STAGING_MIGRATION_CONFIRM !== REQUIRED_CONFIRMATION)
@@ -40,7 +43,7 @@ export function validateMigrationTarget(env) {
 async function makeClient(url, env) {
   return new Client({
     connectionString: url.href,
-    ssl: env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    ssl: stagingDatabaseSsl(url.href, env),
     connectionTimeoutMillis: 5000,
   });
 }
