@@ -59,7 +59,7 @@ jobs:
           git diff --check "$baseline" HEAD
           git diff --name-only "$baseline" HEAD | while read -r file; do
             case "$file" in
-              package-lock.json|test/batch4TransitiveSecurity.test.js|docs/phase-6d-batch4-transitive-patches.md|.github/workflows/phase-6d-batch4-transitive.yml|.github/scripts/batch4-audit-comparison.mjs) ;;
+              package-lock.json|test/batch4TransitiveSecurity.test.js|docs/phase-6d-batch4-transitive-patches.md|.github/workflows/phase-6d-batch4-transitive.yml|.github/scripts/batch4-audit-comparison.mjs|.github/scripts/audit-evidence.mjs|.github/scripts/audit-evidence.test.mjs) ;;
               *) echo "Unexpected Batch 4 change: $file"; exit 1 ;;
             esac
           done
