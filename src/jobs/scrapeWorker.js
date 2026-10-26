@@ -1,5 +1,6 @@
 import { assertIngestionResult } from '../services/ingestionResult.js';
 import pool from '../db/pool.js';
+import { assertScrapingDisabled } from '../config/infraStaging.js';
 import {
   scrapeWebsite,
   cleanAndChunkContent,
@@ -19,6 +20,7 @@ const DEFAULT_STARTER_PROMPTS = [
 ];
 
 export async function addScrapeJob(businessId, url) {
+  assertScrapingDisabled();
   const { rows } = await pool.query(
     `INSERT INTO scrape_jobs (business_id, url, status, queued_at)
      VALUES ($1, $2, 'queued', NOW())
@@ -191,6 +193,7 @@ function getScrapedTextStats(pages = []) {
 }
 
 export async function processScrapeJob(job) {
+  assertScrapingDisabled();
   try {
     await updateJobProgress(job.id, 'Scraping website', 10, {
       status: 'scraping',
@@ -390,6 +393,7 @@ export async function processScrapeJob(job) {
 }
 
 export function startScrapeWorker() {
+  assertScrapingDisabled();
   console.log('Scrape worker started — polling every 5 seconds');
 
   setInterval(async () => {

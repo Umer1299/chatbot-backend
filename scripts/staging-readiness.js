@@ -91,9 +91,10 @@ function checkEnvironment(env, nodeVersion) {
 }
 
 async function connectPostgres(connectionString, env) {
+  const { stagingDatabaseSsl } = await import('../src/db/stagingTls.js');
   const pool = new Pool({
     connectionString,
-    ssl: env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    ssl: stagingDatabaseSsl(connectionString, env),
     max: 1,
     connectionTimeoutMillis: 5000,
     idleTimeoutMillis: 1000,

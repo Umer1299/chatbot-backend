@@ -1,22 +1,43 @@
 import 'dotenv/config';
-import app from './app.js';
-import { setupVectorTable } from './db/vectorStore.js';
-import { setupSessionHistoryIndexes } from './db/sessionHistory.js';
-import { startScrapeWorker } from './jobs/scrapeWorker.js';
-import { startReminderJobs } from './jobs/paidPlanReminders.js';
-import { startUploadCleanup } from './services/uploadStaging.js';
-import { fileQueue } from './queues/fileQueue.js';
-import { redisClient } from './services/redis.js';
-import { markApplicationReady } from './services/readiness.js';
+import { isInfraStaging } from './config/infraStaging.js';
+import http from 'node:http';
+import { assertApprovedStagingSource } from './config/approvedStagingSource.js';
 
 const PORT = process.env.PORT || 3000;
+if (isInfraStaging()) assertApprovedStagingSource();
+// Verify the immutable approved deployment identity before importing modules
+// that can open connections or initialize queues.
+const { default: app } = await import(isInfraStaging() ? './infraStagingApp.js' : './app.js');
+const { default: pool } = await import('./db/pool.js');
+const { redisClient } = await import('./services/redis.js');
+const { markApplicationReady } = await import('./services/readiness.js');
 
-app.listen(PORT, () => {
+const server = http.createServer({ maxHeaderSize: isInfraStaging() ? 8192 : undefined }, app);
+if (isInfraStaging()) {
+  server.maxConnections = Number(process.env.STAGING_MAX_CONNECTIONS);
+  server.requestTimeout = Number(process.env.STAGING_REQUEST_TIMEOUT_MS);
+  server.headersTimeout = Math.min(server.requestTimeout, 10000);
+}
+server.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  startUploadCleanup(fileQueue, redisClient);
+  if (!isInfraStaging()) {
+    const { startUploadCleanup } = await import('./services/uploadStaging.js');
+    const { fileQueue } = await import('./queues/fileQueue.js');
+    startUploadCleanup(fileQueue, redisClient);
+  }
 
   async function initializeNewServices() {
     try {
+      if (isInfraStaging()) {
+        await pool.query('SELECT 1');
+        await redisClient.ping();
+        markApplicationReady(true);
+        return;
+      }
+      const { setupVectorTable } = await import('./db/vectorStore.js');
+      const { setupSessionHistoryIndexes } = await import('./db/sessionHistory.js');
+      const { startScrapeWorker } = await import('./jobs/scrapeWorker.js');
+      const { startReminderJobs } = await import('./jobs/paidPlanReminders.js');
       await setupVectorTable();
       console.log('pgvector ready');
 
