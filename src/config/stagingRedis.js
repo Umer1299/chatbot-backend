@@ -10,7 +10,7 @@ export function assertStagingRedisUrl(env = process.env) {
        !/^[a-z0-9-]+\.db\.ondigitalocean\.com$/.test(url.hostname) ||
        !/^[1-9]\d*$/.test(url.port) || url.username !== (env.STAGING_REDIS_USERNAME || '')))
     throw new Error('DigitalOcean Valkey requires TLS, password and a pinned staging endpoint');
-  if (!['redis:', 'rediss:'].includes(url.protocol) ||
+  if (url.protocol !== 'rediss:' ||
       (env.STAGING_DEPLOYMENT_PLATFORM !== 'digitalocean' && !url.username) || !url.password ||
       !url.hostname || url.hostname !== env.STAGING_REDIS_HOST ||
       url.pathname !== '/' || url.search || url.hash ||
@@ -26,7 +26,6 @@ export function stagingRedisConnectionOptions(env = process.env, connectionStrin
   assertStagingRedisUrl(env);
   if (connectionString !== env.REDIS_URL)
     throw new Error('Staging Redis connection does not match its approved URL');
-  if (env.STAGING_DEPLOYMENT_PLATFORM !== 'digitalocean') return {};
   const url = new URL(connectionString);
   return { tls: { servername: url.hostname, rejectUnauthorized: true } };
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertStagingRedisUrl } from '../src/config/stagingRedis.js';
+import { assertStagingRedisUrl, stagingRedisConnectionOptions } from '../src/config/stagingRedis.js';
 import { infraStagingGate } from '../src/config/infraStaging.js';
 
 const env = {
@@ -10,13 +10,18 @@ const env = {
   ACCOUNT_AUTH_ENABLED: 'false', ACCOUNT_PROXY_MODE: 'direct',
   STAGING_MAX_CONNECTIONS: '8', STAGING_MAX_ACTIVE_REQUESTS: '4', STAGING_REQUEST_TIMEOUT_MS: '5000',
   STAGING_ALLOWED_HOST: 'preflight.internal:10000', STAGING_REDIS_HOST: 'red-preflight',
-  REDIS_URL: 'redis://staging-user:dummy@red-preflight:6379/',
-  STAGING_REDIS_URL: 'redis://staging-user:dummy@red-preflight:6379/',
+  REDIS_URL: 'rediss://staging-user:dummy@red-preflight:6379/',
+  STAGING_REDIS_URL: 'rediss://staging-user:dummy@red-preflight:6379/',
 };
 
-test('authenticated, pinned Redis is required and malformed or prod URLs fail closed', () => {
+test('Render infra-only Redis requires authenticated, pinned and verified TLS', () => {
   assert.equal(assertStagingRedisUrl(env), true);
+  assert.deepEqual(stagingRedisConnectionOptions(env), {
+    tls: { servername: 'red-preflight', rejectUnauthorized: true },
+  });
   for (const patch of [
+    { REDIS_URL: env.REDIS_URL.replace('rediss:', 'redis:'),
+      STAGING_REDIS_URL: env.STAGING_REDIS_URL.replace('rediss:', 'redis:') },
     { REDIS_URL: 'redis://red-preflight:6379/' },
     { REDIS_URL: 'redis://staging-user@red-preflight:6379/' },
     { REDIS_URL: 'redis://staging-user:dummy@red-production:6379/', STAGING_REDIS_URL: 'redis://staging-user:dummy@red-production:6379/' },
@@ -24,6 +29,7 @@ test('authenticated, pinned Redis is required and malformed or prod URLs fail cl
     { REDIS_URL: 'http://staging-user:dummy@red-preflight:6379/', STAGING_REDIS_URL: 'http://staging-user:dummy@red-preflight:6379/' },
     { REDIS_URL: 'redis://staging-user:dummy@red-preflight:6379/1', STAGING_REDIS_URL: 'redis://staging-user:dummy@red-preflight:6379/1' },
   ]) assert.throws(() => assertStagingRedisUrl({ ...env, ...patch }));
+  assert.throws(() => stagingRedisConnectionOptions({ ...env, NODE_TLS_REJECT_UNAUTHORIZED: '0' }));
 });
 
 test('only a single exact Host reaches the health handler', () => {

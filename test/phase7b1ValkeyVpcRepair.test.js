@@ -19,7 +19,7 @@ const redisUrl = `rediss://:dummy@${host}:25061/`;
 const env = {
   CHATFLOW_ENVIRONMENT: 'isolated-staging', STAGING_REHEARSAL_MODE: 'infra-only',
   STAGING_DEPLOYMENT_PLATFORM: 'digitalocean',
-  STAGING_SOURCE_BRANCH: 'security/phase-7b1-valkey-vpc-security-repair',
+  STAGING_SOURCE_BRANCH: 'security/phase-7b1-final-compatibility-repair',
   AGENT_WEBSITE_ENABLED: 'false', STAGING_DISABLE_LEGACY_FILE_UPLOADS: 'true',
   STAGING_DISABLE_SCRAPING: 'true', STAGING_DISABLE_PROVIDERS: 'true',
   ACCOUNT_AUTH_ENABLED: 'false', ACCOUNT_PROXY_MODE: 'direct',
@@ -87,6 +87,14 @@ test('actual ioredis TLS handshake verifies trust and exact hostname even if pro
   t.after(() => new Promise(resolve => server.close(resolve)));
   const port = server.address().port;
   const baseOptions = stagingRedisConnectionOptions(env).tls;
+  const renderUrl = `rediss://stageuser:dummy@${host}/`;
+  const renderEnv = { ...env, STAGING_DEPLOYMENT_PLATFORM: 'render',
+    REDIS_URL: renderUrl, STAGING_REDIS_URL: renderUrl };
+  const renderOptions = stagingRedisConnectionOptions(renderEnv).tls;
+  assert.deepEqual(renderOptions, baseOptions, 'all infra-only clients use identical TLS identity verification');
+  assert.throws(() => stagingRedisConnectionOptions({ ...renderEnv,
+    REDIS_URL: renderUrl.replace('rediss:', 'redis:'),
+    STAGING_REDIS_URL: renderUrl.replace('rediss:', 'redis:') }));
   async function probe(tlsOptions) {
     const client = new Redis(`rediss://:dummy@localhost:${port}/`, {
       lazyConnect: true, connectTimeout: 1000, maxRetriesPerRequest: 0,
@@ -106,6 +114,10 @@ test('actual ioredis TLS handshake verifies trust and exact hostname even if pro
   assert.equal(await probe(baseOptions), false, 'self-signed without trusted CA');
   assert.equal(await probe({ ...baseOptions, ca: other.cert }), false, 'untrusted CA');
   assert.equal(await probe({ ...baseOptions, ca: issued.cert, servername: 'wrong.invalid' }), false, 'hostname mismatch');
+  assert.equal(await probe({ ...renderOptions, ca: issued.cert }), true, 'Render verified TLS works');
+  assert.equal(await probe(renderOptions), false, 'Render rejects self-signed certificate');
+  assert.equal(await probe({ ...renderOptions, ca: other.cert }), false, 'Render rejects untrusted CA');
+  assert.equal(await probe({ ...renderOptions, ca: issued.cert, servername: 'wrong.invalid' }), false, 'Render rejects wrong hostname');
   const previous = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try {
