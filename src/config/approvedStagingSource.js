@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { isApprovedVpcId } from './stagingVpc.js';
 
-const DO_BRANCH = 'security/phase-7b1-valkey-vpc-security-repair';
+const DO_BRANCH = 'security/phase-7b1-final-compatibility-repair';
 const ATTESTATION = new URL('../../.staging-source-attestation.json', import.meta.url);
 const isSha = value => /^[a-f0-9]{40}$/.test(value || '');
 

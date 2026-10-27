@@ -10,7 +10,7 @@ import { assertStagingRedisUrl } from '../src/config/stagingRedis.js';
 import { infraStagingGate, isInfraStaging, assertInfraStaging } from '../src/config/infraStaging.js';
 
 const sha = 'a'.repeat(40);
-const branch = 'security/phase-7b1-valkey-vpc-security-repair';
+const branch = 'security/phase-7b1-final-compatibility-repair';
 const vpcId = 'b54dfc23-a332-4fc2-8d2f-01c038c70c2e';
 const dbHost = 'preflight-db-123.db.ondigitalocean.com';
 const redisHost = 'preflight-valkey-123.db.ondigitalocean.com';
@@ -32,10 +32,15 @@ const spec = await fs.readFile(new URL('../digitalocean.staging.yaml', import.me
 
 test('review-only DO spec has no public ingress, jobs, worker or automatic migrations', () => {
   assert.equal(assertDigitalOceanSpec(spec), true);
+  assert.match(spec, /instance_size_slug: apps-s-1vcpu-0\.5gb/);
   assert.match(spec, /value: \$\{_self\.COMMIT_HASH\}/);
   assert.doesNotMatch(spec.split('\n').filter(line => !/^\s*#/.test(line)).join('\n'),
     /predeploy|migrat|OPENAI_API_KEY|FIRECRAWL_API_KEY/i);
-  for (const changed of [spec.replace('internal_ports: [8080]', 'http_port: 8080'),
+  for (const changed of [
+    spec.replace('apps-s-1vcpu-0.5gb', 'basic-xxs'),
+    spec.replace('apps-s-1vcpu-0.5gb', 'unrecognized-size'),
+    spec.replace('    instance_size_slug: apps-s-1vcpu-0.5gb\n', ''),
+    spec.replace('internal_ports: [8080]', 'http_port: 8080'),
     `${spec}\ningress:\n  rules: []\n`, spec.replace('deploy_on_push: false', 'deploy_on_push: true'),
     spec.replace(`branch: ${branch}`, 'branch: main'), spec.replace('region: lon', 'region: nyc'),
     spec.replace('run_command: node scripts/start-infra-staging.js',

@@ -4,7 +4,7 @@ import yaml from 'js-yaml';
 import { assertInfraStaging } from '../src/config/infraStaging.js';
 import { isApprovedVpcId } from '../src/config/stagingVpc.js';
 
-const BRANCH = 'security/phase-7b1-valkey-vpc-security-repair';
+const BRANCH = 'security/phase-7b1-final-compatibility-repair';
 const SHA = /^[a-f0-9]{40}$/;
 const ATTESTATION = new URL('../.staging-source-attestation.json', import.meta.url);
 const SPEC = new URL('../digitalocean.staging.yaml', import.meta.url);
@@ -58,7 +58,7 @@ export function assertDigitalOceanSpec(spec, { approvedVpcId, approvedCommit, ef
       !keys(service, ['name', 'environment_slug', 'github', 'source_dir',
         'instance_size_slug', 'instance_count', 'internal_ports', 'build_command', 'run_command', 'envs']) ||
       service.name !== 'preflight-api' || service.environment_slug !== 'node-js' ||
-      service.source_dir !== '/' || service.instance_size_slug !== 'basic-xxs' ||
+      service.source_dir !== '/' || service.instance_size_slug !== 'apps-s-1vcpu-0.5gb' ||
       service.instance_count !== 1 || JSON.stringify(service.internal_ports) !== '[8080]' ||
       !keys(service.github, ['repo', 'branch', 'deploy_on_push']) ||
       service.github.repo !== 'Umer1299/chatbot-backend' || service.github.branch !== BRANCH ||

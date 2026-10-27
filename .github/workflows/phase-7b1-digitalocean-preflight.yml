@@ -2,7 +2,7 @@ name: Phase 7B.1 DigitalOcean private preflight
 
 on:
   pull_request:
-    branches: [security/phase-7b1-digitalocean-private-preflight]
+    branches: [security/phase-7b1-valkey-vpc-security-repair]
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   preflight:
-    if: github.head_ref == 'security/phase-7b1-valkey-vpc-security-repair' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-7b1-valkey-vpc-security-repair')
+    if: github.head_ref == 'security/phase-7b1-final-compatibility-repair' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-7b1-final-compatibility-repair')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          baseline=8971c4054aadf298890743a46952409e830977e5
+          baseline=f8d0ae763355856170735574b8b7c3ff6379d4f2
           git cat-file -e "$baseline^{commit}"
           git merge-base --is-ancestor "$baseline" HEAD
           test "$(node --version)" = 'v24.21.0'
@@ -66,4 +66,4 @@ jobs:
       - name: Full backend suite with disposable PostgreSQL and Redis
         run: npm test
       - name: Verify dependency manifest and lockfile are unchanged
-        run: git diff --exit-code 8971c4054aadf298890743a46952409e830977e5 HEAD -- package.json package-lock.json
+        run: git diff --exit-code f8d0ae763355856170735574b8b7c3ff6379d4f2 HEAD -- package.json package-lock.json
