@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import Redis from 'ioredis';
+import { stagingRedisConnectionOptions } from '../src/config/stagingRedis.js';
 import { trustedProxySettings } from '../src/middleware/trustedProxy.js';
 import { REQUIRED_LEDGER_VERSIONS, REQUIRED_TABLES, REQUIRED_TRIGGERS } from './staging-schema.js';
 
@@ -102,8 +103,9 @@ async function connectPostgres(connectionString, env) {
   return pool;
 }
 
-async function connectRedis(connectionString) {
+async function connectRedis(connectionString, env = process.env) {
   const client = new Redis(connectionString, {
+    ...stagingRedisConnectionOptions(env, connectionString),
     lazyConnect: true,
     connectTimeout: 5000,
     maxRetriesPerRequest: 1,
@@ -159,7 +161,7 @@ async function checkDatabase(results, env, connect = connectPostgres) {
 async function checkRedis(results, env, connect = connectRedis) {
   let redis;
   try {
-    redis = await connect(env.STAGING_REDIS_URL);
+    redis = await connect(env.STAGING_REDIS_URL, env);
     const pong = await redis.ping();
     const info = await redis.info('memory');
     const serverInfo = await redis.info('server');

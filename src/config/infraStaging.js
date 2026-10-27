@@ -24,6 +24,8 @@ export function isInfraStaging(env = process.env) {
 
 export function assertInfraStaging(env = process.env) {
   if (!isInfraStaging(env)) return false;
+  if (env.NODE_TLS_REJECT_UNAUTHORIZED !== undefined && env.NODE_TLS_REJECT_UNAUTHORIZED !== '1')
+    throw new Error('Infra-only staging forbids disabling TLS certificate verification');
   for (const [key, expected] of Object.entries(REQUIRED)) {
     if (env[key] !== expected) throw new Error(`Infra-only staging requires ${key}=${expected}`);
   }

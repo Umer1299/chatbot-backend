@@ -10,7 +10,8 @@ import { assertStagingRedisUrl } from '../src/config/stagingRedis.js';
 import { infraStagingGate, isInfraStaging, assertInfraStaging } from '../src/config/infraStaging.js';
 
 const sha = 'a'.repeat(40);
-const branch = 'security/phase-7b1-digitalocean-private-preflight';
+const branch = 'security/phase-7b1-valkey-vpc-security-repair';
+const vpcId = 'b54dfc23-a332-4fc2-8d2f-01c038c70c2e';
 const dbHost = 'preflight-db-123.db.ondigitalocean.com';
 const redisHost = 'preflight-valkey-123.db.ondigitalocean.com';
 const database = `postgres://staging_api:dummy@${dbHost}:25060/chatflow_staging`;
@@ -23,7 +24,7 @@ const env = {
   STAGING_MAX_CONNECTIONS: '8', STAGING_MAX_ACTIVE_REQUESTS: '4', STAGING_REQUEST_TIMEOUT_MS: '5000',
   STAGING_ALLOWED_HOST: 'preflight.internal:8080', STAGING_REDIS_HOST: redisHost,
   STAGING_DEPLOYMENT_PLATFORM: 'digitalocean', STAGING_SOURCE_BRANCH: branch,
-  STAGING_APPROVED_COMMIT_SHA: sha, DO_DEPLOYED_COMMIT_SHA: sha,
+  STAGING_APPROVED_COMMIT_SHA: sha, STAGING_APPROVED_VPC_ID: vpcId, DO_DEPLOYED_COMMIT_SHA: sha,
   STAGING_DATABASE_HOST: dbHost, STAGING_DATABASE_CA_PEM: '-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----',
   REDIS_URL: redis, STAGING_REDIS_URL: redis,
 };
@@ -59,9 +60,11 @@ test('build attestation binds git revision, provider identity, approval and spec
     { DO_DEPLOYED_COMMIT_SHA: undefined }, { DO_DEPLOYED_COMMIT_SHA: 'b'.repeat(40) },
     { DO_DEPLOYED_COMMIT_SHA: '${_self.COMMIT_HASH}' },
     { STAGING_SOURCE_BRANCH: 'main' }, { STAGING_DEPLOYMENT_PLATFORM: 'unknown' },
+    { STAGING_APPROVED_VPC_ID: undefined }, { STAGING_APPROVED_VPC_ID: 'a'.repeat(36) },
   ]) assert.throws(() => assertApprovedStagingSource({ ...env, ...patch }, file));
   for (const patch of [{ DO_DEPLOYED_COMMIT_SHA: undefined }, { DO_DEPLOYED_COMMIT_SHA: 'b'.repeat(40) },
     { STAGING_SOURCE_BRANCH: 'main' }, { STAGING_APPROVED_COMMIT_SHA: undefined },
+    { STAGING_APPROVED_VPC_ID: undefined },
     { AGENT_WEBSITE_ENABLED: 'true' }])
     assert.throws(() => createSourceAttestation({ env: { ...env, ...patch }, sourceCommit: sha, spec }));
   assert.throws(() => createSourceAttestation({ env, sourceCommit: 'b'.repeat(40), spec }));

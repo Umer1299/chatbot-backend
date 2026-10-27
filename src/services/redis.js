@@ -1,8 +1,8 @@
 import Redis from 'ioredis';
 import { isInfraStaging } from '../config/infraStaging.js';
-import { assertStagingRedisUrl } from '../config/stagingRedis.js';
-assertStagingRedisUrl();
+import { stagingRedisConnectionOptions } from '../config/stagingRedis.js';
 export const redisClient = new Redis(process.env.REDIS_URL, {
+  ...stagingRedisConnectionOptions(),
   maxRetriesPerRequest: 3,
   retryStrategy: (times) => Math.min(times * 50, 2000),
 });

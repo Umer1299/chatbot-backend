@@ -18,3 +18,15 @@ export function assertStagingRedisUrl(env = process.env) {
     throw new Error('Staging Redis requires a dedicated authenticated internal URL and pinned host');
   return true;
 }
+
+// Supplied to every infrastructure-only ioredis client, including read-only
+// readiness checks. URL validation runs before any client is constructed.
+export function stagingRedisConnectionOptions(env = process.env, connectionString = env.REDIS_URL) {
+  if (!isInfraStaging(env)) return {};
+  assertStagingRedisUrl(env);
+  if (connectionString !== env.REDIS_URL)
+    throw new Error('Staging Redis connection does not match its approved URL');
+  if (env.STAGING_DEPLOYMENT_PLATFORM !== 'digitalocean') return {};
+  const url = new URL(connectionString);
+  return { tls: { servername: url.hostname, rejectUnauthorized: true } };
+}
