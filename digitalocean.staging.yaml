@@ -1,0 +1,69 @@
+# REVIEW ONLY. Do not apply: owner must pin approved SHA, provision dedicated
+# LON1 VPC/database/Valkey and verify provider deployment and probe behavior.
+name: chatflow-private-health-preflight
+region: lon
+services:
+  - name: preflight-api
+    environment_slug: node-js
+    github:
+      repo: Umer1299/chatbot-backend
+      branch: security/phase-7b1-digitalocean-private-preflight
+      deploy_on_push: false
+    source_dir: /
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    internal_ports: [8080]
+    build_command: npm ci --ignore-scripts && node scripts/attest-digitalocean-source.js
+    run_command: node scripts/start-infra-staging.js
+    envs:
+      - key: DO_DEPLOYED_COMMIT_SHA
+        value: ${_self.COMMIT_HASH}
+        scope: RUN_AND_BUILD_TIME
+        type: GENERAL
+      - key: STAGING_APPROVED_COMMIT_SHA
+        value: OWNER_APPROVAL_REQUIRED
+        scope: RUN_AND_BUILD_TIME
+        type: GENERAL
+      - key: STAGING_DEPLOYMENT_PLATFORM
+        value: digitalocean
+      - key: STAGING_SOURCE_BRANCH
+        value: security/phase-7b1-digitalocean-private-preflight
+        scope: RUN_AND_BUILD_TIME
+      - key: NODE_VERSION
+        value: 24.21.0
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8080"
+      - key: CHATFLOW_ENVIRONMENT
+        value: isolated-staging
+        scope: RUN_AND_BUILD_TIME
+      - key: STAGING_REHEARSAL_MODE
+        value: infra-only
+        scope: RUN_AND_BUILD_TIME
+      - key: AGENT_WEBSITE_ENABLED
+        value: "false"
+        scope: RUN_AND_BUILD_TIME
+      - key: STAGING_DISABLE_LEGACY_FILE_UPLOADS
+        value: "true"
+        scope: RUN_AND_BUILD_TIME
+      - key: STAGING_DISABLE_SCRAPING
+        value: "true"
+        scope: RUN_AND_BUILD_TIME
+      - key: STAGING_DISABLE_PROVIDERS
+        value: "true"
+        scope: RUN_AND_BUILD_TIME
+      - key: ACCOUNT_AUTH_ENABLED
+        value: "false"
+        scope: RUN_AND_BUILD_TIME
+      - key: ACCOUNT_PROXY_MODE
+        value: direct
+        scope: RUN_AND_BUILD_TIME
+      - key: STAGING_MAX_CONNECTIONS
+        value: "8"
+      - key: STAGING_MAX_ACTIVE_REQUESTS
+        value: "4"
+      - key: STAGING_REQUEST_TIMEOUT_MS
+        value: "5000"
+      # All exact hosts and secrets must be injected only after separate owner approval.
+      # Deliberately omitted: DATABASE_URL, REDIS_URL, CA, Host and their pinned peers.

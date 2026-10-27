@@ -1,0 +1,69 @@
+name: Phase 7B.1 DigitalOcean private preflight
+
+on:
+  pull_request:
+    branches: [security/phase-7a1-provider-compatibility-network]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    if: github.head_ref == 'security/phase-7b1-digitalocean-private-preflight' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-7b1-digitalocean-private-preflight')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: chatflow_security_test
+          POSTGRES_USER: chatflow_test
+          POSTGRES_PASSWORD: local_test_only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U chatflow_test -d chatflow_security_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://chatflow_test:local_test_only@127.0.0.1:5432/chatflow_security_test
+      TEST_DATABASE_CONFIRM: I_CONFIRM_DISPOSABLE_TEST_DATABASE
+      STAGING_REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          cache: npm
+      - name: Exact baseline and pinned dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=520cace9bd18cea0cda76cba17207d59939c6f7b
+          git cat-file -e "$baseline^{commit}"
+          git merge-base --is-ancestor "$baseline" HEAD
+          test "$(node --version)" = 'v24.21.0'
+          test "$(npm --version)" = '11.19.0'
+          test "$(git rev-parse "$baseline":package.json)" = "$(git rev-parse HEAD:package.json)"
+          test "$(git rev-parse "$baseline":package-lock.json)" = "$(git rev-parse HEAD:package-lock.json)"
+          git diff --check "$baseline" HEAD
+      - run: npm ci --ignore-scripts
+      - name: DigitalOcean negative cases and inherited security regressions
+        run: node --experimental-test-module-mocks --test test/phase7b1DigitalOcean.test.js test/phase7aPreflight.test.js test/phase7a1NetworkSecurity.test.js test/phase7aRuntime.integration.test.js test/batch4TransitiveSecurity.test.js test/scrapeDestinationPolicy.test.js test/firecrawlCredentialIsolation.test.js test/security.test.js
+      - name: Full backend suite with disposable PostgreSQL and Redis
+        run: npm test
+      - name: Verify dependency manifest and lockfile are unchanged
+        run: git diff --exit-code 520cace9bd18cea0cda76cba17207d59939c6f7b HEAD -- package.json package-lock.json

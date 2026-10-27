@@ -10,6 +10,12 @@ export function stagingDatabaseSsl(connectionString, env = process.env) {
   try { url = new URL(connectionString); } catch { throw new Error('Invalid staging PostgreSQL URL'); }
   if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || isIP(url.hostname.replace(/^\[|\]$/g, '')))
     throw new Error('Staging PostgreSQL requires a DNS hostname');
+  if (env.STAGING_DEPLOYMENT_PLATFORM === 'digitalocean' &&
+      (!/^[a-z0-9-]+\.db\.ondigitalocean\.com$/.test(url.hostname) ||
+       url.hostname !== env.STAGING_DATABASE_HOST || !url.username || !url.password ||
+       !url.pathname || url.pathname === '/' || /prod(?:uction)?/i.test(url.pathname) ||
+       url.search || url.hash))
+    throw new Error('DigitalOcean PostgreSQL requires a pinned staging host and dedicated database credentials');
   for (const key of url.searchParams.keys()) {
     if (/^ssl/i.test(key)) throw new Error('PostgreSQL URL TLS overrides are forbidden');
   }

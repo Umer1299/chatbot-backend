@@ -18,7 +18,8 @@ const FORBIDDEN_CREDENTIALS = [
 ];
 
 export function isInfraStaging(env = process.env) {
-  return env.CHATFLOW_ENVIRONMENT === 'isolated-staging' || env.STAGING_REHEARSAL_MODE !== undefined;
+  return env.CHATFLOW_ENVIRONMENT === 'isolated-staging' || env.STAGING_REHEARSAL_MODE !== undefined ||
+    env.STAGING_DEPLOYMENT_PLATFORM !== undefined;
 }
 
 export function assertInfraStaging(env = process.env) {

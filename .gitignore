@@ -1,4 +1,5 @@
 node_modules
+.staging-source-attestation.json
 .env
 .env.staging
 .env.local
