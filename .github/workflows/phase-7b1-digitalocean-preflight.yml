@@ -2,7 +2,7 @@ name: Phase 7B.1 DigitalOcean private preflight
 
 on:
   pull_request:
-    branches: [security/phase-7a1-provider-compatibility-network]
+    branches: [security/phase-7b1-digitalocean-private-preflight]
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   preflight:
-    if: github.head_ref == 'security/phase-7b1-digitalocean-private-preflight' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-7b1-digitalocean-private-preflight')
+    if: github.head_ref == 'security/phase-7b1-valkey-vpc-security-repair' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'security/phase-7b1-valkey-vpc-security-repair')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          baseline=520cace9bd18cea0cda76cba17207d59939c6f7b
+          baseline=8971c4054aadf298890743a46952409e830977e5
           git cat-file -e "$baseline^{commit}"
           git merge-base --is-ancestor "$baseline" HEAD
           test "$(node --version)" = 'v24.21.0'
@@ -62,8 +62,8 @@ jobs:
           git diff --check "$baseline" HEAD
       - run: npm ci --ignore-scripts
       - name: DigitalOcean negative cases and inherited security regressions
-        run: node --experimental-test-module-mocks --test test/phase7b1DigitalOcean.test.js test/phase7aPreflight.test.js test/phase7a1NetworkSecurity.test.js test/phase7aRuntime.integration.test.js test/batch4TransitiveSecurity.test.js test/scrapeDestinationPolicy.test.js test/firecrawlCredentialIsolation.test.js test/security.test.js
+        run: node --experimental-test-module-mocks --test test/phase7b1DigitalOcean.test.js test/phase7b1ValkeyVpcRepair.test.js test/phase7aPreflight.test.js test/phase7a1NetworkSecurity.test.js test/phase7aRuntime.integration.test.js test/batch4TransitiveSecurity.test.js test/scrapeDestinationPolicy.test.js test/firecrawlCredentialIsolation.test.js test/security.test.js
       - name: Full backend suite with disposable PostgreSQL and Redis
         run: npm test
       - name: Verify dependency manifest and lockfile are unchanged
-        run: git diff --exit-code 520cace9bd18cea0cda76cba17207d59939c6f7b HEAD -- package.json package-lock.json
+        run: git diff --exit-code 8971c4054aadf298890743a46952409e830977e5 HEAD -- package.json package-lock.json

@@ -2,12 +2,14 @@
 # LON1 VPC/database/Valkey and verify provider deployment and probe behavior.
 name: chatflow-private-health-preflight
 region: lon
+vpc:
+  id: OWNER_VPC_ID_REQUIRED
 services:
   - name: preflight-api
     environment_slug: node-js
     github:
       repo: Umer1299/chatbot-backend
-      branch: security/phase-7b1-digitalocean-private-preflight
+      branch: security/phase-7b1-valkey-vpc-security-repair
       deploy_on_push: false
     source_dir: /
     instance_size_slug: basic-xxs
@@ -24,10 +26,14 @@ services:
         value: OWNER_APPROVAL_REQUIRED
         scope: RUN_AND_BUILD_TIME
         type: GENERAL
+      - key: STAGING_APPROVED_VPC_ID
+        value: OWNER_VPC_ID_REQUIRED
+        scope: RUN_AND_BUILD_TIME
+        type: GENERAL
       - key: STAGING_DEPLOYMENT_PLATFORM
         value: digitalocean
       - key: STAGING_SOURCE_BRANCH
-        value: security/phase-7b1-digitalocean-private-preflight
+        value: security/phase-7b1-valkey-vpc-security-repair
         scope: RUN_AND_BUILD_TIME
       - key: NODE_VERSION
         value: 24.21.0

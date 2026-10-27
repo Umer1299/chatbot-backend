@@ -1,6 +1,7 @@
 import fs from 'node:fs';
+import { isApprovedVpcId } from './stagingVpc.js';
 
-const DO_BRANCH = 'security/phase-7b1-digitalocean-private-preflight';
+const DO_BRANCH = 'security/phase-7b1-valkey-vpc-security-repair';
 const ATTESTATION = new URL('../../.staging-source-attestation.json', import.meta.url);
 const isSha = value => /^[a-f0-9]{40}$/.test(value || '');
 
@@ -18,6 +19,8 @@ export function assertApprovedStagingSource(env = process.env, attestationPath =
         !isSha(attestation.sourceCommit) || !isSha(attestation.approvedCommit) ||
         approved !== env.DO_DEPLOYED_COMMIT_SHA || approved !== attestation.sourceCommit ||
         approved !== attestation.approvedCommit ||
+        !isApprovedVpcId(env.STAGING_APPROVED_VPC_ID) ||
+        env.STAGING_APPROVED_VPC_ID !== attestation.approvedVpcId ||
         attestation.sourceBranch !== DO_BRANCH || env.STAGING_SOURCE_BRANCH !== DO_BRANCH ||
         env.RENDER_GIT_COMMIT || env.RENDER_GIT_BRANCH ||
         attestation.platform !== 'digitalocean')
